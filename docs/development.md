@@ -169,11 +169,11 @@ With `skip_intro=1` (the default) the loader passes `-nosplash`, then presses Cr
 title screen appears: the AvPlayer opening `title.mp4` marks it (`runtime_pad_title_movie`,
 `src/runtime_pad.c`). A start lands in the main menu.
 
-On the title screen, Back (Circle, B, Escape) asks "Exit Resogun?" (`title_back_exits=1`); F4 asks
-anywhere. The prompt is drawn by the overlay and takes the input while open; Yes pushes the same
-quit event as closing the window. Holding Select (SDL's Back button) for two seconds opens the
-Display Settings panel (F10 too): the button's own press is held back while it is down, and a release
-before two seconds sends it to the game as a short tap.
+On the title screen, Back (Circle, B, Escape) asks "Exit Resogun?" (`title_back_exits=1`); F4 and
+Select+Start ask anywhere. The prompt is drawn by the overlay and takes the input while open; Yes pushes the same
+quit event as closing the window. Holding Select (SDL's Back button) or Start for two seconds opens the
+Display Settings panel (F10 too): each button's own press is held back while it is down, and a release
+without a shortcut sends it to the game as a short tap (`menu_buttons`, `src/runtime_pad.c`).
 
 ## Save data, DLC and trophies
 

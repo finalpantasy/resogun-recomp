@@ -23,8 +23,8 @@ This requires you to provide a decrypted dump of your own copy of the game. Only
   16:10 and 4:3 more above and below, nothing stretched. The menus stay 16:9.
 - **DLC support** from your own DLC dumps.
 - **Built in skip intro:** (optionally) boots straight to the main menu, the start-up logos and the "Press X" screen are skipped.
-- **Display settings in the game:** press **F10**, or hold **Select** (View, Back, Share) for two
-  seconds, for window mode, resolution, VSync, frame rate and more.
+- **Display settings in the game:** press **F10**, or hold **Select** (View, Back, Share) or **Start**
+  (Menu, Options) for two seconds, for window mode, resolution, VSync, frame rate and more.
 - **Keyboard and any gamepad.** DualShock 4 and DualSense work as they are, Xbox-style pads by
   button position.
 - **Controller speaker:** with a DualShock 4 or DualSense on USB, the sounds the game plays on the
@@ -80,7 +80,7 @@ Resogun's add-ons (the extra ships and skins) carry no data of their own: the ga
 
 ## Settings
 
-`settings.ini` in your save folder holds every setting, each with a comment. The **Display Settings** panel (**F10**, or hold **Select** for two seconds) changes most of them while the game runs and saves them when it closes:
+`settings.ini` in your save folder holds every setting, each with a comment. The **Display Settings** panel (**F10**, or hold **Select** or **Start** for two seconds) changes most of them while the game runs and saves them when it closes:
 
 - aspect ratio (4:3, 16:9, 16:10, 21:9 or 32:9, at the next start), window mode, windowed resolution (the sizes of
   that ratio; applied a second after you stop changing it) and monitor. The fullscreen modes pick their
@@ -112,12 +112,12 @@ clicks the touchpad. The keyboard works alongside a gamepad:
 | Tab, P                    | Options                  |
 | T                         | touchpad click           |
 
-| Shortcut                                | What it does                                |
-| --------------------------------------- | ------------------------------------------- |
-| **F10**, or hold **Select** 2 s         | Display Settings                            |
-| **F9**                                  | sharpening on or off                        |
-| **F4**, or **Back** on the title screen | asks "Exit Resogun?" (No is selected first) |
-| **Alt+F4**                              | closes the game without confirmation        |
+| Shortcut                                                  | What it does                                |
+| --------------------------------------------------------- | ------------------------------------------- |
+| **F10**, or hold **Select** or **Start** 2 s              | Display Settings                            |
+| **F9**                                                    | sharpening on or off                        |
+| **F4**, **Select+Start**, or **Back** on the title screen | asks "Exit Resogun?" (No is selected first) |
+| **Alt+F4**                                                | closes the game without confirmation        |
 
 ## When something goes wrong
 

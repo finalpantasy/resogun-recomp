@@ -292,35 +292,54 @@ static void host_read(PadData *d, SDL_Gamepad *g, uint8_t connected_count) {
     if (k) sample_keyboard(d,k);
 }
 
-/* Host thread: Select (Back/View/Share) held for SELECT_HOLD_US opens the Display Settings panel.
- * What Select presses (the touchpad click) is held back while it is down and
- * played as a SELECT_TAP_US tap when it is let go sooner; after the panel opened it is dropped. */
-enum { SELECT_HOLD_US=2000000, SELECT_TAP_US=60000 };
-static void select_hold(PadData *d, SDL_Gamepad *g, uint64_t now) {
-    static uint64_t since, tap_until;
-    static bool opened; /* this hold opened the panel, or an overlay had the input: no tap */
+/* Host thread: Select (Back/View/Share) or Start (Options/Menu) held alone for MENU_HOLD_US opens the
+ * Display Settings panel (as F10); Select and Start down together ask whether to close the game (the
+ * exit prompt, as F4). What each button presses (Select the touchpad click, Start Options) is held
+ * back while it is down and played as a MENU_TAP_US tap when it is let go without a shortcut; after
+ * a shortcut, or while an overlay had the input, it is dropped. */
+enum { MENU_HOLD_US=2000000, MENU_TAP_US=60000 };
+typedef struct {
+    SDL_GamepadButton button;
+    const char *name;
+    uint64_t since, tap_until; /* down since (0: up); its tap plays until */
+    bool used;                 /* this press fired a shortcut or met an overlay: no tap */
+} MenuButton;
+/* One button's state for this sample: true while it is down, its press held back from `d`. */
+static bool menu_button(MenuButton *b, PadData *d, SDL_Gamepad *g, uint64_t now) {
     uint32_t bits=0;
     for (size_t i=0;i<pad_map.count;++i)
-        if (pad_map.entries[i].source==SDL_GAMEPAD_BUTTON_BACK) bits|=pad_map.entries[i].ps;
-    const bool down=g && SDL_GetGamepadButton(g,SDL_GAMEPAD_BUTTON_BACK);
-    if (down) {
-        if (!since) { since=now; opened=false; }
-        if (resogun_gpu_overlay_captures_input()) opened=true;
+        if (pad_map.entries[i].source==(int)b->button) bits|=pad_map.entries[i].ps;
+    if (g && SDL_GetGamepadButton(g,b->button)) {
+        if (!b->since) { b->since=now; b->used=false; }
+        if (resogun_gpu_overlay_captures_input()) b->used=true;
         d->buttons&=~bits;
-        if (!opened && now-since>=SELECT_HOLD_US) {
-            opened=true;
-            if (!resogun_display_settings_is_open()) {
-                resogun_display_settings_open();
-                puts("Runtime: Select held; Display Settings opened");
-            }
-        }
-        return;
+        return true;
     }
-    if (since) {
-        if (!opened) tap_until=now+SELECT_TAP_US;
-        since=0;
+    if (b->since) {
+        if (!b->used) b->tap_until=now+MENU_TAP_US;
+        b->since=0;
     }
-    if (now<tap_until) d->buttons|=bits;
+    if (now<b->tap_until) d->buttons|=bits;
+    return false;
+}
+static void menu_held(MenuButton *b, uint64_t now) {
+    if (b->used || now-b->since<MENU_HOLD_US) return;
+    b->used=true;
+    if (resogun_display_settings_is_open()) return;
+    resogun_display_settings_open();
+    printf("Runtime: %s held; Display Settings opened\n",b->name);
+}
+static void menu_buttons(PadData *d, SDL_Gamepad *g, uint64_t now) {
+    static MenuButton select={.button=SDL_GAMEPAD_BUTTON_BACK,.name="Select"};
+    static MenuButton start={.button=SDL_GAMEPAD_BUTTON_START,.name="Start"};
+    const bool select_down=menu_button(&select,d,g,now), start_down=menu_button(&start,d,g,now);
+    if (select_down && start_down) {
+        if (select.used && start.used) return;
+        select.used=start.used=true;
+        resogun_exit_prompt_open();
+        puts("Runtime: Select+Start; asking whether to close the game");
+    } else if (select_down) menu_held(&select,now);
+    else if (start_down) menu_held(&start,now);
 }
 
 /* Game's pad read (sample): settings.ini title_back_exits. Back (Circle: B, Escape, Backspace, or
@@ -358,7 +377,7 @@ static void *host_thread(void *arg) {
         speaker_update(g,&speaker_pad);
         PadData d;
         host_read(&d,g,connected_count);
-        select_hold(&d,g,start);
+        menu_buttons(&d,g,start);
         pthread_mutex_lock(&host_lock);
         host_sample=d;
         const uint8_t large=rumble.large, small=rumble.small;
