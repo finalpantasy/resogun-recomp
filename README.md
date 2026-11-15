@@ -27,6 +27,8 @@ This requires you to provide a decrypted dump of your own copy of the game. Only
   seconds, for window mode, resolution, VSync, frame rate and more.
 - **Keyboard and any gamepad.** DualShock 4 and DualSense work as they are, Xbox-style pads by
   button position.
+- **Controller speaker:** with a DualShock 4 or DualSense on USB, the sounds the game plays on the
+  controller come out of its speaker, as on a PS4 or PS5.
 - **Easy setup:** point the installer at your dump, and it can add a desktop shortcut (on Linux, an application menu entry).
 - **Works with [RecompLauncher](https://recomplauncher.com):** it installs and updates the game from these releases, sets it up from your dump and shows the settings on the game's page.
 

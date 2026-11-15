@@ -78,6 +78,9 @@ static PadData host_sample;           /* under host_lock */
 static char gamepad_name[64]="none";  /* under host_lock */
 static struct { uint8_t large, small; uint32_t serial; } rumble; /* under host_lock */
 static int reconnect_wanted;          /* atomic: the pad file's reconnect token */
+static int speaker_kind;              /* RUNTIME_PAD_SPEAKER_* of the open gamepad (host thread) */
+static int speaker_wanted;            /* runtime_pad_speaker_route */
+static int speaker_routed;            /* what the open DualSense was last told; -1: nothing yet */
 
 static uint64_t now_us(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC,&t); return (uint64_t)t.tv_sec*1000000u+(uint64_t)t.tv_nsec/1000u; }
 /* Pad calls run on the game's own threads, so a slow one is a late frame: calls over 2 ms are
@@ -156,6 +159,47 @@ static SDL_Gamepad *host_gamepad(SDL_Gamepad *g, uint64_t now, uint64_t *next_sc
     SDL_free(ids);
     return g;
 }
+/* Which controller speaker a gamepad has: a DualShock 4 or DualSense on USB shows up as a USB audio
+ * device too (over Bluetooth its audio travels in HID reports, which is not done here). */
+static int speaker_kind_of(SDL_Gamepad *g) {
+    if (!g || SDL_GetGamepadConnectionState(g)!=SDL_JOYSTICK_CONNECTION_WIRED) return RUNTIME_PAD_SPEAKER_NONE;
+    switch (SDL_GetGamepadType(g)) {
+    case SDL_GAMEPAD_TYPE_PS4: return RUNTIME_PAD_SPEAKER_DS4;
+    case SDL_GAMEPAD_TYPE_PS5: return RUNTIME_PAD_SPEAKER_DUALSENSE;
+    default: return RUNTIME_PAD_SPEAKER_NONE;
+    }
+}
+/* A DualSense's USB audio output plays on its headphone jack until an output report (SDL's
+ * DS5EffectsState_t, report 0x02 after the id) selects another path: audio control byte 7 bits 4-5,
+ * 3 = the speaker takes the right channel and the jack nothing, 0 = the jack takes both channels.
+ * The speaker volume (byte 5) is set with it: the PS5 keeps it within 0x3d..0x64. */
+static int dualsense_speaker(SDL_Gamepad *g, int on) {
+    uint8_t effect[47]={0};
+    effect[0]=on ? 0x80|0x20 : 0x80; /* valid flags: audio control, speaker volume */
+    effect[5]=0x64;
+    effect[7]=on ? 3<<4 : 0;
+    return SDL_SendGamepadEffect(g,effect,sizeof(effect));
+}
+/* Host thread: keeps the open gamepad's speaker kind and a DualSense's audio path current. */
+static void speaker_update(SDL_Gamepad *g, SDL_Gamepad **last) {
+    if (g!=*last) {
+        *last=g;
+        __atomic_store_n(&speaker_routed,-1,__ATOMIC_RELEASE);
+        const int kind=speaker_kind_of(g);
+        __atomic_store_n(&speaker_kind,kind,__ATOMIC_RELEASE);
+        if (kind) printf("Runtime: controller speaker available (%s on USB)\n",kind==RUNTIME_PAD_SPEAKER_DS4 ? "DualShock 4" : "DualSense");
+    }
+    const int want=__atomic_load_n(&speaker_wanted,__ATOMIC_ACQUIRE);
+    if (!g || __atomic_load_n(&speaker_kind,__ATOMIC_ACQUIRE)!=RUNTIME_PAD_SPEAKER_DUALSENSE) return;
+    const int routed=__atomic_load_n(&speaker_routed,__ATOMIC_ACQUIRE);
+    if (want==routed || (!want && routed<0)) return; /* a pad never moved keeps its jack untouched */
+    if (!dualsense_speaker(g,want)) printf("Runtime: DualSense audio path not set (%s)\n",SDL_GetError());
+    else printf("Runtime: DualSense audio sent to its %s\n",want ? "speaker" : "headphone jack");
+    __atomic_store_n(&speaker_routed,want,__ATOMIC_RELEASE); /* tried once per change, not every ms */
+}
+int runtime_pad_speaker(void) { return __atomic_load_n(&speaker_kind,__ATOMIC_ACQUIRE); }
+void runtime_pad_speaker_route(int on) { __atomic_store_n(&speaker_wanted,on ? 1 : 0,__ATOMIC_RELEASE); }
+
 /* PS4 button names for scripted input (RESOGUN_PAD_FILE). */
 static const struct { const char *name; uint32_t ps; } ps_names[]={
     {"cross",BTN_CROSS}, {"circle",BTN_CIRCLE}, {"square",BTN_SQUARE}, {"triangle",BTN_TRIANGLE},
@@ -303,7 +347,7 @@ static void title_back(PadData *d) {
  * rumble is sent for 1000 ms. */
 static void *host_thread(void *arg) {
     (void)arg;
-    SDL_Gamepad *g=NULL;
+    SDL_Gamepad *g=NULL, *speaker_pad=NULL;
     uint64_t next_scan=0, rumble_sent=0;
     uint32_t rumble_serial=0;
     uint8_t connected_count=0;
@@ -311,6 +355,7 @@ static void *host_thread(void *arg) {
         const uint64_t start=now_us();
         if (!sdl_ready) sdl_ready = SDL_WasInit(SDL_INIT_GAMEPAD) ? 1 : SDL_InitSubSystem(SDL_INIT_GAMEPAD) ? 1 : -1;
         if (sdl_ready>0) g=host_gamepad(g,start,&next_scan,&connected_count);
+        speaker_update(g,&speaker_pad);
         PadData d;
         host_read(&d,g,connected_count);
         select_hold(&d,g,start);
@@ -577,6 +622,12 @@ static const RuntimeExport exports[]={
 };
 uintptr_t runtime_pad_resolve(const char *name) { return RUNTIME_LOOKUP(exports,name); }
 void runtime_pad_report(void) {
+    /* On the way out: a DualSense routed to its speaker gets its headphone jack back (the host
+       thread sends it; up to 50 ms). */
+    if (__atomic_load_n(&speaker_routed,__ATOMIC_ACQUIRE)==1) {
+        runtime_pad_speaker_route(0);
+        for (int i=0;i<50 && __atomic_load_n(&speaker_routed,__ATOMIC_ACQUIRE)==1;++i) SDL_Delay(1);
+    }
     char name[sizeof(gamepad_name)];
     pthread_mutex_lock(&host_lock); memcpy(name,gamepad_name,sizeof(name)); pthread_mutex_unlock(&host_lock);
     printf("Runtime: pad reads=%zu, vibrations=%zu, gamepad=%s; over 2 ms: reads %zu (max %.1f ms), "

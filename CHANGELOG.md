@@ -5,6 +5,10 @@ Each release's section becomes the text of its GitHub release (`tools/release_no
 without one does not publish. Keep each entry on one line: GitHub shows a line break in release
 text as a break.
 
+## v0.11
+
+- A DualShock 4 or DualSense connected by USB now plays the game's controller sounds on its own speaker, like on a PS4 or PS5.
+
 ## v0.10
 
 - Fix compiled shaders not being reused on Linux (issue #8)
