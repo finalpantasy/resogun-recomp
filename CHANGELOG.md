@@ -9,6 +9,7 @@ text as a break.
 
 - A DualShock 4 or DualSense connected by USB now plays the game's controller sounds on its own speaker, like on a PS4 or PS5.
 - Select+Start on a controller now asks to close the game, like F4, and holding Start opens the display settings, like holding Select.
+- Borderless mode on Windows is now a real borderless window: Alt+Tab no longer makes the screen flash as in fullscreen.
   - Only tested on a Dualsense. I don't have a DS4 atm, but in theory it works the same way. If it doesn't, please let me know.
 
 ## v0.10
