@@ -117,8 +117,14 @@ whole queue: about 160 a second, 4 ms of GPU idle per frame on a Radeon 890M (73
 1080p). The writes almost never touch a byte the GPU wrote, so `BufferCache::TryMergeWrite` lets
 them go ahead without downloading and keeps a copy of the page's GPU-written bytes; the page's next
 upload (`EmitUploadRange`) leaves out those that the guest has not changed since. Relaxed readback
-mode only (the default), where pages are never read-protected. Toggle `WriteMerge` (bit 50) turns
-it off; `RESOGUN_FRAME_STATS=1` prints the merged writes per second, `RESOGUN_PERF_DIAG=1` the
+mode only (the default), where pages are never read-protected.
+
+Those downloads are also how the GPU's results in the 512 KiB around a fault reach the guest, and
+the game reads some of them: with every fault merged they stayed stale, and the player ship's death
+explosion (a screen-filling white flash, then orange beams) drew as a small fireball. So a window
+merges only within `MergeStaleFrames` (4) GPU frames of its last download: about 63 of 97 faults a
+second still merge at 60 FPS (16 frames was too stale). Toggle `WriteMerge` (bit 50) turns
+merging off; `RESOGUN_FRAME_STATS=1` prints the merged writes per second, `RESOGUN_PERF_DIAG=1` the
 downloads that remain with the guest instruction and the GPU writer behind each.
 
 ### Render resolution

@@ -9,6 +9,7 @@
 #include <deque>
 #include <map>
 #include <mutex>
+#include <unordered_map>
 #include <vector>
 #include <boost/container/small_vector.hpp>
 
@@ -150,6 +151,8 @@ private:
     /// it does not touch: saves those bytes as the guest has them and lets the write go ahead
     /// without downloading (true), so the GPU's copy stays the newer one. false: download.
     bool TryMergeWrite(VAddr device_addr, u64 size);
+    /// resogun: GPU frames a 512 KiB window merges write faults after its last download.
+    static constexpr u64 MergeStaleFrames = 4;
 
     /// resogun: passes the CPU-modified range [addr, +size) to emit(addr, size) for upload,
     /// minus the GPU-written bytes TryMergeWrite saved that the guest has not changed since.
@@ -194,6 +197,9 @@ private:
     std::mutex merged_mutex;
     std::map<VAddr, std::vector<MergedRange>> merged_pages;
     std::atomic<u64> merged_count{0};
+    /// resogun: GPU frame of the last write-fault download of each 512 KiB download window
+    /// (address >> 19), under merged_mutex: TryMergeWrite merges only while it is recent.
+    std::unordered_map<VAddr, u64> window_downloads;
 
     std::unique_ptr<FaultManager> fault_manager;
     std::unique_ptr<Buffer> bda_pagetable_buffer;

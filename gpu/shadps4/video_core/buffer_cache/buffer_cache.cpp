@@ -162,6 +162,12 @@ static std::atomic<u64> write_downloads{0}, write_downloads_inside{0};
 // has not changed since the fault. Only in Relaxed readback mode: pages there are never
 // read-protected, so the fault can read them, and guest reads of GPU-written bytes see the
 // guest's copy either way.
+// Those write-fault downloads are also what brings the GPU's results in the 512 KiB around them
+// to the guest, and the game reads some: merging every one left them stale for good, and the
+// player ship's death explosion (the white flash and its beams) never drew. A window is merged
+// only within MergeStaleFrames GPU frames of its last download, so the guest's copy of the
+// GPU's bytes is at most that old: about two thirds of the faults still merge (16 frames was
+// already too stale for the explosion).
 bool BufferCache::TryMergeWrite(VAddr device_addr, u64 size) {
     if (ResogunToggle::Disabled(ResogunToggle::WriteMerge) ||
         EmulatorSettings.GetReadbacksMode() != GpuReadbacksMode::Relaxed) {
@@ -171,6 +177,14 @@ bool BufferCache::TryMergeWrite(VAddr device_addr, u64 size) {
     if (device_addr + size > page + TRACKER_BYTES_PER_PAGE ||
         gpu_modified_ranges.Intersects(device_addr, size)) {
         return false;
+    }
+    {
+        const u64 frame = ResogunStats::gpu_frames.load(std::memory_order_relaxed);
+        std::scoped_lock lock{merged_mutex};
+        const auto it = window_downloads.find(device_addr >> 19);
+        if (it == window_downloads.end() || frame - it->second >= MergeStaleFrames) {
+            return false;
+        }
     }
     std::vector<MergedRange> ranges;
     gpu_modified_ranges.ForEachInRange(page, TRACKER_BYTES_PER_PAGE, [&](VAddr start, VAddr end) {
@@ -271,6 +285,9 @@ void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool as
         DownloadMemory(arena, window_start, window_end - window_start);
         if (is_write) {
             memory_tracker->MarkRegionAsCpuModified(device_addr, size);
+            std::scoped_lock lock{merged_mutex};
+            window_downloads[device_addr >> 19] =
+                ResogunStats::gpu_frames.load(std::memory_order_relaxed);
         }
     };
     if (assume_locks) {
