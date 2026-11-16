@@ -204,9 +204,10 @@ else()
     set_target_properties(resogun PROPERTIES POSITION_INDEPENDENT_CODE OFF)
     target_link_options(resogun PRIVATE -no-pie)
     target_link_libraries(resogun PRIVATE ${CMAKE_DL_LIBS} m)
-    # resogun-setup (setup/): the same install, asking in a terminal or with the desktop's dialogs (SDL).
+    # resogun-setup (setup/): the same install, asking in a terminal or with the desktop's dialogs (SDL);
+    # --update draws its progress in an SDL window from the install thread's state.
     add_executable(resogun-setup ../setup/main_linux.cpp ../setup/setup.cpp)
-    target_link_libraries(resogun-setup PRIVATE PkgConfig::SDL3)
+    target_link_libraries(resogun-setup PRIVATE PkgConfig::SDL3 -pthread)
 endif()
 # resogun: runtime and renderer unit tests (bash build.sh --test builds and runs every *-test).
 add_executable(audio-test EXCLUDE_FROM_ALL ../tests/test_audio.c ${RESOGUN_COMPAT})

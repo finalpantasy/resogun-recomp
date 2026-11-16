@@ -5,6 +5,12 @@ Each release's section becomes the text of its GitHub release (`tools/release_no
 without one does not publish. Keep each entry on one line: GitHub shows a line break in release
 text as a break.
 
+## v0.12
+
+- No need to run the setup again after updating: the game prepares itself on its first start
+- Starting the game before it's set up (or after its folders moved) opens the setup
+- To make running the game more consistent, the tested version of the game (in README) is now required, and the setup refuses game files other than it
+
 ## v0.11
 
 - A DualShock 4 or DualSense connected by USB now plays the game's controller sounds on its own speaker, like on a PS4 or PS5.

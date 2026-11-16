@@ -57,9 +57,12 @@ python run.py --timeout 20
   next to the exe (`out/shaders`; an installed copy's is next to `resogun-setup`), and
   `RESOGUN_SHADER_DIR` moves it. On the first start with an empty one, the cache earlier releases
   kept in `<GPU folder>/cache/CUSA00038` is moved in (on Linux also shadPS4's folder, which was used
-  while `~/.cache/resogun` did not exist). The GPU library's logs and screenshots stay in one folder
-  per PC, `%LOCALAPPDATA%\Resogun` (`~/.cache/resogun`), shared with installed copies
-  (`RESOGUN_GPU_USER_DIR` moves it).
+  while `~/.cache/resogun` did not exist). The GPU library's logs, screenshots and frame captures go
+  to `gpu/` next to the exe (`out/gpu`; an installed copy's is next to `resogun-setup`, or paths.ini's
+  `cache=`), and `RESOGUN_GPU_USER_DIR` moves it. Releases before v0.12 kept it in one folder per PC,
+  `%LOCALAPPDATA%\Resogun` (`~/.cache/resogun`): an installed copy moves its screenshots and caches
+  into `gpu/` on the first start, deletes its logs and removes it (`RESOGUN_GPU_ADOPT_SHARED`, set by
+  `src/launcher.c`; `run.py` never does). Nothing is kept outside the game's folder.
 - Every `settings.ini` key has an environment variable that overrides it, named in
   `settings.example.ini`. A variable left set in a shell keeps overriding the panel:
   `RESOGUN_VBLANK_HZ` prints a warning at start for that reason.
@@ -197,8 +200,16 @@ save folders and, when one is chosen, `dlc=`. The command line does the same as 
 `resogun-setup.exe --help`.
 
 Started with no arguments, `resogun.exe` reads `paths.ini` and builds the command line `run.py`
-would pass (`src/launcher.c`); without a console its output goes to `log/resogun.log` in the save
-folder. It also watches the game: it starts the same command line as a child (on Windows in a job
+would pass (`src/launcher.c`). `paths.ini` lives only next to the exe: a per-user copy an older
+setup wrote (`%APPDATA%\Resogun`, `~/.config/resogun`) is moved there when it has none, and deleted.
+Without a `paths.ini`, or when a folder it names is gone, it opens the setup instead and waits for it. When `game/` was not prepared for this
+`release.txt`, or from the dump's `eboot.bin` as it is now (`game/source.txt`: its size and
+modification time), it runs `resogun-setup --update` first, which prepares the game again from the
+folders already set in a small progress window and exits 0 when done; the game starts only then.
+Setup accepts only the verified build (`scripts/prepare.py` `VERIFIED_BUILDS`, the eboot's SHA-256,
+and `VERIFIED_TITLE`, `param.sfo`'s CUSA00038 / 01.10): any other dump is refused with a message and
+nothing is prepared (`run.py --any-build` still prepares one for development). Without a console the
+game's output goes to `log/resogun.log` in the save folder. The launcher also watches the game: it starts the same command line as a child (on Windows in a job
 that ends it if the launcher is killed, on Linux by `fork` with `PR_SET_PDEATHSIG`), and when the
 game ends with an exit code other than 0 it notes the code in the log, copies the log to
 `log/crash-<date>-<time>.log` and says so in a message box. `RESOGUN_CRASH_WATCH=0` turns that off.

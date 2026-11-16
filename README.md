@@ -12,7 +12,7 @@ The game's own x86-64 code runs directly on Windows and Linux: the PS4 system li
 
 🚨 **No game files are included** 🚨
 
-This requires you to provide a decrypted dump of your own copy of the game. Only tested with **CUSA00038** with **update 1.10**.
+This requires you to provide a decrypted dump of your own copy of the game: exactly **CUSA00038** with **update 1.10**, unmodified. Setup checks the files and refuses any other version or a patched dump (such as a DLC unlocker; every add-on already shows as owned without one).
 
 ## Features
 
@@ -65,7 +65,7 @@ On a Steam Deck, do this in Desktop Mode; _Add a Non-Steam Game_ in Steam then l
 
 ### Updating
 
-Unzip the new release over the old folder and run the setup once more (the game asks you to). Your folders, saves and settings are kept. Setup also remembers the folders in `%APPDATA%\Resogun\paths.ini` (Linux: `~/.config/resogun/paths.ini`), so a release unzipped somewhere new only needs **Install**.
+Unzip the new release over the old folder and start the game as usual: the first start of a new release prepares the game again from your dump (a few seconds, with a progress window), then plays. Your folders, saves and settings are kept. Nothing is stored outside the game's folder: the chosen folders are in `paths.ini` next to `resogun.exe`. (Older versions also kept a copy in `%APPDATA%\Resogun`, Linux `~/.config/resogun`; the game moves it into its folder and removes it.) The setup window only opens by itself when no folders are set yet or one of them is gone.
 
 ### DLC
 
