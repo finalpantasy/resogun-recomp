@@ -10,6 +10,7 @@ text as a break.
 - No need to run the setup again after updating: the game prepares itself on its first start
 - Starting the game before it's set up (or after its folders moved) opens the setup
 - To make running the game more consistent, the tested version of the game (in README) is now required, and the setup refuses game files other than it
+- Local co-op: added support for a second connected controller
 
 ## v0.11
 

@@ -130,6 +130,8 @@ int runtime_pad_speaker(void);
 /* 1 while a pad speaker port plays on the controller's audio device: a DualSense sends that audio to
  * its speaker instead of its headphone jack. 0 puts the jack back. */
 void runtime_pad_speaker_route(int on);
+/* 1 once a second gamepad has connected (runtime_pad.c): UserService then logs user 2 in. */
+int runtime_pad_second_user(void);
 uintptr_t runtime_file_resolve(const char *name);
 uintptr_t runtime_services_resolve(const char *name);
 /* Offline networking (POSIX sockets, libSceHttp extras), PSN libraries and their dialogs, and

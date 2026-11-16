@@ -225,8 +225,13 @@ The pad and keyboard layouts are fixed tables in `src/runtime_pad.c` (README "Co
 by button position, keys by physical position. `resogun --gamepad` prints the connected pad and its
 labels.
 
+Two users: the first gamepad opened is user 1's pad (handle 1, with the keyboard), the second user
+2's (handle 2). UserService logs user 2 in (a LOGIN event, then in the login list) once a second
+gamepad has connected; the game opens user 2's pad itself and its local co-op join screen takes
+Cross from it.
+
 Scripted input for automated runs: `RESOGUN_PAD_FILE` (held buttons and stick values, re-read when
-the file changes), `RESOGUN_PAD_RECORD` (F9 records the pad) and `RESOGUN_PAD_REPLAY`.
+the file changes; `p2:cross`, `p2:lx=0` press for user 2), `RESOGUN_PAD_RECORD` (F9 records the pad) and `RESOGUN_PAD_REPLAY`.
 
 ## Layout
 

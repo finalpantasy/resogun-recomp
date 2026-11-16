@@ -67,9 +67,32 @@ static void test_pad_buttons(void) {
     assert(sources_of(&pad_map,BTN_CROSS)==1 && sources_of(&key_map,BTN_CROSS)==3);
 }
 
+/* Users 1 and 2 each open one pad, whose handle is the user id; user 2's reads disconnected
+ * until a second gamepad connects, and the keyboard stays with user 1. */
+static void test_two_users(void) {
+    assert(pad_open(1,0,0,NULL)==ERR_NOT_INITIALIZED);
+    assert(pad_init()==0);
+    assert(pad_open(3,0,0,NULL)==ERR_INVALID_ARG);
+    opened[0]=opened[1]=1; /* as pad_open does, without its host thread */
+    assert(slot_of(1)==0 && slot_of(2)==1 && slot_of(3)==-1 && slot_of(0)==-1);
+    PadData d;
+    assert(pad_read_state(2,&d)==0 && !d.connected);
+    assert(pad_read_state(1,&d)==0 && d.connected);
+    ControllerInfo info;
+    assert(pad_info(2,&info)==0 && !info.connected && pad_info(1,&info)==0 && info.connected);
+    host_read(&d,1,NULL,1);
+    assert(!d.connected);
+    const uint8_t rumble2[2]={200,10};
+    assert(pad_vibration(2,rumble2)==0 && rumble[1].large==200 && rumble[0].large==0);
+    const uint8_t red[3]={255,0,0};
+    assert(pad_light_bar(2,red)==0 && light[1].r==255 && light[0].r==0);
+    assert(pad_close(2)==0 && pad_read_state(2,&d)==ERR_INVALID_HANDLE && pad_close(2)==ERR_INVALID_HANDLE);
+}
+
 int main(void) {
     test_default_keyboard();
     test_pad_buttons();
+    test_two_users();
     puts("pad tests passed");
     return 0;
 }

@@ -27,6 +27,8 @@ This requires you to provide a decrypted dump of your own copy of the game: exac
   (Menu, Options) for two seconds, for window mode, resolution, VSync, frame rate and more.
 - **Keyboard and any gamepad.** DualShock 4 and DualSense work as they are, Xbox-style pads by
   button position.
+- **Local co-op:** connect a second gamepad and pick Multiplayer > Local Co-op; player 2 joins with
+  Cross (A).
 - **Controller speaker:** with a DualShock 4 or DualSense on USB, the sounds the game plays on the
   controller come out of its speaker, as on a PS4 or PS5.
 - **Easy setup:** point the installer at your dump, and it can add a desktop shortcut (on Linux, an application menu entry).
@@ -95,9 +97,15 @@ Resogun's add-ons (the extra ships and skins) carry no data of their own: the ga
 
 ## Controls
 
-The game sees one DualShock 4. Any gamepad works, mapped by button position: on an Xbox pad A B X Y
-are Cross, Circle, Square, Triangle, LB/RB are L1/R1, LT/RT are L2/R2, Menu is Options and View
-clicks the touchpad. The keyboard works alongside a gamepad:
+The game sees up to two DualShock 4s. Any gamepad works, mapped by button position: on an Xbox pad
+A B X Y are Cross, Circle, Square, Triangle, LB/RB are L1/R1, LT/RT are L2/R2, Menu is Options and
+View clicks the touchpad.
+
+For local co-op, the first gamepad connected is player 1 and the second is player 2 (a second
+player logged in on the PS4). Choose Multiplayer > Local Co-op and press Cross (A) on the second pad
+when the game asks. A pad that disconnects gets its player back when it reconnects.
+
+The keyboard always plays as player 1, alongside player 1's gamepad:
 
 | Keys                      | PS4                      |
 | ------------------------- | ------------------------ |
