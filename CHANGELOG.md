@@ -8,6 +8,7 @@ text as a break.
 ## v0.14
 
 - Game files other than the tested version are allowed again: setup shows a one-time warning that they are untested and might cause bugs
+- More fixes for missing effects
 
 ## v0.13
 
