@@ -112,20 +112,17 @@ G-Sync, following the display's own timing settled at 97 FPS.
 In combat the game's CPU writes records (eboot 0x1c90a7, a copy loop at 0x6c4bf8, CRT copies) into
 pages it shares with small GPU-written buffers: the 5 KiB destination of a compute copy (shader
 0x069f1335) and a 64 KiB storage buffer (0xf003dbab). Page tracking is per 4 KiB page, so each
-such write fault used to download the GPU's bytes first, a `scheduler.Finish()` that waits for the
-whole queue: about 160 a second, 4 ms of GPU idle per frame on a Radeon 890M (73 to 79 FPS at
-1080p). The writes almost never touch a byte the GPU wrote, so `BufferCache::TryMergeWrite` lets
-them go ahead without downloading and keeps a copy of the page's GPU-written bytes; the page's next
-upload (`EmitUploadRange`) leaves out those that the guest has not changed since. Relaxed readback
-mode only (the default), where pages are never read-protected.
+such write fault downloads the GPU's bytes in the 512 KiB around it first, a `scheduler.Finish()`
+that waits for the whole queue: about 100 to 160 a second, 4 ms of GPU idle per frame on a Radeon
+890M (73 to 79 FPS at 1080p). `RESOGUN_PERF_DIAG=1` lists these downloads with the guest
+instruction and the GPU writer behind each.
 
-Those downloads are also how the GPU's results in the 512 KiB around a fault reach the guest, and
-the game reads some of them: with every fault merged they stayed stale, and the player ship's death
-explosion (a screen-filling white flash, then orange beams) drew as a small fireball. So a window
-merges only within `MergeStaleFrames` (4) GPU frames of its last download: about 63 of 97 faults a
-second still merge at 60 FPS (16 frames was too stale). Toggle `WriteMerge` (bit 50) turns
-merging off; `RESOGUN_FRAME_STATS=1` prints the merged writes per second, `RESOGUN_PERF_DIAG=1` the
-downloads that remain with the guest instruction and the GPU writer behind each.
+Letting those writes go ahead without the download (keeping the page's GPU-written bytes out of
+its next upload) removed the wait, but the downloads are also how the GPU's results reach the guest
+in Relaxed readback mode, and the game reads the compute copy's: the player ship's death explosion
+(a screen-filling flash, then orange beams) drew as a small blue fireball. Merging only within 4
+GPU frames of the window's last download still lost the beams in 2 of 10 deaths, and merging only
+the storage buffer's pages saved 10 faults a second, so the downloads stay.
 
 ### Render resolution
 
