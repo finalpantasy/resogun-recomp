@@ -12,7 +12,7 @@ The game's own x86-64 code runs directly on Windows and Linux: the PS4 system li
 
 🚨 **No game files are included** 🚨
 
-This requires you to provide a decrypted dump of your own copy of the game: exactly **CUSA00038** with **update 1.10**, unmodified. Setup checks the files and refuses any other version or a patched dump (such as a DLC unlocker; every add-on already shows as owned without one).
+This requires you to provide a decrypted dump of your own copy of the game: tested with **CUSA00038** with **update 1.10**, unmodified. Setup checks the files and, for any other version or a patched dump (such as a DLC unlocker; every add-on already shows as owned without one), warns once that they are untested and might cause bugs before going on.
 
 ## Features
 

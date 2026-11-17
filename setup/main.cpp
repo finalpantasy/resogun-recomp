@@ -446,6 +446,12 @@ void browse(HWND edit, const wchar_t* title) {
     dlg->Release();
 }
 
+// Game files that are not the verified build: a warning box over `wnd`, from the install's thread
+// (MessageBoxW runs its own message loop while the window waits). No is the default.
+bool confirm_untested(HWND wnd, const std::wstring& warning) {
+    return MessageBoxW(wnd, warning.c_str(), kTitle, MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) == IDYES;
+}
+
 void start_install() {
     if (ui.busy || !IsWindowEnabled(ui.install))
         return;
@@ -475,6 +481,7 @@ void start_install() {
         auto log = [wnd](const std::wstring& line) {
             PostMessageW(wnd, kMsgLog, 0, reinterpret_cast<LPARAM>(new std::wstring(line)));
         };
+        opt.confirm = [wnd](const std::wstring& warning) { return confirm_untested(wnd, warning); };
         try {
             fs::path exe = setup::install(opt, log);
             PostMessageW(wnd, kMsgDone, 1, reinterpret_cast<LPARAM>(new std::wstring(exe.wstring())));
@@ -702,7 +709,7 @@ int run_window(HINSTANCE inst) {
 // resogun.exe found game/ not prepared for this release or from the dump's eboot.bin as it is now:
 // prepare it again from paths.ini's folders, in a small window of the same look (the title, the
 // step, a cyan bar). install() checks the files first; when they aren't the unmodified CUSA00038
-// update 1.10, a message box says so and the game does not start.
+// update 1.10 and the player has not gone on with this dump before, a warning asks whether to.
 
 enum : UINT {
     kMsgProgress = WM_APP + 3, // wParam: done in thousandths; lParam: std::wstring* step
@@ -833,6 +840,7 @@ int run_update(HINSTANCE inst) {
             PostMessageW(wnd, kMsgProgress, static_cast<WPARAM>(std::clamp(done, 0.0, 1.0) * 1000),
                          reinterpret_cast<LPARAM>(new std::wstring(step)));
         };
+        opt.confirm = [wnd](const std::wstring& warning) { return confirm_untested(wnd, warning); };
         try {
             fs::path exe = setup::install(opt, [](const std::wstring&) {});
             PostMessageW(wnd, kMsgDone, 1, reinterpret_cast<LPARAM>(new std::wstring(exe.wstring())));

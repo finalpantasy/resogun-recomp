@@ -12,7 +12,8 @@
  * When neither names the folders, or a folder it names is gone, the setup is opened (and waited for)
  * instead of the game. When game/ was not prepared for this release (release.txt) or from the dump's
  * eboot.bin as it is now (game/source.txt), `resogun-setup --update` prepares it again first; the
- * game starts only when that succeeded (it refuses anything but CUSA00038 update 1.10).
+ * game starts only when that succeeded (for a dump other than CUSA00038 update 1.10 it asks once
+ * whether to go on with untested files).
  * Narrow strings are UTF-8 (Windows: the manifest's activeCodePage). */
 #include "launcher.h"
 

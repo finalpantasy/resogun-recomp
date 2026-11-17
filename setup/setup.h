@@ -28,6 +28,10 @@ struct Options {
     std::filesystem::path dlc; // optional: one more folder of DLC (e.g. shadPS4's addcont); empty for none
     // Optional: called as each step starts, with how far along the install is (0 to 1) and the step.
     std::function<void(double, const std::wstring&)> progress;
+    // Optional: asked, with a warning for the player, whether to go on with game files that are not the
+    // verified build (once per dump: game/untested.txt remembers the answer); true goes on. Unset: the
+    // warning is logged and the install goes on.
+    std::function<bool(const std::wstring&)> confirm;
 };
 
 // The folders a release folder's paths.ini names.
@@ -92,8 +96,8 @@ bool has_saves(const std::filesystem::path& save);
 bool skip_intro(const std::filesystem::path& root, const std::filesystem::path& save);
 bool same_path(const std::filesystem::path& a, const std::filesystem::path& b);
 
-// Sets up opt.root, reporting each step through `log`. Throws Error, also for a dump that is not the
-// unmodified CUSA00038 update 1.10. Returns the game exe's path.
+// Sets up opt.root, reporting each step through `log`. Throws Error, also when opt.confirm turns down a
+// dump that is not the unmodified CUSA00038 update 1.10. Returns the game exe's path.
 std::filesystem::path install(const Options& opt, const Log& log);
 
 // Writes a shortcut at `lnk` that starts `target` in its own folder. Throws Error.

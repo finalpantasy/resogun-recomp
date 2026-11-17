@@ -5,6 +5,10 @@ Each release's section becomes the text of its GitHub release (`tools/release_no
 without one does not publish. Keep each entry on one line: GitHub shows a line break in release
 text as a break.
 
+## v0.14
+
+- Game files other than the tested version are allowed again: setup shows a one-time warning that they are untested and might cause bugs
+
 ## v0.13
 
 - Fixed missing effects, like the big flash and light beams when your ship explodes after losing a life

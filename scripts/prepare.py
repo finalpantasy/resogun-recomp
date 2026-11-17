@@ -130,13 +130,13 @@ def read_sfo(path):
 
 
 # eboot.bin builds verified to play through (SHA-256 of the whole file, as dumped). Any other stops
-# prepare before anything is built and the setup refuses the dump: a different build moves the code the
-# runner patches, and a modified one may not run. --any-build prepares it anyway (development only:
-# the setup never passes it).
+# prepare before anything is built, so the setup can warn first: a different build moves the code the
+# runner patches, and a modified one may not run. --any-build prepares it anyway (the setup passes it
+# once the player chooses to go on).
 VERIFIED_BUILDS = {
     'c8de3071d96b57a4ccc9b94abaadbe68a133933b34f7396d4a00fb1c6c5a5612': '01.10',
 }
-EXIT_UNVERIFIED = 3  # eboot.bin or param.sfo is not the verified build: the setup refuses the dump
+EXIT_UNVERIFIED = 3  # eboot.bin or param.sfo is not the verified build: the setup warns, then may pass --any-build
 
 
 class UnverifiedBuild(Exception):

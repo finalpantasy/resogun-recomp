@@ -286,6 +286,11 @@ void play(Asker& ask, const fs::path& root) {
     ask.tell(L"Cannot start " + setup::text(exe), true);
 }
 
+// Game files that are not the verified build: Cancel (the default) or Continue.
+bool confirm_untested(Asker& ask, const std::wstring& warning) {
+    return ask.choose(warning, {L"Cancel", L"Continue"}) == 1;
+}
+
 int run_asking(Asker& ask) {
     fs::path root = setup::exe_folder();
     std::optional<setup::Paths> paths;
@@ -354,6 +359,7 @@ int run_asking(Asker& ask) {
     opt.save = save;
     opt.skip_intro = (skip == 0) == skipping;
     opt.dlc = dlc;
+    opt.confirm = [&](const std::wstring& warning) { return confirm_untested(ask, warning); };
     try {
         if (auto old = saves_to_move(opt.root, opt.save)) {
             int answer = ask.choose(L"Copy your saves to the new save folder?\n\nFrom: " + setup::text(*old) +
@@ -394,6 +400,11 @@ struct UpdateState {
     std::atomic<bool> finished{false};
     bool ok = false;
     std::wstring error;
+    // The install's question about untested game files, answered by the window's thread (SDL's
+    // message boxes belong there): set `question`, then `asking`; `answer` is valid once `answered`.
+    std::wstring question;
+    std::atomic<bool> asking{false}, answered{false};
+    bool answer = false;
 };
 
 void draw_update(SDL_Renderer* r, UpdateState& state) {
@@ -448,6 +459,8 @@ int run_update(bool terminal) {
         opt.game = paths->game;
         opt.save = paths->save;
         opt.dlc = paths->dlc;
+        TerminalAsker ask;
+        opt.confirm = [&](const std::wstring& warning) { return confirm_untested(ask, warning); };
         try {
             setup::install(opt, out);
             return 0;
@@ -475,6 +488,13 @@ int run_update(bool terminal) {
         state.done = done;
         state.step = step;
     };
+    opt.confirm = [&](const std::wstring& warning) {
+        state.question = warning;
+        state.asking = true;
+        while (!state.answered)
+            SDL_Delay(30);
+        return state.answer;
+    };
     SDL_Window* window = nullptr;
     SDL_Renderer* renderer = nullptr;
     SDL_CreateWindowAndRenderer(kTitle, 480, 140, 0, &window, &renderer);
@@ -497,6 +517,11 @@ int run_update(bool terminal) {
     while (!state.finished) {
         SDL_Event e;
         while (SDL_PollEvent(&e)) {
+        }
+        if (state.asking && !state.answered) {
+            DialogAsker ask;
+            state.answer = confirm_untested(ask, state.question);
+            state.answered = true;
         }
         if (renderer)
             draw_update(renderer, state);

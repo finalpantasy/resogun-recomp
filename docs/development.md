@@ -209,9 +209,12 @@ Without a `paths.ini`, or when a folder it names is gone, it opens the setup ins
 `release.txt`, or from the dump's `eboot.bin` as it is now (`game/source.txt`: its size and
 modification time), it runs `resogun-setup --update` first, which prepares the game again from the
 folders already set in a small progress window and exits 0 when done; the game starts only then.
-Setup accepts only the verified build (`scripts/prepare.py` `VERIFIED_BUILDS`, the eboot's SHA-256,
-and `VERIFIED_TITLE`, `param.sfo`'s CUSA00038 / 01.10): any other dump is refused with a message and
-nothing is prepared (`run.py --any-build` still prepares one for development). Without a console the
+Setup checks for the verified build (`scripts/prepare.py` `VERIFIED_BUILDS`, the eboot's SHA-256,
+and `VERIFIED_TITLE`, `param.sfo`'s CUSA00038 / 01.10). For any other dump it warns that the files are
+untested and might cause bugs, and prepares it with `--any-build` only when the player goes on; the
+answer is kept in `game/untested.txt` (the eboot's stamp, as `source.txt`), so later preparations of
+the same dump, such as `--update` after a new release, do not ask again. Without a dialog (the
+command line) the warning is logged and setup goes on. Without a console the
 game's output goes to `log/resogun.log` in the save folder. The launcher also watches the game: it starts the same command line as a child (on Windows in a job
 that ends it if the launcher is killed, on Linux by `fork` with `PR_SET_PDEATHSIG`), and when the
 game ends with an exit code other than 0 it notes the code in the log, copies the log to

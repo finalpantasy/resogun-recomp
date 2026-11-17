@@ -27,11 +27,10 @@ namespace setup {
 
 namespace {
 // For a dump that is not the verified build (scripts/prepare.py VERIFIED_BUILDS and VERIFIED_TITLE).
-constexpr wchar_t kUnverified[] =
-    L"These game files are not the ones this release needs: the unmodified Resogun CUSA00038 with update "
-    L"1.10 (eboot.bin and sce_sys/param.sfo). Other versions and patched files, such as DLC unlockers, "
-    L"are not supported, and the game will not start with them.\n\nAll add-ons already show as owned "
-    L"without an unlocker.";
+constexpr wchar_t kUntested[] =
+    L"These game files are untested: this release was tested with the unmodified Resogun CUSA00038 with "
+    L"update 1.10 (eboot.bin and sce_sys/param.sfo). Other versions and patched files, such as DLC "
+    L"unlockers, might cause bugs or crashes.\n\nAll add-ons already show as owned without an unlocker.";
 
 // What run.py reads from the dump to prepare the image (IMAGE_INPUTS), and the title's param.sfo.
 constexpr const wchar_t* kGameFiles[] = {
@@ -661,10 +660,27 @@ fs::path install(const Options& opt, const Log& log) {
     setenv("PYTHONIOENCODING", "utf-8", 1);
 #endif
     // Exit code 3: eboot.bin or param.sfo is not the build scripts/prepare.py lists as verified, and
-    // nothing was prepared. Only that build is supported: the dump is refused.
+    // nothing was prepared. The player is asked once per dump (game/untested.txt keeps the stamp of the
+    // eboot.bin they went on with), then it is prepared anyway (--any-build).
+    fs::path untested = image / L"untested.txt";
     unsigned long code = run(command, prepare, log);
-    if (code == 3)
-        fail(std::wstring(kUnverified) + L"\n\nGame folder: " + text(game));
+    if (code == 3) {
+        std::string stamp = source_stamp(game) + "\n";
+        bool accepted = false;
+        try {
+            accepted = fs::is_regular_file(untested, ec) && read_text(untested) == stamp;
+        } catch (const Error&) {
+        }
+        log(L"warning: " + std::wstring(kUntested));
+        if (!accepted && opt.confirm && !opt.confirm(std::wstring(kUntested) + L"\n\nContinue anyway?"))
+            fail(L"Setup stopped: the game was not prepared.");
+        fs::create_directories(image, ec);
+        write_text(untested, stamp);
+        command.push_back(L"--any-build");
+        code = run(command, prepare, log);
+    } else {
+        fs::remove(untested, ec);
+    }
     if (code)
         fail(L"Preparing the game failed (exit code " + std::to_wstring(code) + L"). The log says why.");
 
