@@ -144,6 +144,11 @@ constexpr auto kResolutionSettle = std::chrono::seconds(1);
 // guarded by imgui_mutex.
 std::atomic<bool> exit_open{false};
 int exit_focus = 0;
+// The Cheats page (L3+R3: src/runtime_pad.c); its row and dirty flag are guarded by imgui_mutex,
+// the switches live in ResogunSettings::Values::cheats.
+std::atomic<bool> cheats_open{false};
+int cheat_row = 0;
+bool cheats_dirty = false;
 enum DisplayRow : int { RowAspect, RowMode, RowResolution, RowMonitor, RowVsync, RowFps, RowRender, RowSharpen, RowHdr, RowCount };
 
 // The colours of the game's own menus (Main Menu, Options): teal bars on a dark, see-through
@@ -543,17 +548,37 @@ void SlantedOutline(ImDrawList* dl, ImVec2 a, ImVec2 b, float slant, ImU32 color
     dl->AddPolyline(points, 4, color, ImDrawFlags_Closed, thickness);
 }
 
-// The Display Settings panel, drawn like the game's own menus over the dimmed game: a framed
-// panel with the title on a tab above it, one teal bar per setting (the focused one bright, with
-// arrows around its value), the focused setting's help below, and the buttons on tabs at the
-// bottom.
-void DisplaySettingsBox() {
+// A tick box at the right end of a bar: a frame, filled with a check mark when `on`.
+void CheckBox(ImDrawList* dl, ImVec2 centre, float size, bool on, ImU32 color, float thickness) {
+    const float h = size * 0.5f;
+    dl->AddRect(ImVec2(centre.x - h, centre.y - h), ImVec2(centre.x + h, centre.y + h), color, 0.0f, 0, thickness);
+    if (!on) return;
+    const ImVec2 points[3] = {ImVec2(centre.x - h * 0.55f, centre.y + h * 0.02f), ImVec2(centre.x - h * 0.12f, centre.y + h * 0.48f),
+                              ImVec2(centre.x + h * 0.6f, centre.y - h * 0.5f)};
+    dl->AddPolyline(points, 3, color, ImDrawFlags_None, thickness * 1.6f);
+}
+
+// One bar of a page: a setting's name, and its value (with arrows around it when focused) or a
+// tick box (check 0 or 1).
+struct PageRow {
+    const char* label;
+    std::string value;
+    bool changes = true;
+    bool enabled = true;
+    int check = -1;
+};
+
+// A page drawn like the game's own menus over the dimmed game: a framed panel with the title on a
+// tab above it, one teal bar per row (the focused one bright), the focused row's help below, and
+// the buttons on tabs at the bottom. Display Settings and Cheats.
+void PageBox(const char* id, const char* title, const std::vector<PageRow>& rows, int focused,
+             const std::string& help, const char* const (&hints)[3]) {
     const ImGuiViewport* viewport = ImGui::GetMainViewport();
     const float px = viewport->Size.y / 1080.0f;
     ImGui::SetNextWindowPos(viewport->Pos, ImGuiCond_Always);
     ImGui::SetNextWindowSize(viewport->Size, ImGuiCond_Always);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
-    ImGui::Begin("##display_settings", nullptr,
+    ImGui::Begin(id, nullptr,
                  ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoInputs |
                      ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoFocusOnAppearing);
     ImDrawList* dl = ImGui::GetWindowDrawList();
@@ -563,15 +588,15 @@ void DisplaySettingsBox() {
     dl->AddRectFilled(o, ImVec2(right, bottom), PageInk::Shade);
 
     // The panel, centred, and the title tab on its top edge.
+    const int count = int(rows.size());
     const float row_h = 64.0f * px, gap = 12.0f * px, pad = 30.0f * px;
     const float panel_w = std::min(size.x - 80.0f * px, 1180.0f * px);
-    const float panel_h = pad * 2.0f + float(RowCount) * row_h + float(RowCount - 1) * gap;
+    const float panel_h = pad * 2.0f + float(count) * row_h + float(count - 1) * gap;
     const float x0 = o.x + (size.x - panel_w) * 0.5f, x1 = x0 + panel_w;
     const float top = o.y + std::max(110.0f * px, (size.y - panel_h) * 0.42f);
     dl->AddRectFilled(ImVec2(x0, top), ImVec2(x1, top + panel_h), PageInk::Panel);
     dl->AddRect(ImVec2(x0, top), ImVec2(x1, top + panel_h), PageInk::Frame, 0.0f, 0, line);
 
-    const char* title = "DISPLAY SETTINGS";
     const float title_size = 46.0f * px, title_w = font->CalcTextSizeA(title_size, FLT_MAX, 0.0f, title).x;
     const float tab_w = title_w + 120.0f * px, tab_h = 62.0f * px, tab_x = o.x + (size.x - tab_w) * 0.5f;
     const ImVec2 tab_a(tab_x, top - tab_h + 8.0f * px), tab_b(tab_x + tab_w, top + 8.0f * px);
@@ -580,14 +605,13 @@ void DisplaySettingsBox() {
     PageText(dl, font, title_size, ImVec2(tab_x + (tab_w - title_w) * 0.5f, tab_a.y + (tab_h - title_size) * 0.5f),
              title);
 
-    // One bar per setting: its name on the left, its value on the right.
+    // One bar per row: its name on the left, its value or tick box on the right.
     const float label = 32.0f * px, value = 30.0f * px, slant = 14.0f * px;
     const float bx0 = x0 + pad, bx1 = x1 - pad;
     float y = top + pad;
-    std::string help;
-    for (int row = 0; row < RowCount; ++row) {
-        const DisplayRowText text = DisplayRowAt(row);
-        const bool focus = row == display_row;
+    for (int row = 0; row < count; ++row) {
+        const PageRow& text = rows[size_t(row)];
+        const bool focus = row == focused;
         const ImVec2 a(bx0, y), b(bx1, y + row_h);
         const float mid = y + row_h * 0.5f;
         const bool off = !text.enabled;
@@ -596,6 +620,12 @@ void DisplaySettingsBox() {
         SlantedOutline(dl, a, b, slant, focus ? PageInk::Frame : PageInk::FrameDim, focus ? line * 1.5f : line);
         const ImU32 ink = focus ? PageInk::Text : off ? PageInk::TextOff : PageInk::TextDim;
         PageText(dl, font, label, ImVec2(bx0 + slant + 28.0f * px, mid - label * 0.56f), text.label, ink);
+        if (text.check >= 0) {
+            CheckBox(dl, ImVec2(bx1 - slant - 50.0f * px, mid), row_h * 0.46f, text.check != 0, ink,
+                     focus ? 3.0f * px : 2.0f * px);
+            y += row_h + gap;
+            continue;
+        }
         const float vw = font->CalcTextSizeA(value, FLT_MAX, 0.0f, text.value.c_str()).x;
         const float value_x = bx1 - slant - 70.0f * px - vw;
         PageText(dl, font, value, ImVec2(value_x, mid - value * 0.56f), text.value.c_str(), ink);
@@ -604,7 +634,6 @@ void DisplaySettingsBox() {
             Chevron(dl, ImVec2(value_x - 26.0f * px, mid), chevron, -1, PageInk::Text, stroke);
             Chevron(dl, ImVec2(bx1 - slant - 40.0f * px, mid), chevron, 1, PageInk::Text, stroke);
         }
-        if (focus) help = text.help;
         y += row_h + gap;
     }
 
@@ -614,9 +643,6 @@ void DisplaySettingsBox() {
                 panel_w - 16.0f * px);
 
     // The buttons, each on a tab, along the bottom.
-    const char* const hints[3] = {"Up/Down  Choose",
-                                  "Left/Right, Cross (A)  Change",
-                                  "Circle (B), Select, Esc  Back"};
     const float hint_size = 24.0f * px, hint_h = 46.0f * px, hint_gap = 24.0f * px;
     float hint_w[3], total = 0.0f;
     for (int i = 0; i < 3; ++i) {
@@ -634,6 +660,47 @@ void DisplaySettingsBox() {
     }
     ImGui::End();
     ImGui::PopStyleVar();
+}
+
+// The Display Settings panel: one bar per setting, arrows around the focused one's value.
+void DisplaySettingsBox() {
+    std::vector<PageRow> rows;
+    std::string help;
+    for (int row = 0; row < RowCount; ++row) {
+        DisplayRowText text = DisplayRowAt(row);
+        if (row == display_row) help = text.help;
+        rows.push_back({text.label, std::move(text.value), text.changes, text.enabled});
+    }
+    static const char* const hints[3] = {"Up/Down  Choose", "Left/Right, Cross (A)  Change",
+                                         "Circle (B), Select, Esc  Back"};
+    PageBox("##display_settings", "DISPLAY SETTINGS", rows, display_row, help, hints);
+}
+
+// The Cheats page: one tick box per cheat (ResogunSettings::Cheat order).
+struct CheatText {
+    const char* label;
+    const char* help;
+};
+constexpr CheatText kCheats[ResogunSettings::CheatCount] = {
+    {"Invulnerability", "Enemies, their shots and collisions cannot destroy your ship, nor the house in Commando."},
+    {"Infinite lives", "Losing a ship does not cost a life."},
+    {"Infinite bombs", "Using a bomb does not take one, and you always have at least one; pickups still add to your count."},
+    {"Boost recharges immediately", "The boost meter is full again as soon as a boost ends. A boost still lasts one meter."},
+    {"Overdrive recharges immediately", "The overdrive meter is full again as soon as an overdrive ends."},
+    {"Maximum weapon level", "Your weapons are at their highest level, from the moment this is switched on."},
+    {"No score multiplier decay", "The score multiplier no longer runs out between kills; kills still raise it."},
+};
+
+void CheatsBox() {
+    const int on = ResogunSettings::Get().cheats;
+    std::vector<PageRow> rows;
+    for (int c = 0; c < ResogunSettings::CheatCount; ++c) {
+        rows.push_back({kCheats[c].label, {}, true, true, (on >> c) & 1});
+    }
+    const std::string help = kCheats[cheat_row].help;
+    static const char* const hints[3] = {"Up/Down  Choose", "Cross (A), Left/Right  Switch",
+                                         "Circle (B), L3+R3, Esc  Back"};
+    PageBox("##cheats", "CHEATS", rows, cheat_row, help, hints);
 }
 
 // The exit prompt, drawn like the Display Settings panel: the question on a tab over a small
@@ -780,6 +847,45 @@ bool HandleDisplayEvent(const SDL_Event& event) {
     }
     if (close) {
         CloseDisplaySettings();
+    }
+    return true;
+}
+
+// imgui_mutex held. The Cheats page takes every key and button while it is open: up/down moves,
+// Cross or left/right switches the focused cheat (at once), back closes it and saves settings.ini.
+bool HandleCheatsEvent(const SDL_Event& event) {
+    int move = 0;
+    bool toggle = false, close = false;
+    if (event.type == SDL_EVENT_KEY_DOWN) {
+        const SDL_Keycode key = event.key.key;
+        move = key == SDLK_UP || key == SDLK_W ? -1 : key == SDLK_DOWN || key == SDLK_S ? 1 : 0;
+        toggle = !event.key.repeat && (key == SDLK_LEFT || key == SDLK_A || key == SDLK_RIGHT || key == SDLK_D ||
+                                       key == SDLK_RETURN || key == SDLK_KP_ENTER || key == SDLK_SPACE);
+        close = !event.key.repeat && (key == SDLK_ESCAPE || key == SDLK_BACKSPACE);
+    } else if (event.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN) {
+        const u8 button = event.gbutton.button;
+        move = button == SDL_GAMEPAD_BUTTON_DPAD_UP ? -1 : button == SDL_GAMEPAD_BUTTON_DPAD_DOWN ? 1 : 0;
+        toggle = button == SDL_GAMEPAD_BUTTON_SOUTH || button == SDL_GAMEPAD_BUTTON_DPAD_LEFT ||
+                 button == SDL_GAMEPAD_BUTTON_DPAD_RIGHT;
+        close = button == SDL_GAMEPAD_BUTTON_EAST || button == SDL_GAMEPAD_BUTTON_START ||
+                button == SDL_GAMEPAD_BUTTON_BACK || button == SDL_GAMEPAD_BUTTON_LEFT_STICK ||
+                button == SDL_GAMEPAD_BUTTON_RIGHT_STICK;
+    } else {
+        return event.type == SDL_EVENT_KEY_UP || event.type == SDL_EVENT_GAMEPAD_BUTTON_UP;
+    }
+    if (move) {
+        cheat_row = (cheat_row + move + ResogunSettings::CheatCount) % ResogunSettings::CheatCount;
+    }
+    if (toggle) {
+        ResogunSettings::Get().cheats ^= 1 << cheat_row;
+        cheats_dirty = true;
+    }
+    if (close) {
+        cheats_open = false;
+        if (cheats_dirty) {
+            cheats_dirty = false;
+            ResogunSettings::SaveDisplay();
+        }
     }
     return true;
 }
@@ -1056,7 +1162,7 @@ void DrawWindows() {
         LoadingScreen();
     }
     float corner = ImGui::GetMainViewport()->WorkPos.y + ImGui::GetMainViewport()->WorkSize.y - 12.0f * base_scale;
-    if (NoticeActive() && !display_open && !exit_open) { // their button hints use the bottom of the screen
+    if (NoticeActive() && !display_open && !exit_open && !cheats_open) { // their button hints use the bottom of the screen
         Notice(corner);
     }
     if (PrefetchActive() && !loading) {
@@ -1076,6 +1182,8 @@ void DrawWindows() {
     }
     if (display_open && !choice_active) {
         DisplaySettingsBox();
+    } else if (cheats_open && !choice_active) {
+        CheatsBox();
     } else if (exit_open && !choice_active) {
         ExitPromptBox();
     }
@@ -1138,6 +1246,9 @@ bool HandleEvent(const SDL_Event& event) {
     if (display_open) {
         return HandleDisplayEvent(event);
     }
+    if (cheats_open) {
+        return HandleCheatsEvent(event);
+    }
     if (exit_open) {
         return HandleExitEvent(event);
     }
@@ -1180,6 +1291,14 @@ void OpenDisplaySettings() {
 
 bool DisplaySettingsOpen() {
     return display_open;
+}
+
+void OpenCheats() {
+    std::scoped_lock lock{imgui_mutex};
+    if (!cheats_open && !display_open && !exit_open) {
+        cheat_row = 0;
+        cheats_open = true;
+    }
 }
 
 void OpenExitPrompt() {
@@ -1252,15 +1371,19 @@ void NoteSplashFrame(bool picture) {
     }
 }
 
+bool HoldsGame() {
+    return cheats_open;
+}
+
 bool Visible() {
     const int splash = splash_state;
     return initialized && (splash == SplashShown || splash == SplashFading || loading ||background_total || PrefetchActive() || CompileNoteActive() ||
                            text_entry_active || choice_active || choice_retiring || NoticeActive() || display_open ||
-                           exit_open);
+                           exit_open || cheats_open);
 }
 
 bool CapturesInput() {
-    return text_entry_active || choice_active || display_open || exit_open;
+    return text_entry_active || choice_active || display_open || exit_open || cheats_open;
 }
 
 void BeginChoice(const std::string& title, const std::vector<std::string>& items,

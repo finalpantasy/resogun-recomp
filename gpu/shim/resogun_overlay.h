@@ -59,6 +59,11 @@ bool CapturesInput();
 void OpenDisplaySettings();
 bool DisplaySettingsOpen();
 
+/// Any thread: the Cheats page (L3+R3), one checkbox per cheat. It saves settings.ini when it closes.
+void OpenCheats();
+// The Cheats page is open: the game waits at its next flip while it is.
+bool HoldsGame();
+
 /// Any thread: asks "Exit Resogun?" with No focused (also F4 and Select+Start; Back on the title screen); Yes
 /// pushes SDL_EVENT_QUIT (as closing the window). It takes the input while open.
 void OpenExitPrompt();

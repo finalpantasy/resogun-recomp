@@ -86,6 +86,10 @@ void Set(Values& v, const std::string& key, const std::string& value) {
         if (!lower.empty() && lower != "1080p" && lower != "4k" && lower != "2160p") {
             std::printf("Settings: render_resolution=%s is not 1080p or 4k; using 4k\n", value.c_str());
         }
+    } else if (const auto cheat = std::find(std::begin(CheatKeys), std::end(CheatKeys), key);
+               cheat != std::end(CheatKeys)) {
+        const int bit = 1 << int(cheat - std::begin(CheatKeys));
+        v.cheats = Truthy(value) ? (v.cheats | bit) : (v.cheats & ~bit);
     } else {
         std::printf("Settings: unknown key %s\n", key.c_str());
     }
@@ -94,7 +98,7 @@ void Set(Values& v, const std::string& key, const std::string& value) {
 std::vector<std::pair<std::string, std::string>> DisplayKeys() {
     const auto& v = Get();
     const int monitor = v.monitor;
-    return {
+    std::vector<std::pair<std::string, std::string>> keys{
         {"display_mode", std::string(ResogunGraphics::DisplayModeKeys[std::clamp(v.display_mode.load(), 0, 2)])},
         {"monitor", monitor < 0 ? std::string() : std::to_string(monitor)},
         {"aspect_ratio", std::string(AspectRatioKeys[std::clamp(v.aspect_ratio.load(), 0, AspectRatioCount - 1)])},
@@ -106,6 +110,9 @@ std::vector<std::pair<std::string, std::string>> DisplayKeys() {
         {"sharpening", v.sharpening ? "1" : "0"},
         {"hdr", v.hdr ? "1" : "0"},
     };
+    const int cheats = v.cheats;
+    for (int c = 0; c < CheatCount; ++c) keys.emplace_back(CheatKeys[c], (cheats >> c) & 1 ? "1" : "0");
+    return keys;
 }
 
 std::mutex save_mutex;
@@ -295,6 +302,10 @@ extern "C" int resogun_width_4k(void) {
 
 extern "C" void resogun_set_width_4k(int width) {
     ResogunSettings::Get().startup_width_4k = width;
+}
+
+extern "C" int resogun_cheats(void) {
+    return ResogunSettings::Get().cheats.load(std::memory_order_relaxed);
 }
 
 extern "C" int resogun_render_4k(void) {

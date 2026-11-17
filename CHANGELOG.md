@@ -5,6 +5,10 @@ Each release's section becomes the text of its GitHub release (`tools/release_no
 without one does not publish. Keep each entry on one line: GitHub shows a line break in release
 text as a break.
 
+## v0.15
+
+- Cheats added by popular demand. Press L3+R3 to enter the cheats menu
+
 ## v0.14
 
 - Game files other than the tested version are allowed again: setup shows a one-time warning that they are untested and might cause bugs

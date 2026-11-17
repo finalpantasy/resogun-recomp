@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <time.h>
 #ifndef _WIN32
 #include <sys/mman.h>
 #endif
@@ -56,8 +57,18 @@ void runtime_game_identify(const char *title_id, const char *app_version, const 
  * the game resets it. */
 static unsigned char *game_image;
 static int clock_unknown;
+static void cheats_sync(void);
 void runtime_game_set_image(unsigned char *image) { game_image=image; }
 void runtime_game_frame_rate(void) {
+    cheats_sync();
+    /* The Cheats page holds the game here, before the frame is handed over: nothing moves until
+     * it closes, and the presenter shows the last frame under it. Each frame is a fixed step of
+     * the game's clock, so the game resumes where it was. */
+    while (resogun_game_held()) {
+        const struct timespec wait={0,5000000};
+        nanosleep(&wait,NULL);
+        cheats_sync();
+    }
     if (!game_image || clock_unknown) return;
     float *clock=*(float **)(game_image+0x152cd28);
     if (!clock) return;
@@ -223,5 +234,262 @@ int runtime_game_widen(unsigned char *image, uint32_t width_4k) {
     p=wide_hook(image,p,0x478910,WIDE_DEPTH);
     wide_camera_hook(image,p);
     printf("Wide: the game's picture is %ux2160 (%ux1080 in 1080p mode), its scene resized to match\n",width_4k,width_4k/2);
+    return 1;
+}
+
+/* The Cheats page (L3+R3: runtime_pad.c; settings.ini cheat_*), on eboot 01.10. Most are the
+ * engine's own debug switches and tunables, bytes the game only reads, set at each flip:
+ *   - invulnerability: the -god_mode switch's flag (0x151c654), which the ship's collision
+ *     checks (0x25c83d, 0x25d19e) skip a hit for. The engine also lets god mode bomb for free;
+ *     that is taken out (god_off below), infinite bombs is its own cheat. A stub in the Commando
+ *     house's hit (0xd91ba) also lets its hits go, as its shield does.
+ *   - infinite lives: the tunable rg__game__player__DEBUG_unlimited_lives (0x15221d0), checked by
+ *     the game state's tick (0x276305) before a death takes a life (0x275a50).
+ *   - no multiplier decay: the tunable rg__game__combos__DEBUG_allow_combo_expiration (0xed4758),
+ *     checked by the combo update (0x36a12) before the combo's timer counts down: off, the
+ *     multiplier no longer runs out between kills.
+ * Stubs jumped to from the engine's update code, on the game's own thread, do the rest:
+ *   - infinite bombs: the game state adds each player's bomb change once a tick (0x276067: bombs
+ *     at +0xc0, the change at +0x128 + player*0x4c); a negative change (a bomb used) is dropped,
+ *     pickups still count, and none left becomes one.
+ *   - boost recharge: the boost update (0x244d71) fills its meter (float +0x60, 1 is full) while
+ *     no boost runs (+0x59): a boost still lasts one meter. It takes the place of the engine's
+ *     rg__game__player__boost__DEBUG_unlimited_boost check (0x1516328), kept as it was.
+ *   - overdrive recharge: the overdrive meter's update (0x253b4d) fills it (float +0x5c) while no
+ *     overdrive drains it (+0x74). It takes the place of a one-shot fill flag's check (0x151a560),
+ *     kept as it was.
+ *   - maximum weapon level: the tunable rg__game__weapons__minimum_level (0x1522760) is raised
+ *     past every weapon's maximum, and each level the game sets is clamped between them (0x278fa0
+ *     and the like); a stub in the weapons' update (0x279efe) sets the level once when the cheat is
+ *     switched on, so it applies at once and not at the next pickup. */
+enum { CHEAT_INVULNERABLE, CHEAT_LIVES, CHEAT_BOMBS, CHEAT_BOOST, CHEAT_OVERDRIVE, CHEAT_WEAPON, CHEAT_MULTIPLIER,
+       CHEAT_COUNT };
+static unsigned char cheat_on[CHEAT_COUNT]; /* read by the stubs */
+static unsigned char *cheat_image;
+static int weapon_floor_saved;       /* rg__game__weapons__minimum_level as the game had it */
+static _Atomic unsigned weapon_turn; /* counts the weapon cheat being switched on */
+/* At each flip: the Cheats page's choices into the engine's flags and the stubs'. */
+static void cheats_sync(void) {
+    if (!cheat_image) return;
+    const int mask=resogun_cheats();
+    for (int i=0;i<CHEAT_COUNT;++i) cheat_on[i]=(unsigned char)((mask>>i)&1);
+    cheat_image[0x151c654]=cheat_on[CHEAT_INVULNERABLE];
+    cheat_image[0x15221d0]=cheat_on[CHEAT_LIVES];
+    /* The weapons' minimum level: every level the game sets is raised to the weapon's maximum. */
+    static int weapon_was;
+    int *floor=(int *)(cheat_image+0x1522760);
+    if (cheat_on[CHEAT_WEAPON] && !weapon_was) { weapon_floor_saved=*floor; ++weapon_turn; }
+    if (!cheat_on[CHEAT_WEAPON] && weapon_was) *floor=weapon_floor_saved;
+    if (cheat_on[CHEAT_WEAPON]) *floor=0x7fffffff;
+    weapon_was=cheat_on[CHEAT_WEAPON];
+    /* rg__game__combos__DEBUG_allow_combo_expiration: off, the combo's timer never runs out. */
+    static int combo_was;
+    static unsigned char combo_saved;
+    unsigned char *expire=cheat_image+0xed4758;
+    if (cheat_on[CHEAT_MULTIPLIER] && !combo_was) combo_saved=*expire;
+    if (!cheat_on[CHEAT_MULTIPLIER] && combo_was) *expire=combo_saved;
+    if (cheat_on[CHEAT_MULTIPLIER]) *expire=0;
+    combo_was=cheat_on[CHEAT_MULTIPLIER];
+}
+
+/* Called from the weapons' update (0x279efe, on the game's thread) with the player's weapon set:
+ * the first update after the cheat is switched on sets the current weapon's level through the
+ * class's own setter (vtable slot 0x48: attribute 6, the current weapon, as the
+ * Set_Player_Weapon_Level script command does); the raised minimum makes that the maximum. */
+static ABI void cheat_weapons(unsigned char *weapons) {
+    static unsigned char *seen[4];
+    static unsigned seen_turn[4];
+    if (!cheat_on[CHEAT_WEAPON] || !weapons) return;
+    const unsigned turn=weapon_turn;
+    for (int i=0;i<4;++i) if (seen[i]==weapons && seen_turn[i]==turn) return;
+    static int next;
+    seen[next]=weapons; seen_turn[next]=turn; next=(next+1)%4;
+    typedef void (ABI *SetAttribute)(void *self, int attribute, int value);
+    ((SetAttribute)(*(void ***)weapons)[0x48/8])(weapons,6,0);
+}
+
+/* Stub writing: bytes, a jmp [rip] to an absolute target (14 bytes), mov rax, imm64. */
+static unsigned char *emit(unsigned char *p, const void *bytes, size_t n) { memcpy(p,bytes,n); return p+n; }
+static unsigned char *emit_jmp(unsigned char *p, const void *to) {
+    const uint64_t target=(uint64_t)(uintptr_t)to;
+    *p++=0xff; *p++=0x25; memset(p,0,4); p+=4;
+    memcpy(p,&target,8);
+    return p+8;
+}
+static unsigned char *emit_rax(unsigned char *p, const void *address) {
+    const uint64_t value=(uint64_t)(uintptr_t)address;
+    *p++=0x48; *p++=0xb8; memcpy(p,&value,8);
+    return p+8;
+}
+/* A short jump's offset byte (at `offset`) to `to`, ahead of it. */
+static void land(unsigned char *offset, const unsigned char *to) { *offset=(unsigned char)(to-(offset+1)); }
+/* The `size` bytes at `site` become a jmp to `stub` and nops. */
+static void cheat_site(unsigned char *site, size_t size, const unsigned char *stub) {
+    emit_jmp(site,stub);
+    memset(site+14,0x90,size-14);
+}
+
+static const unsigned char bombs_site[38]={0x43,0x8b,0x84,0x37,0x28,0x01,0x00,0x00,0x85,0xc0,0x0f,0x84,0x7f,0x00,0x00,0x00,
+    0x41,0x03,0x87,0xc0,0x00,0x00,0x00,0xb9,0x00,0x00,0x00,0x00,0x0f,0x48,0xc1,0x41,0x89,0x87,0xc0,0x00,0x00,0x00};
+static const unsigned char boost_site[17]={0x80,0x3d,0xb0,0x15,0x2d,0x01,0x00,0x74,0x08,0x41,0xc7,0x46,0x60,0x00,0x00,0x80,0x3f};
+static const unsigned char overdrive_site[30]={0x80,0x3d,0x0c,0x6a,0x2c,0x01,0x00,0xc5,0xfa,0x10,0x61,0x04,0xc6,0x05,0x00,
+    0x6a,0x2c,0x01,0x00,0x74,0x09,0x41,0xc7,0x44,0x24,0x5c,0x00,0x00,0x80,0x3f};
+
+/* 0x276067, in the game state's tick (this r15, player*0x4c r14): mov eax,[r15+r14+0x128];
+ * test eax,eax; jz 0x2760f6; add eax,[r15+0xc0]; clamp at 0; mov [r15+0xc0],eax; on at 0x27608d.
+ * With the cheat a bomb used is not taken, and none left becomes one, since a bomb needs one in
+ * hand ("has bombs", 0x276e80). rcx is free (the code after both exits loads it). */
+static unsigned char *bombs_stub(unsigned char *image, unsigned char *p) {
+    unsigned char *none, *kept, *pickup;
+    const uint64_t flag=(uint64_t)(uintptr_t)&cheat_on[CHEAT_BOMBS];
+    p=emit(p,bombs_site,10);                         /* mov eax,[r15+r14+0x128]; test eax,eax */
+    *p++=0x74; none=p++;                             /* jz: no change */
+    *p++=0x79; pickup=p++;                           /* jns: bombs added */
+    *p++=0x48; *p++=0xb9; memcpy(p,&flag,8); p+=8;   /* mov rcx, &cheat_on[CHEAT_BOMBS] */
+    *p++=0x80; *p++=0x39; *p++=0x00;                 /* cmp byte [rcx],0 */
+    *p++=0x75; kept=p++;                             /* jnz: the bomb used is not taken */
+    land(pickup,p);
+    p=emit(p,bombs_site+16,22);                      /* add, clamp, store */
+    p=emit_jmp(p,image+0x27608d);
+    land(none,p); land(kept,p);
+    static const unsigned char empty[]={0x41,0x83,0xbf,0xc0,0x00,0x00,0x00,0x00};               /* cmp dword [r15+0xc0],0 */
+    static const unsigned char one[]={0x41,0xc7,0x87,0xc0,0x00,0x00,0x00,0x01,0x00,0x00,0x00}; /* mov dword [r15+0xc0],1 */
+    unsigned char *off, *some;
+    *p++=0x48; *p++=0xb9; memcpy(p,&flag,8); p+=8;
+    *p++=0x80; *p++=0x39; *p++=0x00;
+    *p++=0x74; off=p++;
+    p=emit(p,empty,sizeof(empty));
+    *p++=0x7f; some=p++;                             /* jg */
+    p=emit(p,one,sizeof(one));
+    land(off,p); land(some,p);
+    return emit_jmp(p,image+0x2760f6);
+}
+
+/* 0x244d71, in the boost update (this r14): with the engine's unlimited-boost flag the meter is
+ * full; with the cheat, also while no boost runs. On at 0x244d82, which sets the flags anew. */
+static unsigned char *boost_stub(unsigned char *image, unsigned char *p) {
+    static const unsigned char full[]={0x41,0xc7,0x46,0x60,0x00,0x00,0x80,0x3f}; /* mov dword [r14+0x60],1.0 */
+    static const unsigned char idle[]={0x41,0x80,0x7e,0x59,0x00};               /* cmp byte [r14+0x59],0 */
+    unsigned char *no_debug, *no_cheat, *running;
+    *p++=0x50;                                       /* push rax */
+    p=emit_rax(p,image+0x1516328);
+    *p++=0x80; *p++=0x38; *p++=0x00;                 /* cmp byte [rax],0 */
+    *p++=0x74; no_debug=p++;
+    p=emit(p,full,sizeof(full));
+    land(no_debug,p);
+    p=emit_rax(p,&cheat_on[CHEAT_BOOST]);
+    *p++=0x80; *p++=0x38; *p++=0x00;
+    *p++=0x74; no_cheat=p++;
+    p=emit(p,idle,sizeof(idle));
+    *p++=0x75; running=p++;
+    p=emit(p,full,sizeof(full));
+    land(no_cheat,p); land(running,p);
+    *p++=0x58;                                       /* pop rax */
+    return emit_jmp(p,image+0x244d82);
+}
+
+/* 0x253b4d, in the overdrive meter's update (this r12, rcx its owner): vmovss xmm4,[rcx+4]; the
+ * one-shot fill flag (0x151a560) fills the meter and is cleared; with the cheat the meter is also
+ * filled while no overdrive drains it (float [r12+0x74] not above 0). On at 0x253b6b. */
+static unsigned char *overdrive_stub(unsigned char *image, unsigned char *p) {
+    static const unsigned char full[]={0x41,0xc7,0x44,0x24,0x5c,0x00,0x00,0x80,0x3f}; /* mov dword [r12+0x5c],1.0 */
+    static const unsigned char drain[]={0x41,0x83,0x7c,0x24,0x74,0x00};                /* cmp dword [r12+0x74],0 */
+    unsigned char *no_fill, *no_cheat, *draining;
+    p=emit(p,overdrive_site+7,5);                    /* vmovss xmm4,[rcx+4] */
+    *p++=0x50;                                       /* push rax */
+    p=emit_rax(p,image+0x151a560);
+    *p++=0x80; *p++=0x38; *p++=0x00;                 /* cmp byte [rax],0 */
+    *p++=0xc6; *p++=0x00; *p++=0x00;                 /* mov byte [rax],0 */
+    *p++=0x74; no_fill=p++;
+    p=emit(p,full,sizeof(full));
+    land(no_fill,p);
+    p=emit_rax(p,&cheat_on[CHEAT_OVERDRIVE]);
+    *p++=0x80; *p++=0x38; *p++=0x00;
+    *p++=0x74; no_cheat=p++;
+    p=emit(p,drain,sizeof(drain));                   /* a float above 0 is above 0 as an int too */
+    *p++=0x7f; draining=p++;                         /* jg */
+    p=emit(p,full,sizeof(full));
+    land(no_cheat,p); land(draining,p);
+    *p++=0x58;                                       /* pop rax */
+    return emit_jmp(p,image+0x253b6b);
+}
+
+static const unsigned char weapon_site[18]={0x41,0x8b,0x9f,0x3c,0x01,0x00,0x00,0x85,0xdb,0x7e,0x75,0x49,0x8b,0xbf,0xa0,0x00,0x00,0x00};
+
+/* 0x279efe, in the weapons' update (this r15): cheat_weapons(this), then the original mov ebx,
+ * [r15+0x13c]; test ebx,ebx; jle 0x279f7e; mov rdi,[r15+0xa0]; on at 0x279f10. The update holds
+ * nothing in caller-saved registers here (a call may come just before) and rsp is aligned. */
+static unsigned char *weapon_stub(unsigned char *image, unsigned char *p) {
+    unsigned char *pending;
+    *p++=0x4c; *p++=0x89; *p++=0xff;                 /* mov rdi, r15 */
+    p=emit_rax(p,(const void *)(uintptr_t)cheat_weapons);
+    *p++=0xff; *p++=0xd0;                            /* call rax */
+    p=emit(p,weapon_site,9);                         /* mov ebx,[r15+0x13c]; test ebx,ebx */
+    *p++=0x7f; pending=p++;                          /* jg: a level change is pending */
+    p=emit_jmp(p,image+0x279f7e);
+    land(pending,p);
+    p=emit(p,weapon_site+11,7);                      /* mov rdi,[r15+0xa0] */
+    return emit_jmp(p,image+0x279f10);
+}
+
+static const unsigned char house_site[22]={0x44,0x89,0xf8,0x48,0x8d,0x0d,0xa8,0x22,0x83,0x00,0x41,0x8b,0x94,0x24,0x1c,0x01,
+    0x00,0x00,0x44,0x8b,0x3c,0x81};
+
+/* 0xd91ba, in the Commando house's hit (this r12, the hit's kind r15d), where a hit the shield
+ * (+0x10c) did not stop takes its damage from the health (int +0x11c): mov eax,r15d; lea rcx,
+ * [damage by kind]; mov edx,[r12+0x11c]; mov r15d,[rcx+rax*4]; on at 0xd91d0. With invulnerability
+ * the hit is let go as the shield does (0xd919d). rax and rcx are loaded here. */
+static unsigned char *house_stub(unsigned char *image, unsigned char *p) {
+    unsigned char *off;
+    p=emit_rax(p,&cheat_on[CHEAT_INVULNERABLE]);
+    *p++=0x80; *p++=0x38; *p++=0x00;                 /* cmp byte [rax],0 */
+    *p++=0x74; off=p++;
+    p=emit_jmp(p,image+0xd919d);
+    land(off,p);
+    p=emit(p,house_site,3);                          /* mov eax,r15d */
+    const uint64_t damage=(uint64_t)(uintptr_t)(image+0x90b46c);
+    *p++=0x48; *p++=0xb9; memcpy(p,&damage,8); p+=8; /* mov rcx, the damage table */
+    p=emit(p,house_site+10,12);                      /* mov edx,[r12+0x11c]; mov r15d,[rcx+rax*4] */
+    return emit_jmp(p,image+0xd91d0);
+}
+
+/* The combo update's expiry check (0x36a12): cmp byte [rip -> 0xed4758],0. */
+static const unsigned char combo_check[7]={0x80,0x3d,0x3f,0xdd,0xe9,0x00,0x00};
+
+/* The god_mode getter (0x25a760) as the bomb code calls it: the bomb (0x24e59d) takes one unless it
+ * is set, and "has bombs" (0x276e8f) answers yes with none left. Both read it as off (xor eax,eax),
+ * so invulnerability leaves the bombs alone. */
+static const unsigned char god_bomb_use[5]={0xe8,0xbe,0xc1,0x00,0x00}, god_bomb_has[5]={0xe8,0xcc,0x38,0xfe,0xff};
+static const unsigned char god_off[5]={0x31,0xc0,0x0f,0x1f,0x00};
+
+int runtime_game_cheats(unsigned char *image) {
+    if (memcmp(image+0x276067,bombs_site,sizeof(bombs_site)) || memcmp(image+0x244d71,boost_site,sizeof(boost_site)) ||
+        memcmp(image+0x253b4d,overdrive_site,sizeof(overdrive_site)) || memcmp(image+0x24e59d,god_bomb_use,5) ||
+        memcmp(image+0x276e8f,god_bomb_has,5) || memcmp(image+0x279efe,weapon_site,sizeof(weapon_site)) ||
+        memcmp(image+0x36a12,combo_check,sizeof(combo_check)) || memcmp(image+0xd91ba,house_site,sizeof(house_site))) {
+        puts("Cheats: the engine's code is not where eboot 01.10 has it; the Cheats page does nothing");
+        return 0;
+    }
+    unsigned char *stub=runtime_low_map(4096,PROT_READ|PROT_WRITE|PROT_EXEC);
+    if (!stub) return 0;
+    unsigned char *p=stub;
+    cheat_site(image+0x276067,sizeof(bombs_site),p);
+    p=bombs_stub(image,p);
+    cheat_site(image+0x244d71,sizeof(boost_site),p);
+    p=boost_stub(image,p);
+    cheat_site(image+0x253b4d,sizeof(overdrive_site),p);
+    p=overdrive_stub(image,p);
+    cheat_site(image+0x279efe,sizeof(weapon_site),p);
+    p=weapon_stub(image,p);
+    cheat_site(image+0xd91ba,sizeof(house_site),p);
+    house_stub(image,p);
+    memcpy(image+0x24e59d,god_off,5);
+    memcpy(image+0x276e8f,god_off,5);
+    cheat_image=image;
+    cheats_sync();
+    const int mask=resogun_cheats();
+    if (mask) printf("Cheats: on:%s%s%s%s%s%s%s\n",mask&1 ? " invulnerability" : "",mask&2 ? " infinite-lives" : "",
+                     mask&4 ? " infinite-bombs" : "",mask&8 ? " boost-recharge" : "",mask&16 ? " overdrive-recharge" : "",
+                     mask&32 ? " max-weapon" : "",mask&64 ? " no-multiplier-decay" : "");
     return 1;
 }

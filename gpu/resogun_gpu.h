@@ -40,6 +40,13 @@ int resogun_gpu_overlay_captures_input(void);
 /* Opens the Display Settings panel (F10, or Select held for 2 s: runtime_pad.c); 1 while it is open. */
 void resogun_display_settings_open(void);
 int resogun_display_settings_is_open(void);
+/* Opens the Cheats page (L3+R3: runtime_pad.c). Any thread. */
+void resogun_cheats_open(void);
+/* The cheats on, one bit each (runtime_game.c): 1 invulnerability, 2 infinite lives, 4 infinite
+ * bombs, 8 boost recharges at once, 16 overdrive recharges at once, 32 maximum weapon level, 64 no
+ * score multiplier decay. settings.ini cheat_* and the
+ * Cheats page set them; any thread. */
+int resogun_cheats(void);
 /* Asks "Exit Resogun?" (No focused); Yes closes the game as closing its window does. Any thread. */
 void resogun_exit_prompt_open(void);
 /* settings.ini title_back_exits (RESOGUN_TITLE_BACK_EXITS, default on): Back on the title screen
@@ -80,6 +87,9 @@ unsigned resogun_gpu_symbol_count(void);
 unsigned long long resogun_gpu_copy_yields(void);
 /* Frames handed to the presenter since start (hang dump). */
 unsigned long long resogun_gpu_flips(void);
+/* Nonzero while the Cheats page is open: the game is held at its next flip (runtime_game.c) and
+ * the presenter shows its last frame under the page. */
+int resogun_game_held(void);
 /* A notice in the corner for `milliseconds` (any thread; the runtime's messages to the player). */
 void resogun_gpu_notice(const char *text, int milliseconds);
 /* Trophy unlocked (any thread): its name as a notice in the corner. The other arguments are kept

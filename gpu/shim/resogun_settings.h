@@ -30,6 +30,15 @@ inline int ParseAudioChannels(std::string_view value) {
     if (value == "8") return Audio71;
     return AudioChannelsAuto;
 }
+/// The Cheats page's switches (keys cheat_*), one bit each in Values::cheats, in this order; the
+/// game reads them at each flip (src/runtime_game.c).
+enum Cheat : int { CheatInvulnerability, CheatInfiniteLives, CheatInfiniteBombs, CheatBoostRecharge,
+                   CheatOverdriveRecharge, CheatMaxWeapon, CheatNoMultiplierDecay, CheatCount };
+inline constexpr std::string_view CheatKeys[CheatCount] = {"cheat_invulnerability", "cheat_infinite_lives",
+                                                           "cheat_infinite_bombs", "cheat_boost_recharge",
+                                                           "cheat_overdrive_recharge", "cheat_max_weapon_level",
+                                                           "cheat_no_multiplier_decay"};
+
 /// Size the game renders at (key render_resolution): the PS4's 1080p, or the PS4 Pro's 2160p
 /// (PS4 Pro mode and a 3840x2160 video out, loader.c mount_boot_config_4k).
 enum RenderResolution : int { Render1080p = 0, Render4k, RenderResolutionCount };
@@ -170,6 +179,8 @@ struct Values {
     /// Whether the window's display offers an HDR10 surface: -1 not known yet, set by the
     /// swapchain (vk_swapchain.cpp).
     std::atomic<int> hdr_display{-1};
+    /// The cheats on (1 << Cheat), all off by default: the Cheats page (L3+R3) changes them live.
+    std::atomic<int> cheats{0};
 };
 
 Values& Get();
@@ -179,7 +190,7 @@ Values& Get();
 void Load();
 
 /// Writes the display keys (display_mode, monitor, aspect_ratio, window, vsync, tearing, frame_rate,
-/// render_resolution, sharpening, hdr) into Path() in place: their lines are replaced, missing ones
+/// render_resolution, sharpening, hdr) and the cheat_* keys into Path() in place: their lines are replaced, missing ones
 /// appended, the rest kept (from the default file until Path() exists).
 void SaveDisplay();
 

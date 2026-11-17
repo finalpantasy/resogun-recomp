@@ -36,7 +36,7 @@ The renderer draws at the game's own resolution (`render_resolution=4k`, the def
 window in `post_process.frag`. With `sharpening=1` (the default) that pass draws into an image of the
 window's size and FSR 1 RCAS (`rcas.frag`, `host_passes/rcas_pass.cpp`) sharpens it into the frame.
 The only overlay is the PS4's system UI (save list, text entry, trophy notices), the Display Settings
-panel and the exit prompt (`gpu/shim/resogun_overlay.cpp`).
+panel, the Cheats page and the exit prompt (`gpu/shim/resogun_overlay.cpp`).
 
 ## Running from the source tree
 
@@ -180,6 +180,20 @@ Select+Start ask anywhere. The prompt is drawn by the overlay and takes the inpu
 quit event as closing the window. Holding Select (SDL's Back button) or Start for two seconds opens the
 Display Settings panel (F10 too): each button's own press is held back while it is down, and a release
 without a shortcut sends it to the game as a short tap (`menu_buttons`, `src/runtime_pad.c`).
+
+## Cheats
+
+L3+R3 on either pad (X+M on the keyboard) opens the Cheats page (`cheat_chord`, `src/runtime_pad.c`;
+`CheatsBox`, `gpu/shim/resogun_overlay.cpp`), one checkbox per cheat, saved as settings.ini's
+`cheat_*` keys when it closes. `src/runtime_game.c` applies them, on eboot 01.10 only (any other
+code at the patched sites leaves them off, with a log line). Most are the engine's own debug
+switches and tunables, written at each flip: `-god_mode`'s flag (invulnerability; its free bombs are
+taken out), `rg__game__player__DEBUG_unlimited_lives`, `rg__game__combos__DEBUG_allow_combo_expiration`
+(no multiplier decay) and `rg__game__weapons__minimum_level` (maximum weapon level). Infinite bombs,
+the boost and overdrive recharges and the weapon level's immediate update are stubs jumped to from the
+engine's update code, so everything runs on the game's own thread; the flip thread never calls into
+the game. While the page is open the game waits at its next flip (`runtime_game_frame_rate`), the
+presenter shows the last frame under the page (`MustKeepDrawing`), and the hang dump does not count it. The comment above `runtime_game_cheats` lists each site and field.
 
 ## Save data, DLC and trophies
 

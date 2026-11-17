@@ -575,6 +575,20 @@ static void title_press(PadData *d) {
     if (t>=1000000 && (t-1000000)%500000<100000) d->buttons|=BTN_CROSS;
 }
 
+/* Game's pad read (sample): L3 and R3 pressed together (the stick clicks; the keyboard's X and M)
+ * open the Cheats page, on either player's pad. That press does not reach the game; a chord held
+ * while an overlay had the input counts as held, so closing the page with it does not reopen it. */
+static void cheat_chord(PadData *d, int slot, bool captured) {
+    static bool was_down[PADS];
+    const bool down=(d->buttons & (BTN_L3|BTN_R3))==(BTN_L3|BTN_R3);
+    const bool pressed=down && !was_down[slot] && !captured;
+    was_down[slot]=down || (captured && was_down[slot]);
+    if (!pressed) return;
+    d->buttons&=~(uint32_t)(BTN_L3|BTN_R3);
+    resogun_cheats_open();
+    printf("Runtime: L3+R3 on pad %d; Cheats opened\n",slot+1);
+}
+
 /* After a dialog closes, buttons still held (the Cross that accepted a name) stay hidden until
  * released: the game would take them as a new press. A replay and the title screen's presses are
  * user 1's; the pad file presses for either user. */
@@ -591,6 +605,7 @@ static void sample(PadData *d, int slot) {
     d->timestamp=now_us();
     if (resogun_gpu_overlay_captures_input()) {
         hold_after_capture[slot]=1; clicks[slot].active=false;
+        cheat_chord(d,slot,true);
         if (!slot) title_back(d);
         return;
     }
@@ -602,6 +617,7 @@ static void sample(PadData *d, int slot) {
     if (injected[slot].buttons & BTN_R2) d->r2=255;
     uint8_t *axes[4]={&d->left_x,&d->left_y,&d->right_x,&d->right_y};
     for (int i=0;i<4;++i) if (injected[slot].stick[i]>=0) *axes[i]=(uint8_t)injected[slot].stick[i];
+    cheat_chord(d,slot,false);
     if (!slot) title_back(d);
     play_click(d,&clicks[slot]);
     if (!slot) title_press(d);

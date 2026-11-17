@@ -14,6 +14,8 @@
 
 int resogun_frame_rate(void) { return 60; }
 void resogun_set_frame_rate(int rate) { (void)rate; }
+int resogun_cheats(void) { return 0; }
+int resogun_game_held(void) { return 0; }
 int runtime_verbose(void) { return 0; }
 void *runtime_low_map(size_t size, int prot) {
     (void)prot;

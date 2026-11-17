@@ -471,7 +471,7 @@ static void hang_watch_loop(void) {
         sleep(1);
 #endif
         const unsigned long long shown=resogun_gpu_flips();
-        if (shown!=last) { last=shown; held=0; dumped=0; continue; }
+        if (shown!=last || resogun_game_held()) { last=shown; held=0; dumped=0; continue; } /* the Cheats page holds it */
         if (!shown || dumped || ++held<hang_seconds) continue;
         hang_dump(hang_seconds);
         dumped=1;
@@ -952,6 +952,7 @@ int main(int argc, char **argv) {
     /* A 4:3, 16:10, 21:9 or 32:9 output: the engine is resized before its code runs (runtime_game.c). */
     if (gpu_enabled && resogun_width_4k() != 3840 && !runtime_game_widen(image, (uint32_t)resogun_width_4k()))
         resogun_set_width_4k(3840);
+    if (gpu_enabled) runtime_game_cheats(image); /* the Cheats page (L3+R3) */
     runtime_set_report_hook(loader_report_hook);
     protect(traps, round_page((import_count + 1) * 32), 5);
     protect(image, round_page(size), 0);

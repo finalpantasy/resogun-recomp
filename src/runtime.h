@@ -54,6 +54,9 @@ void runtime_game_frame_rate(void);
 int runtime_game_widen(unsigned char *image, uint32_t width_4k);
 /* The width a render script's target of width x height (named `name`) gets: 16:9 and 8:9
  * (checkerboard) sizes scale by width_4k/3840; the main menu's panels keep theirs. */
+/* The Cheats page's hooks (runtime_game.c): at load, before the image is protected. 0, with a log
+ * line, when the image is not eboot 01.10 as expected. Which cheats are on is read at each flip. */
+int runtime_game_cheats(unsigned char *image);
 uint32_t runtime_game_wide_width(const char *name, uint32_t width, uint32_t height, uint32_t width_4k);
 const char *runtime_import_name(const char *name);
 uintptr_t runtime_rwlock_resolve(const char *name);

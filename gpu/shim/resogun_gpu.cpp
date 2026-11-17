@@ -418,6 +418,13 @@ extern "C" void resogun_exit_prompt_open(void) {
     ResogunOverlay::OpenExitPrompt();
 }
 
+extern "C" void resogun_cheats_open(void) {
+    ResogunOverlay::OpenCheats();
+}
+extern "C" int resogun_game_held(void) {
+    return ResogunOverlay::HoldsGame();
+}
+
 extern "C" void resogun_gpu_request_quit(void) {
     SDL_Event event{};
     event.type = SDL_EVENT_QUIT; // the window thread ends the process as when the window is closed

@@ -25,6 +25,10 @@ This requires you to provide a decrypted dump of your own copy of the game: test
 - **Built in skip intro:** (optionally) boots straight to the main menu, the start-up logos and the "Press X" screen are skipped.
 - **Display settings in the game:** press **F10**, or hold **Select** (View, Back, Share) or **Start**
   (Menu, Options) for two seconds, for window mode, resolution, VSync, frame rate and more.
+- **Cheats:** press **L3+R3** (both sticks; **X+M** on the keyboard) for invulnerability, infinite
+  lives, infinite bombs, boost and overdrive that recharge immediately, maximum weapon level and no
+  score multiplier decay. Each is a checkbox, applied at once and kept for the next start; the game
+  pauses while the page is open.
 - **Keyboard and any gamepad.** DualShock 4 and DualSense work as they are, Xbox-style pads by
   button position.
 - **Local co-op:** connect a second gamepad and pick Multiplayer > Local Co-op; player 2 joins with
@@ -95,6 +99,8 @@ Resogun's add-ons (the extra ships and skins) carry no data of their own: the ga
 
 `title_back_exits=0` stops Back on the title screen from asking to close the game.
 
+The **Cheats** page (**L3+R3**) saves its checkboxes as the `cheat_*` keys, all off by default.
+
 ## Controls
 
 The game sees up to two DualShock 4s. Any gamepad works, mapped by button position: on an Xbox pad
@@ -123,6 +129,7 @@ The keyboard always plays as player 1, alongside player 1's gamepad:
 | Shortcut                                                  | What it does                                |
 | --------------------------------------------------------- | ------------------------------------------- |
 | **F10**, or hold **Select** or **Start** 2 s              | Display Settings                            |
+| **L3+R3** (keyboard **X+M**)                              | Cheats                                      |
 | **F9**                                                    | sharpening on or off                        |
 | **F4**, **Select+Start**, or **Back** on the title screen | asks "Exit Resogun?" (No is selected first) |
 | **Alt+F4**                                                | closes the game without confirmation        |
