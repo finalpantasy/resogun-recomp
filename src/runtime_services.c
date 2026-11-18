@@ -122,6 +122,19 @@ static ABI int32_t disable_music_player(void) { return 0; }
  * effect, as shadPS4 does. */
 static ABI int32_t system_setting(void) { return 0; }
 
+/* ---- Mouse: absent (as in driveclub-recomp) ---- */
+/* sceMouseInit() (NID Qs0wWulgl7U; Golf ignores the result), sceMouseOpen(user, type, index, param)
+ * (NID RaqxZIf6DvE; Golf passes its user id and zeros and treats < 0 as failure) and
+ * sceMouseRead(handle, data, count) (NID x8qnXqh-tiM): a mouse port opens but never reports a
+ * connected device. */
+static ABI int32_t mouse_init(void) { return 0; }
+static ABI int32_t mouse_open(int32_t user,int32_t type,int32_t index,const void *param) { (void)user; (void)type; (void)index; (void)param; return new_id(); }
+static ABI int32_t mouse_read(int32_t handle,unsigned char *data,int32_t count) {
+    (void)handle;
+    if (!data || count<1) return (int32_t)0x80DF0001;
+    memset(data,0,40); return 1; /* timestamp 0, connected=false */
+}
+
 /* ---- NetCtl / Net / Http / Ssl: no network ---- */
 static int32_t net_errno;
 static ABI int32_t *net_errno_loc(void) { return &net_errno; }
@@ -154,6 +167,9 @@ static ABI int32_t net_sock_info(int32_t s,void *info,int32_t n,int32_t flags) {
     if (s>=0) { net_errno=9; return NET_EBADF; }
     return 0;
 }
+/* sceNetCtlInit(void) (NID gky0+oaNM4k; Golf calls it with no arguments after sceNetPoolCreate and
+ * only tests the result for < 0): nothing to set up for the offline state reported below. */
+static ABI int32_t netctl_init(void) { return 0; }
 static ABI int32_t netctl_state(int32_t *state) { if (!state) return NET_CTL_INVALID_ADDR; *state=0; return 0; }
 static ABI int32_t netctl_info(int code,void *info) { (void)code; (void)info; return NET_CTL_NOT_CONNECTED; }
 static ABI int32_t netctl_register(void *cb,void *arg,int32_t *cid) { (void)cb; (void)arg; if (!cid) return NET_CTL_INVALID_ADDR; *cid=new_id(); return 0; }
@@ -936,6 +952,8 @@ static const RuntimeExport exports[]={
     {"sceNetSocketClose",net_unreachable}, {"sceNetSocketAbort",net_unreachable},
     {"sceNetEpollControl",net_unreachable}, {"sceNetEpollWait",net_unreachable},
 
+    {"sceMouseInit",mouse_init}, {"sceMouseOpen",mouse_open}, {"sceMouseRead",mouse_read},
+    {"sceNetCtlInit",netctl_init},
     {"sceNetCtlGetState",netctl_state}, {"sceNetCtlGetInfo",netctl_info},
     {"sceNetCtlRegisterCallback",netctl_register}, {"sceNetCtlCheckCallback",netctl_check},
     {"sceNetCtlUnregisterCallback",netctl_unregister}, {"sceNetCtlGetNatInfo",netctl_nat},

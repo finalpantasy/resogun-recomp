@@ -149,6 +149,20 @@ static int32_t wake_all(Sema *s,int32_t result) {
     }
     return count;
 }
+static ABI int32_t sem_cancel(uint32_t id,int32_t count,int32_t *waiters) {
+    pthread_mutex_lock(&lock);
+    Sema *s=find(id);
+    int32_t result=0;
+    if (!s) result=ERR(3);
+    else if (count>s->maximum) result=ERR(22);
+    else {
+        int32_t n=wake_all(s,ERR(85));
+        if (waiters) *waiters=n;
+        s->count=count<0 ? s->initial : count;
+    }
+    pthread_mutex_unlock(&lock);
+    return result;
+}
 static ABI int32_t sem_delete(uint32_t id) {
     pthread_mutex_lock(&lock);
     Sema **p=&registry;
@@ -169,6 +183,7 @@ uintptr_t runtime_sema_resolve(const char *name) {
     if (!strcmp(name,"Zxa0VhQVTsk#libkernel")) return (uintptr_t)sem_wait;
     if (!strcmp(name,"4czppHBiriw#libkernel")) return (uintptr_t)sem_signal;
     if (!strcmp(name,"R1Jvn8bSCW8#libkernel")) return (uintptr_t)sem_delete;
+    if (!strcmp(name,"4DM06U2BNEY#libkernel")) return (uintptr_t)sem_cancel;
     return 0;
 }
 void runtime_sema_report(void) {

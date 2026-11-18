@@ -215,11 +215,17 @@ static ABI int32_t kernel_mlock(const void *address,uint64_t size) { (void)addre
 static ABI int32_t elf_phdr_match_addr(void *info,uint64_t address) { (void)info; (void)address; return 0; }
 static ABI int32_t is_signal_return(uint64_t pc) { (void)pc; return 0; }
 static ABI void pthread_cxa_finalize(void *dso) { (void)dso; }
-/* Newer libc.prx (SDK 9) registers its thread-local destructor runner at start-up. Recorded only:
- * guest threads that end do not run it yet. */
+/* Newer libc.prx registers its thread-local destructor runner at start-up; runtime_thread.c
+ * calls it when a guest thread finishes. */
 GuestCallback runtime_guest_thread_dtors;
+static ABI int32_t set_thread_dtors(GuestCallback dtors) { runtime_guest_thread_dtors=dtors; return 0; }
 /* The same libc also registers its thread atexit counter and report hooks; recorded the same way. */
 GuestCallback runtime_guest_thread_atexit_count, runtime_guest_thread_atexit_report;
+static ABI int32_t set_thread_atexit_count(GuestCallback callback) { runtime_guest_thread_atexit_count=callback; return 0; }
+static ABI int32_t set_thread_atexit_report(GuestCallback callback) { runtime_guest_thread_atexit_report=callback; return 0; }
+/* Related direct-code runtimes accept these hooks without bookkeeping; exact accounting remains untested. */
+static ABI int32_t thread_atexit_ok(void) { return 0; }
+static ABI int32_t kernel_false(void) { return 0; }
 /* sceKernelIsNeoMode / sceKernelHasNeoMode: 1 on a PS4 Pro, which render_resolution=4k reports
  * (loader.c), as the GPU core does (gpu/shim/resogun_gpu.cpp). */
 static int neo;
@@ -366,7 +372,7 @@ static const RuntimeExport exports[]={
     {"__pthread_cxa_finalize",pthread_cxa_finalize},
 
     {"sceLibcHeapGetTraceInfo",heap_trace_info},
-    {"sceKernelIsNeoMode",neo_mode}, {"sigreturn",unwind_resume},
+    {"sceKernelIsNeoMode",neo_mode}, {"sceKernelGetCpumode",neo_mode}, {"sigreturn",unwind_resume},
 
     {"signal",guest_signal}, {"sigprocmask",guest_sigprocmask}, {"_sigprocmask",guest_sigprocmask},
     {"sigfillset",guest_sigfillset},
@@ -374,5 +380,11 @@ static const RuntimeExport exports[]={
     {"scePthreadOnce",thread_once},
     {"scePthreadKeyCreate",key_create}, {"scePthreadKeyDelete",key_delete},
     {"scePthreadSetspecific",key_set}, {"scePthreadGetspecific",key_get},
+    {"_sceKernelSetThreadDtors",set_thread_dtors},
+    {"_sceKernelSetThreadAtexitCount",set_thread_atexit_count},
+    {"_sceKernelSetThreadAtexitReport",set_thread_atexit_report},
+    {"_sceKernelRtldThreadAtexitIncrement",thread_atexit_ok},
+    {"_sceKernelRtldThreadAtexitDecrement",thread_atexit_ok},
+    {"sceKernelIsAddressSanitizerEnabled",kernel_false},
 };
 uintptr_t runtime_kernel_resolve(const char *name) { return RUNTIME_LOOKUP(exports,name); }

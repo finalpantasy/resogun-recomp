@@ -234,7 +234,10 @@ static ABI int32_t a3d_queue_level(uint32_t port,uint32_t *level,uint32_t *avail
 #define VIDEO_OUT_INVALID_VALUE ((int32_t)0x80290001)
 #define VIDEO_OUT_INVALID_ADDRESS ((int32_t)0x80290002)
 
+static ABI int32_t remoteplay_initialize(void) { return 0; }
+
 static const RuntimeExport exports[]={
+    {"sceRemoteplayInitialize",remoteplay_initialize},
     {"sceCameraOpen",camera_open}, {"sceCameraClose",camera_close},
     {"sceCameraSetConfig",camera_config},
     {"sceCameraStart",camera_start}, {"sceCameraSetVideoSync",camera_video_sync},

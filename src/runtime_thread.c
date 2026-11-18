@@ -361,6 +361,7 @@ static void *host_start(void *p) {
     set_host_name(t->name);
     set_host_priority(t->name,t->attr.prio);
     if (!exit_setjmp(t)) t->result=t->entry(t->argument);
+    if (runtime_guest_thread_dtors) runtime_guest_thread_dtors();
     runtime_thread_keys_cleanup();
     pthread_mutex_lock(&lock); t->finished=1; ++exited;
 #ifdef _WIN32

@@ -68,6 +68,19 @@ static uint64_t now_utc(void) {
 }
 
 static ABI int32_t rtc_current_tick(uint64_t *tick) { if (!tick) return ERR_INVALID_POINTER; *tick=now_utc(); return 0; }
+static ABI int32_t rtc_current_local(DateTime *out) {
+    if (!out) return ERR_INVALID_POINTER;
+    struct timespec now;
+    clock_gettime(CLOCK_REALTIME,&now);
+    time_t seconds=now.tv_sec;
+    struct tm local;
+    if (!localtime_r(&seconds,&local)) return -1;
+    out->year=(uint16_t)local.tm_year+1900; out->month=(uint16_t)local.tm_mon+1;
+    out->day=(uint16_t)local.tm_mday; out->hour=(uint16_t)local.tm_hour;
+    out->minute=(uint16_t)local.tm_min; out->second=(uint16_t)local.tm_sec;
+    out->microsecond=(uint32_t)(now.tv_nsec/1000);
+    return 0;
+}
 static ABI int32_t rtc_get_tick(const DateTime *t, uint64_t *tick) {
     if (!t || !tick) return ERR_INVALID_POINTER;
     int32_t e=validate(t);
@@ -142,6 +155,8 @@ static ABI int32_t rtc_parse_date_time(uint64_t *tick, const char *text) {
 }
 static const RuntimeExport exports[]={
     {"sceRtcGetCurrentNetworkTick",rtc_current_tick},
+    {"sceRtcGetCurrentClockLocalTime",rtc_current_local},
+    {"sceRtcGetCurrentTick",rtc_current_tick},
 
     {"sceRtcGetTick",rtc_get_tick}, {"sceRtcSetTick",rtc_set_tick},
     {"sceRtcGetTickResolution",rtc_tick_resolution}, {"sceRtcTickAddHours",rtc_add_hours}, {"sceRtcTickAddSeconds",rtc_add_seconds},

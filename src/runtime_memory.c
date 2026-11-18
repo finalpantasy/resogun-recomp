@@ -303,6 +303,12 @@ static size_t carve_host(uintptr_t a, uintptr_t b) {
     return at;
 }
 static int host_map(uintptr_t address, uint64_t size, int prot, int reserved, uint64_t phys) {
+    if (address<USER_MIN) {
+        if (!VirtualAlloc2(NULL,(void *)address,size,MEM_RESERVE|MEM_RESERVE_PLACEHOLDER,PAGE_NOACCESS,NULL,0)) return -1;
+        size_t at=0;
+        while (at<region_count && regions[at].start<address) ++at;
+        region_insert(at,(HostRegion){address,address+size,0,0});
+    }
     size_t i=carve_host(address,address+size);
     if (reserved) return 0;
     regions[i].phys=phys; regions[i].mapped=1;
@@ -586,6 +592,7 @@ static int32_t place(void **inout, uint64_t size, int prot, int flags, uint64_t 
         address=find_free(address,size,alignment);
         if (!address) return NO_MEMORY;
     }
+    if (runtime_verbose()) printf("Runtime: map request %p size=%" PRIu64 " kind=%d flags=%#x phys=%#" PRIx64 "\n",(void *)address,size,kind,flags,phys);
     if (host_map(address,size,host_prot(prot),kind==KIND_RESERVED,phys)) return NO_MEMORY;
     /* Mappings replaced here (their GPU buffers and images were retired by retire_fixed, found
      * when a game maps pool chunks over themselves on a level reload) count for the report. */
@@ -623,6 +630,36 @@ static ABI uint64_t direct_size(void) {
     uint64_t size=POOL_SIZE;
     write_unlock();
     return size;
+}
+static ABI uint64_t flexible_available(void) {
+    read_lock();
+    uint64_t available=FLEXIBLE_SIZE-flexible_bytes;
+    read_unlock();
+    return available;
+}
+static ABI int32_t direct_available(int64_t low, int64_t high, uint64_t alignment, int64_t *out, uint64_t *size_out) {
+    if (!alignment) alignment=PAGE;
+    if (!out || !size_out || low<0 || high<0 || !valid_alignment(alignment)) return INVALID;
+    uint64_t end=(uint64_t)high<POOL_SIZE ? (uint64_t)high : POOL_SIZE;
+    uint64_t best=0,best_start=0;
+    read_lock();
+    for (int candidate=-1;candidate<LIMIT;++candidate) {
+        if (candidate>=0 && !blocks[candidate].used) continue;
+        uint64_t start=align_up(candidate<0 ? (uint64_t)low : blocks[candidate].start+blocks[candidate].size,alignment);
+        if (start<(uint64_t)low || start>=end) continue;
+        uint64_t stop=end;
+        int inside=0;
+        for (int i=0;i<LIMIT;++i) {
+            if (!blocks[i].used) continue;
+            if (start>=blocks[i].start && start-blocks[i].start<blocks[i].size) { inside=1; break; }
+            if (blocks[i].start>start && blocks[i].start<stop) stop=blocks[i].start;
+        }
+        if (!inside && stop-start>best) { best=stop-start; best_start=start; }
+    }
+    read_unlock();
+    if (!best) return NO_SPACE;
+    *out=(int64_t)best_start; *size_out=best;
+    return 0;
 }
 /* A reservation the game asked for and did not get (the mapping failures print their own line):
  * a guest NULL read soon after one is the allocation's, not a bug of its own. The first 16 only,
@@ -803,6 +840,19 @@ static ABI int32_t map_flexible(void **inout, uint64_t size, int prot, int flags
 static ABI int32_t map_flexible_named(void **inout, uint64_t size, int prot, int flags, const char *name) {
     (void)name; return map_flexible(inout,size,prot,flags);
 }
+static ABI int32_t reserve_range(void **inout, uint64_t size, int flags, uint64_t alignment) {
+    if (!alignment) alignment=PAGE;
+    if (!inout || !size || size%PAGE || !valid_alignment(alignment)) return INVALID;
+    write_lock();
+    if ((flags & MAP_FIXED_FLAG) && overlaps((uintptr_t)*inout,(uintptr_t)*inout+size,0)) {
+        write_unlock();
+        return NO_MEMORY;
+    }
+    int32_t result=place(inout,size,0,flags,alignment,KIND_RESERVED,0,0);
+    write_unlock();
+    if (!result && runtime_verbose()) printf("Runtime: reserved virtual range %p, size=%" PRIu64 "\n",*inout,size);
+    return result;
+}
 /* POSIX mmap (shadPS4 posix_mmap): MAP_ANON (0x1000) takes memory from the flexible pool.
  * A file mapping is a copy: flexible pages filled from the
  * guest fd at offset (page aligned, EINVAL otherwise), zero past the end of the file, then given
@@ -851,16 +901,40 @@ static ABI int32_t kernel_mprotect(const void *address, uint64_t size, int prot)
     flush_hooks();
     return result;
 }
+typedef struct {
+    uintptr_t start, end; uint64_t offset; int32_t protection, memory_type;
+    uint32_t flags; char name[32];
+} VirtualQueryInfo;
+_Static_assert(sizeof(VirtualQueryInfo)==72,"PS4 virtual query info layout");
+static ABI int32_t virtual_query(const void *address, int flags, VirtualQueryInfo *info, uint64_t info_size) {
+    if (!info || info_size!=sizeof(*info)) return INVALID;
+    read_lock();
+    size_t i=vma_index((uintptr_t)address);
+    if (i==vma_count || (vmas[i].start>(uintptr_t)address && !(flags & 1))) { read_unlock(); return ACCESS; }
+    Vma v=vmas[i];
+    memset(info,0,sizeof(*info));
+    info->start=v.start; info->end=v.end;
+    info->offset=v.kind==KIND_DIRECT ? v.phys : 0;
+    info->protection=v.prot; info->memory_type=v.type;
+    info->flags=(v.kind==KIND_FLEXIBLE ? 1u : 0) | (v.kind==KIND_DIRECT ? 2u : 0) | (v.kind!=KIND_RESERVED ? 16u : 0);
+    strcpy(info->name,v.kind==KIND_RESERVED ? "reserved" : v.kind==KIND_DIRECT ? "direct" : "flexible");
+    ++queries;
+    read_unlock();
+    return 0;
+}
 /* The allocated block holding `offset`; with flag 1 (SCE_KERNEL_DMQ_FIND_NEXT) the first block at
  * or after it when none holds it. Unallocated memory is ACCESS, as on the PS4. */
 typedef struct { int64_t start, end; int32_t type; } DirectQueryInfo;
 static const RuntimeExport exports[]={
     {"mmap",posix_mmap}, {"msync",posix_msync},
     {"sceKernelGetDirectMemorySize",direct_size}, {"sceKernelAllocateDirectMemory",direct_allocate},
-
+    {"sceKernelAvailableDirectMemorySize",direct_available},
+    {"sceKernelAvailableFlexibleMemorySize",flexible_available},
     {"sceKernelMapDirectMemory",direct_map},
     {"sceKernelReleaseDirectMemory",direct_release}, {"sceKernelMunmap",direct_unmap},
     {"sceKernelMapNamedFlexibleMemory",map_flexible_named},
+    {"sceKernelReserveVirtualRange",reserve_range},
+    {"sceKernelVirtualQuery",virtual_query},
 };
 uintptr_t runtime_memory_resolve(const char *name) {
     /* Direct-memory NIDs resolve before import_names.inc names them. */
