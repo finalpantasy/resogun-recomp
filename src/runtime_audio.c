@@ -500,11 +500,26 @@ static ABI int32_t audio_state(int32_t handle, PortState *state) {
 /* sceAudioOutSetMixLevelPadSpk(handle, level) (shadPS4 audioout.cpp): a pad speaker port's
  * level, 0..VOLUME_0DB, scaling its gain on the main output. */
 #define ERR_INVALID_MIXLEVEL ((int32_t)0x80260014)
+#define ERR_INVALID_PORT_TYPE ((int32_t)0x8026000A)
+static ABI int32_t audio_mix_level(int32_t handle, int32_t level) {
+    int32_t error=0;
+    pthread_mutex_lock(&table_lock);
+    Port *p=port_of(handle,&error);
+    pthread_mutex_unlock(&table_lock);
+    if (!p) return error;
+    if (p->type!=4) return ERR_INVALID_PORT_TYPE;
+    if (level<0 || level>VOLUME_0DB) return ERR_INVALID_MIXLEVEL;
+    pthread_mutex_lock(&p->lock);
+    p->mix_level=level;
+    pthread_mutex_unlock(&p->lock);
+    return 0;
+}
 
 static const RuntimeExport exports[]={
     {"sceAudioOutInit",audio_init}, {"sceAudioOutOpen",audio_open}, {"sceAudioOutClose",audio_close},
     {"sceAudioOutOutput",audio_output}, {"sceAudioOutOutputs",audio_outputs},
     {"sceAudioOutSetVolume",audio_volume}, {"sceAudioOutGetPortState",audio_state},
+    {"sceAudioOutSetMixLevelPadSpk",audio_mix_level},
 };
 uintptr_t runtime_audio_resolve(const char *name) { return RUNTIME_LOOKUP(exports,name); }
 void runtime_audio_report(void) {

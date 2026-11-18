@@ -255,6 +255,8 @@ uintptr_t runtime_resolve(const char *name, int is_data) {
     if (pad) return pad;
     uintptr_t rtc = runtime_rtc_resolve(name);
     if (rtc) return rtc;
+    uintptr_t ngs2 = runtime_ngs2_resolve(name);
+    if (ngs2) return ngs2;
     uintptr_t json = runtime_json_resolve(name);
     if (json) return json;
     uintptr_t fiber = runtime_fiber_resolve(name);

@@ -168,6 +168,7 @@ void runtime_pad_report(void);
 /* resogun --gamepad: prints one "Gamepad:" line for the first pad found (returns 1) or none (0). */
 int runtime_pad_describe(void);
 uintptr_t runtime_rtc_resolve(const char *name);
+uintptr_t runtime_ngs2_resolve(const char *name);
 uintptr_t runtime_json_resolve(const char *name);
 uintptr_t runtime_fiber_resolve(const char *name);
 const char *runtime_file_user_dir(void);
