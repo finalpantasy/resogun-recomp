@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import stat
 import struct
 import subprocess
 import sys
@@ -211,6 +212,31 @@ def copy(source, target):
     shutil.copy2(source, target)
 
 
+def check_output(path, *, directory=False):
+    """Reject output paths that could redirect a write outside the package."""
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return
+    reparse = getattr(info, 'st_file_attributes', 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT
+    if directory:
+        valid = stat.S_ISDIR(info.st_mode)
+    else:
+        valid = stat.S_ISREG(info.st_mode) and info.st_nlink == 1
+    if reparse or not valid:
+        raise SystemExit(f'Cannot write package output at {path}. Choose a fresh --out directory.')
+
+
+def check_dependencies(out, folder, expected):
+    deps = out / folder
+    check_output(deps, directory=True)
+    expected = {os.path.normcase(name) for name in expected}
+    if deps.is_dir():
+        for entry in deps.iterdir():
+            if os.path.normcase(entry.name) not in expected:
+                raise SystemExit(f'{entry} is outside this package. Choose a fresh --out directory.')
+
+
 def strip(source, target, bin_dir, mode='--strip-all'):
     """Copies an exe without its debug info (RelWithDebInfo DWARF is most of the build size).
     Crash logs give exe+offset, which the unstripped build resolves."""
@@ -243,7 +269,7 @@ def appimage(out, shipped, release, tarball):
 
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument('--out', type=Path, help='the folder to fill (default dist)')
+    p.add_argument('--out', type=Path, help='the release folder (default dist). Use a fresh folder when dependencies change.')
     p.add_argument('--appimage', action='store_true', help='also build the Linux AppImage and tarball')
     p.add_argument('--zip', action='store_true', help='also write out/<release>.zip (and <release>-symbols.zip)')
     p.add_argument('--debug', action='store_true', help='keep debug info in the exes and ship the diagnose/ kit')
@@ -258,8 +284,37 @@ def main():
             raise SystemExit(f'out/{name} not found: build first (bash build.sh).')
         verify_build(executable, revision)
     out = (a.out or PORT / 'dist').resolve()
+    if out == (PORT / 'out').resolve():
+        raise SystemExit('Build output is the package source. Choose a different --out directory.')
+    check_output(out, directory=True)
     if any((out / old).exists() for old in ('resogun.exe', 'resogun', 'resogun-setup.exe', 'resogun-setup', 'prepare')):
         raise SystemExit(f'{out} contains a legacy release. Choose a fresh --out directory.')
+    assets = {
+        'settings.example.ini': PORT / 'settings.example.ini',
+        'LICENSE.txt': PORT / 'LICENSE',
+        'Orbitron-OFL.txt': PORT / 'gpu/third_party/fonts/orbitron/OFL.txt',
+        'recomplauncher.json': PORT / 'recomplauncher.json',
+    }
+    outputs = [*programs, *assets, 'release.txt', 'README.txt']
+    if LINUX:
+        libs = so_closure(list(programs.values()))
+        check_dependencies(out, 'lib', libs)
+        outputs.extend(f'lib/{name}' for name in libs)
+    else:
+        if next(out.glob('*.dll'), None) is not None:
+            raise SystemExit(f'{out} contains loose DLLs. Choose a fresh --out directory.')
+        dlls = dll_closure(programs[EXES[0]], bin_dir)
+        check_dependencies(out, 'libs', ['libs.manifest', *(dll.name for dll in dlls)])
+        outputs.extend(f'libs/{dll.name}' for dll in dlls)
+        outputs.append('libs/libs.manifest')
+        if a.debug:
+            check_output(out / 'diagnose', directory=True)
+            for bat in sorted(DIAGNOSE.glob('*.bat')):
+                name = f'diagnose/{bat.name}'
+                assets[name] = bat
+                outputs.append(name)
+    for name in outputs:
+        check_output(out / name)
     release = release_name()
     shipped = []
 
@@ -276,10 +331,6 @@ def main():
         if LINUX:
             set_rpath(out / name, '$ORIGIN/lib')
     if LINUX:
-        libs = so_closure(list(programs.values()))
-        for old in (out / 'lib').glob('*') if (out / 'lib').is_dir() else ():
-            if old.name not in libs:
-                old.unlink()
         for name, lib in libs.items():
             target = out / 'lib' / name
             if a.debug:
@@ -290,34 +341,18 @@ def main():
             shipped.append(f'lib/{name}')
         dlls = libs
     else:
-        # The kit's own files come and go with --debug; its captures and log stay.
-        for bat in sorted(DIAGNOSE.glob('*.bat')):
-            if a.debug:
-                ship(bat, f'diagnose/{bat.name}')
-            else:
-                (out / 'diagnose' / bat.name).unlink(missing_ok=True)
-        # The DLLs go in libs/ (older releases had them beside the exes).
-        dlls = dll_closure(PORT / 'out' / EXES[0], bin_dir)
-        wanted = {dll.name.lower() for dll in dlls}
-        for old in out.glob('*.dll'):
-            old.unlink()
-        for old in (out / 'libs').glob('*.dll'):
-            if old.name.lower() not in wanted:
-                old.unlink()
         for dll in dlls:
             ship(dll, f'libs/{dll.name}')
         files = ''.join(f'  <file name="{dll.name}"/>\n' for dll in dlls)
+        (out / 'libs').mkdir(exist_ok=True)
         (out / 'libs' / 'libs.manifest').write_bytes(LIBS_MANIFEST.format(files=files).replace('\n', '\r\n').encode())
         shipped.append('libs/libs.manifest')
 
     (out / 'release.txt').write_bytes(f'{release}\n'.encode())
     readme = README.format(release=release, exe=EXES[0], debug_note=DEBUG_NOTE if a.debug and not LINUX else '')
     (out / 'README.txt').write_bytes(readme.encode())
-    ship(PORT / 'settings.example.ini', 'settings.example.ini')
-    ship(PORT / 'LICENSE', 'LICENSE.txt')
-    ship(PORT / 'gpu/third_party/fonts/orbitron/OFL.txt', 'Orbitron-OFL.txt')
-    # RecompLauncher's profile is installed beside the executable.
-    ship(PORT / 'recomplauncher.json', 'recomplauncher.json')
+    for name, source in assets.items():
+        ship(source, name)
     shipped += ['release.txt', 'README.txt']
     size = sum((out / name).stat().st_size for name in shipped)
     if LINUX:
