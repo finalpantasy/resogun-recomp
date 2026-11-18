@@ -8,6 +8,8 @@
  * Dialogs about PSN or the system (sign-in, invitation, error, social screen) draw nothing: an
  * opened one finishes at once, cancelled by the user. */
 #include "runtime.h"
+#include <pthread.h>
+#include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
 #include <stdatomic.h>
@@ -34,6 +36,215 @@ static ABI int32_t signed_out(void) { return NP_SIGNED_OUT; }
  * Delete call on a request, sceNpTusAbortRequest, sceNpTusDeleteRequest and
  * sceNpTusDeleteNpTitleCtx find no such id: COMMUNITY INVALID_ID. */
 static ABI int32_t community_no_id(void) { return COMMUNITY_INVALID_ID; }
+
+/* ---- Golf's opt-in, process-local Title User Storage ---- */
+#define TUS_TOO_MANY_OBJECTS ((int32_t)0x80550706)
+#define TUS_ABORTED ((int32_t)0x80550707)
+#define TUS_BODY_TOO_LARGE ((int32_t)0x80550709)
+#define TUS_ALREADY_END ((int32_t)0x80550712)
+#define TUS_REQUEST_BEFORE_END ((int32_t)0x80550717)
+#define TUS_USER_NOT_ASSIGNED ((int32_t)0x8055082B)
+#define TUS_DATA_NOT_FOUND ((int32_t)0x8055084A)
+#define TUS_CONDITIONS_NOT_SATISFIED ((int32_t)0x80550873)
+
+/* The guest reads this ABI layout after its asynchronous GET completes. */
+typedef struct {
+    char online_id[20];
+    uint8_t reserved[16];
+    int32_t set;
+    uint64_t tick;
+    char author_id[20];
+    uint8_t padding[20];
+    void *data;
+    uint64_t size;
+    uint8_t info[392];
+    uint64_t owner, author;
+    uint8_t tail[16];
+} TusStatus;
+_Static_assert(sizeof(TusStatus)==0x210 && offsetof(TusStatus,tick)==0x28 &&
+               offsetof(TusStatus,data)==0x58 && offsetof(TusStatus,size)==0x60 &&
+               offsetof(TusStatus,author)==0x1f8,"Golf TUS status layout");
+
+enum { TUS_MAX_SLOT_BYTES=0x7d8, TUS_REQUESTS=8 };
+static const size_t tus_slot_sizes[]={TUS_MAX_SLOT_BYTES,0x40,0xd9};
+static struct { uint64_t tick; uint8_t bytes[TUS_MAX_SLOT_BYTES]; } tus_slots[3];
+static struct { int32_t id; uint64_t account; char online_id[20]; } tus_context;
+typedef struct { int32_t id, result; int ready; } TusRequest;
+static TusRequest tus_requests[TUS_REQUESTS];
+static pthread_mutex_t tus_lock=PTHREAD_MUTEX_INITIALIZER;
+
+static TusRequest *tus_find(int32_t id) {
+    if (id<=0) return NULL;
+    for (size_t i=0;i<TUS_REQUESTS;++i)
+        if (tus_requests[i].id==id) return &tus_requests[i];
+    return NULL;
+}
+
+static ABI int32_t tus_create_context(uint32_t label,int32_t user) {
+    if (label!=0) return COMMUNITY_INVALID_ARGUMENT;
+    int32_t initial;
+    uint64_t account;
+    char online_id[20]={0};
+    typedef int32_t (ABI *Initial)(int32_t *);
+    typedef int32_t (ABI *Account)(int32_t,uint64_t *);
+    typedef int32_t (ABI *OnlineId)(int32_t,char *);
+    Initial get_initial=(Initial)runtime_services_resolve("sceUserServiceGetInitialUser");
+    Account get_account=(Account)runtime_services_resolve("sceNpGetAccountIdA");
+    OnlineId get_online_id=(OnlineId)runtime_golf_resolve("sceNpGetOnlineId");
+    if (!get_initial || !get_account || !get_online_id || get_initial(&initial) || user!=initial ||
+        get_account(user,&account) || get_online_id(user,online_id)) return NP_SIGNED_OUT;
+
+    pthread_mutex_lock(&tus_lock);
+    int32_t result=TUS_TOO_MANY_OBJECTS;
+    if (!tus_context.id) {
+        tus_context.id=result=new_object();
+        tus_context.account=account;
+        memcpy(tus_context.online_id,online_id,sizeof online_id);
+    }
+    pthread_mutex_unlock(&tus_lock);
+    return result;
+}
+
+static ABI int32_t tus_delete_context(int32_t context) {
+    pthread_mutex_lock(&tus_lock);
+    int32_t result=COMMUNITY_INVALID_ID;
+    if (context>0 && context==tus_context.id) {
+        memset(&tus_context,0,sizeof tus_context);
+        memset(tus_requests,0,sizeof tus_requests);
+        result=0;
+    }
+    pthread_mutex_unlock(&tus_lock);
+    return result;
+}
+
+static ABI int32_t tus_create_request(int32_t context) {
+    pthread_mutex_lock(&tus_lock);
+    int32_t result=COMMUNITY_INVALID_ID;
+    if (context>0 && context==tus_context.id) {
+        result=TUS_TOO_MANY_OBJECTS;
+        for (size_t i=0;i<TUS_REQUESTS;++i) {
+            if (tus_requests[i].id) continue;
+            tus_requests[i].id=result=new_object();
+            break;
+        }
+    }
+    pthread_mutex_unlock(&tus_lock);
+    return result;
+}
+
+static ABI int32_t tus_delete_request(int32_t id) {
+    pthread_mutex_lock(&tus_lock);
+    TusRequest *request=tus_find(id);
+    if (request) memset(request,0,sizeof *request);
+    pthread_mutex_unlock(&tus_lock);
+    return request ? 0 : COMMUNITY_INVALID_ID;
+}
+
+static ABI int32_t tus_abort(int32_t id) {
+    pthread_mutex_lock(&tus_lock);
+    TusRequest *request=tus_find(id);
+    int32_t result=COMMUNITY_INVALID_ID;
+    if (request) {
+        result=TUS_ALREADY_END;
+        if (!request->ready) {
+            request->ready=1;
+            request->result=TUS_ABORTED;
+            result=0;
+        }
+    }
+    pthread_mutex_unlock(&tus_lock);
+    return result;
+}
+
+static ABI int32_t tus_poll(int32_t id,int32_t *operation_result) {
+    pthread_mutex_lock(&tus_lock);
+    TusRequest *request=tus_find(id);
+    int32_t result=COMMUNITY_INVALID_ID;
+    if (request) {
+        result=1;
+        if (request->ready) {
+            if (operation_result) *operation_result=request->result;
+            request->ready=0;
+            result=0;
+        }
+    }
+    pthread_mutex_unlock(&tus_lock);
+    return result;
+}
+
+static int32_t tus_submission(TusRequest *request) {
+    if (!request) return COMMUNITY_INVALID_ID;
+    return request->ready ? TUS_REQUEST_BEFORE_END : 0;
+}
+
+static ABI int32_t tus_get_data(int32_t id,uint64_t account,int32_t slot,void *status,
+                                uint64_t status_size,void *data,uint64_t capacity,void *option) {
+    if (slot<1 || slot>3 || !status || status_size!=sizeof(TusStatus) || !data || option)
+        return COMMUNITY_INVALID_ARGUMENT;
+    const size_t index=(size_t)(slot-1), size=tus_slot_sizes[index];
+    pthread_mutex_lock(&tus_lock);
+    TusRequest *request=tus_find(id);
+    int32_t result=tus_submission(request);
+    if (!result) {
+        int32_t operation=0;
+        if (account!=tus_context.account) operation=TUS_USER_NOT_ASSIGNED;
+        else if (!tus_slots[index].tick) operation=TUS_DATA_NOT_FOUND;
+        else if (capacity<size) operation=TUS_BODY_TOO_LARGE;
+        else {
+            TusStatus stored={.set=1,.tick=tus_slots[index].tick,.data=data,.size=size,
+                              .owner=account,.author=account};
+            memcpy(stored.online_id,tus_context.online_id,sizeof stored.online_id);
+            memcpy(stored.author_id,tus_context.online_id,sizeof stored.author_id);
+            memcpy(data,tus_slots[index].bytes,size);
+            memcpy(status,&stored,sizeof stored);
+        }
+        request->result=operation;
+        request->ready=1;
+    }
+    pthread_mutex_unlock(&tus_lock);
+    return result;
+}
+
+static ABI int32_t tus_set_data(int32_t id,uint64_t account,int32_t slot,uint64_t total_size,
+                                uint64_t send_size,const void *data,const void *info,uint64_t info_size,
+                                const uint64_t *author,const uint64_t *changed,void *option) {
+    if (slot<1 || slot>3 || !data || info || info_size || option) return COMMUNITY_INVALID_ARGUMENT;
+    const size_t index=(size_t)(slot-1), size=tus_slot_sizes[index];
+    if (total_size!=size || send_size!=size) return COMMUNITY_INVALID_ARGUMENT;
+    typedef int32_t (ABI *Tick)(uint64_t *);
+    Tick current_tick=(Tick)runtime_rtc_resolve("sceRtcGetCurrentTick");
+    uint64_t now=0;
+    if (!current_tick || current_tick(&now) || !now) return NP_SIGNED_OUT;
+
+    pthread_mutex_lock(&tus_lock);
+    TusRequest *request=tus_find(id);
+    int32_t result=tus_submission(request);
+    if (!result) {
+        int32_t operation=0;
+        const uint64_t previous=tus_slots[index].tick;
+        uint64_t expected_author=0, expected_tick=0;
+        if (author) memcpy(&expected_author,author,sizeof expected_author);
+        if (changed) memcpy(&expected_tick,changed,sizeof expected_tick);
+        if (account!=tus_context.account) operation=TUS_USER_NOT_ASSIGNED;
+        else if ((author && expected_author!=(previous ? account : 0)) ||
+                 (changed && expected_tick!=previous)) operation=TUS_CONDITIONS_NOT_SATISFIED;
+        else {
+            memcpy(tus_slots[index].bytes,data,size);
+            tus_slots[index].tick=now>previous ? now : previous+1;
+        }
+        request->result=operation;
+        request->ready=1;
+    }
+    pthread_mutex_unlock(&tus_lock);
+    return result;
+}
+
+static const RuntimeExport golf_tus_exports[]={
+    {"sceNpTusCreateNpTitleCtxA",tus_create_context}, {"sceNpTusDeleteNpTitleCtx",tus_delete_context},
+    {"sceNpTusCreateRequest",tus_create_request}, {"sceNpTusDeleteRequest",tus_delete_request},
+    {"sceNpTusAbortRequest",tus_abort}, {"sceNpTusPollAsync",tus_poll},
+    {"sceNpTusGetDataAAsync",tus_get_data}, {"sceNpTusSetDataAAsync",tus_set_data},
+};
 
 /* ---- NpScore A variants (shadPS4 np_score.cpp) ----
  * sceNpScoreCreateNpTitleCtxA(label, user): SIGNED_OUT first, then the label is checked. The
@@ -727,4 +938,13 @@ static const RuntimeExport exports[]={
     {"sceInvitationDialogOpen",invitation_open},
     {"sceInvitationDialogGetResult",invitation_result},
 };
-uintptr_t runtime_np_resolve(const char *name) { return RUNTIME_LOOKUP(exports,name); }
+uintptr_t runtime_np_resolve(const char *name) {
+    if (!strncmp(name,"sceNpTus",8) && runtime_golf_local_account()) {
+        const char *mode=getenv("GOLF_TUS");
+        if (mode && !strcmp(mode,"local")) {
+            const uintptr_t local=RUNTIME_LOOKUP(golf_tus_exports,name);
+            if (local) return local;
+        }
+    }
+    return RUNTIME_LOOKUP(exports,name);
+}

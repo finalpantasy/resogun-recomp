@@ -476,8 +476,14 @@ static void hang_dump(unsigned seconds) {
     fflush(NULL);
 }
 static DWORD WINAPI watchdog_thread(void *seconds) {
-    Sleep(*(unsigned *)seconds*1000u);
-    fprintf(stderr,"STOP: watchdog timeout after %u s; thread stacks:\n",*(unsigned *)seconds);
+    const unsigned timeout=*(const unsigned *)seconds;
+    uint64_t remaining=(uint64_t)timeout*1000u;
+    while (remaining>=INFINITE) {
+        Sleep(INFINITE-1u);
+        remaining-=INFINITE-1u;
+    }
+    Sleep((DWORD)remaining);
+    fprintf(stderr,"STOP: watchdog timeout after %u s; thread stacks:\n",timeout);
     dump_threads();
     runtime_report();
     fflush(NULL);

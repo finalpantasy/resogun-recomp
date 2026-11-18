@@ -612,7 +612,12 @@ static void sample(PadData *d, int slot) {
     if (!slot) record_sample(d); /* the click sources as they are: a replay plays them again */
     read_inject();
     if (!slot) replay_sample(d);
-    d->buttons|=injected[slot].buttons;
+    const uint32_t inj=injected[slot].buttons;
+    d->buttons|=inj & ~STICK_DIRECTIONS;
+    if (inj & (LSTICK_LEFT|LSTICK_RIGHT)) key_axis(&d->left_x,inj & LSTICK_LEFT,inj & LSTICK_RIGHT);
+    if (inj & (LSTICK_UP|LSTICK_DOWN)) key_axis(&d->left_y,inj & LSTICK_UP,inj & LSTICK_DOWN);
+    if (inj & (RSTICK_LEFT|RSTICK_RIGHT)) key_axis(&d->right_x,inj & RSTICK_LEFT,inj & RSTICK_RIGHT);
+    if (inj & (RSTICK_UP|RSTICK_DOWN)) key_axis(&d->right_y,inj & RSTICK_UP,inj & RSTICK_DOWN);
     if (injected[slot].buttons & BTN_L2) d->l2=255;
     if (injected[slot].buttons & BTN_R2) d->r2=255;
     uint8_t *axes[4]={&d->left_x,&d->left_y,&d->right_x,&d->right_y};

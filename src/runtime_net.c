@@ -1,6 +1,6 @@
 /* Networking for an offline console (the cable is unplugged, as in runtime_services.c): the
- * libSceHttp normally reports HTTP NETWORK. Golf's exact discovery GET can be replayed
- * through an opt-in IPv4 loopback service. The Second Screen server has no client. */
+ * libSceHttp normally reports HTTP NETWORK. Golf's discovery, server-time and EULA routes
+ * can replay over opt-in IPv4 loopback. The Second Screen server has no client. */
 #ifdef _WIN32
 #include <winsock2.h>
 #else
@@ -24,13 +24,25 @@
 #define HTTP_INVALID_VALUE ((int32_t)0x804311fe)
 static _Atomic int32_t http_next=0x10000;
 
-/* GOLF_DISCOVERY_PORT turns on exactly one URL and uses a literal loopback address. */
-static const char discovery_url[]="https://ssps4.scej-network.jp:443/nmg-us/ss.info";
-enum { DISCOVERY_MAX=0xa2800, DISCOVERY_HEADER_MAX=4096 };
+/* Only these guest URLs can replay over the literal loopback socket. */
+#define DISCOVERY_PATH "/nmg-us/ss.info"
+#define SERVER_TIME_PATH "/nmg-us/replay-probe/gameapi_getservertime"
+#define EULA_PATH "/nmg-us/replay-probe/gameapi_geteula"
+enum { DISCOVERY_HEADER_MAX=4096 };
+typedef struct {
+    const char *url, *path;
+    unsigned request_size, response_min, response_max, response_alignment;
+} ReplayRoute;
+static const ReplayRoute replay_routes[]={
+    {"https://ssps4.scej-network.jp:443" DISCOVERY_PATH, DISCOVERY_PATH, 0, 8, 0xa2800, 8},
+    {"https://127.0.0.1:8765" SERVER_TIME_PATH, SERVER_TIME_PATH, 102, 28, 28, 4},
+    {"https://127.0.0.1:8765" EULA_PATH, EULA_PATH, 110, 64, 60+0x8000, 4},
+};
 static pthread_mutex_t discovery_lock=PTHREAD_MUTEX_INITIALIZER;
 static struct {
     int32_t id;
     unsigned port;
+    const ReplayRoute *route;
     int status, read;
     size_t length;
     unsigned char *body;
@@ -55,11 +67,23 @@ typedef int DiscoverySocket;
 #define DISCOVERY_SEND_FLAGS MSG_NOSIGNAL
 #endif
 
-static int discovery_exchange(void) {
+static int discovery_send(DiscoverySocket sock,const void *data,int size) {
+    const char *bytes=data;
+    int sent=0;
+    while (sent<size) {
+        int n=(int)send(sock,bytes+sent,size-sent,DISCOVERY_SEND_FLAGS);
+        if (n<=0) return 0;
+        sent+=n;
+    }
+    return 1;
+}
+
+static int discovery_exchange(const void *data,int size) {
     static const char request_format[]=
-        "GET /nmg-us/ss.info HTTP/1.1\r\nHost: 127.0.0.1:%u\r\n"
+        "%s %s HTTP/1.1\r\nHost: 127.0.0.1:%u\r\n"
         "User-Agent: PS4Application nolib/0.0 (U-UP9000-CUSA04687_00-EVERYBODYSGOLF07/2017022700/1170)\r\n"
-        "Connection: close\r\n\r\n";
+        "%sConnection: close\r\n\r\n";
+    const ReplayRoute *route=discovery.route;
 #ifdef _WIN32
     WSADATA wsa;
     if (WSAStartup(MAKEWORD(2,2),&wsa)) return 0;
@@ -79,17 +103,20 @@ static int discovery_exchange(void) {
     target.sin_port=htons((uint16_t)discovery.port);
     if (connect(sock,(const struct sockaddr *)&target,sizeof target)) goto done;
 
-    char request[256];
-    int request_size=snprintf(request,sizeof request,request_format,discovery.port);
-    if (request_size<0 || (size_t)request_size>=sizeof request) goto done;
-    int sent=0;
-    while (sent<request_size) {
-        int n=(int)send(sock,request+sent,request_size-sent,DISCOVERY_SEND_FLAGS);
-        if (n<=0) goto done;
-        sent+=n;
+    char request[320], headers[96]="";
+    if (route->request_size) {
+        int n=snprintf(headers,sizeof headers,
+                       "Content-Type: multipart/form-data; boundary=xYzZY\r\n"
+                       "Content-Length: %u\r\n",route->request_size);
+        if (n<0 || (size_t)n>=sizeof headers) goto done;
     }
+    const char *method=route->request_size ? "POST" : "GET";
+    int request_size=snprintf(request,sizeof request,request_format,method,route->path,discovery.port,headers);
+    if (request_size<0 || (size_t)request_size>=sizeof request ||
+        !discovery_send(sock,request,request_size) || !discovery_send(sock,data,size)) goto done;
 
-    const size_t capacity=DISCOVERY_HEADER_MAX+DISCOVERY_MAX;
+    const size_t max_body=route->response_max;
+    const size_t capacity=DISCOVERY_HEADER_MAX+max_body;
     response=malloc(capacity+1);
     if (!response) goto done;
     struct timespec start, now;
@@ -122,8 +149,8 @@ static int discovery_exchange(void) {
             size_t digits=strspn(field,"0123456789");
             if (!digits || digits>6 || (field[digits] && field[digits]!='\r')) goto done;
             length=(size_t)strtoul(field,NULL,10);
-            if (length>DISCOVERY_MAX || (status==200 && (!length || length%8)) ||
-                (status!=200 && length)) goto done;
+            if (length>max_body || (status!=200 && length)) goto done;
+            if (status==200 && (length<route->response_min || length%route->response_alignment)) goto done;
         }
     } while (!header_size || received<header_size+length);
     if (received!=header_size+length) goto done;
@@ -143,15 +170,14 @@ done:
 }
 
 static ABI int32_t http_send(int32_t id,const void *data,uint64_t length) {
-    (void)data;
     pthread_mutex_lock(&discovery_lock);
     int ok=0;
-    if (discovery.id && id==discovery.id && !length) {
+    if (discovery.id && id==discovery.id && length==discovery.route->request_size && (!length || data)) {
         free(discovery.body);
         discovery.body=NULL;
         discovery.status=discovery.read=0;
         discovery.length=0;
-        ok=discovery_exchange();
+        ok=discovery_exchange(data,(int)length);
     }
     pthread_mutex_unlock(&discovery_lock);
     return ok ? 0 : HTTP_NETWORK;
@@ -244,13 +270,22 @@ static ABI int32_t http_request_url(int32_t conn,int32_t method,const char *url,
     (void)conn;
     if (!url) return HTTP_INVALID_VALUE;
     const int32_t id=atomic_fetch_add(&http_next,1);
-    if (!method && !length && !strcmp(url,discovery_url)) {
+    const ReplayRoute *replay=NULL;
+    for (size_t i=0;i<sizeof replay_routes/sizeof *replay_routes;++i) {
+        const ReplayRoute *route=&replay_routes[i];
+        if (method==(route->request_size!=0) && length==route->request_size && !strcmp(url,route->url)) {
+            replay=route;
+            break;
+        }
+    }
+    if (replay) {
         const unsigned port=discovery_port();
         if (port) {
             pthread_mutex_lock(&discovery_lock);
             if (!discovery.id) {
                 discovery.id=id;
                 discovery.port=port;
+                discovery.route=replay;
                 pthread_mutex_unlock(&discovery_lock);
                 return id;
             }
