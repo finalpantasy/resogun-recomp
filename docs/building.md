@@ -91,6 +91,12 @@ installed add-on folders. `--entitlements builtin` selects the game's
 built-in entitlement table and overrides the inherited `GOLF_ENTITLEMENTS`
 environment value. This setting applies to the current launch.
 
+The launcher also accepts `--np-mode local|offline`, `--online-id NAME`
+and `--discovery-port N` for local replay. They override
+`GOLF_NP`, `GOLF_ONLINE_ID` and `GOLF_DISCOVERY_PORT` for the current
+launch. A port of 0 disables loopback replay. Use `--font-file FILE` to
+select a host font for guest text.
+
 `python run.py prepare --game DIR --out DIR` forwards to the native preparer.
 For existing developer images, `--prepared DIR --game DIR` uses their
 `boot-linked.bin`, `content.bin`, and optional `isa-rewrite.bin`.
