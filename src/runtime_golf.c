@@ -515,7 +515,38 @@ static ABI int32_t m2_leave_lobby(uint16_t ctx,const void *request,const M2Opt *
     (void)request;
     return m2_answer("LeaveLobby",ctx,opt,id,0x202,NULL);
 }
+/* ---- NpWordFilter, answered locally (same condition as Matching2) ----
+ * Sony's word filter server is gone. The Open Course entry controller (C: eboot 0xa5ada0) censors the
+ * player's comment before any lobby code runs (0xece6f0): CreateTitleCtxA(user) must return >= 0
+ * (0xa5aae2), CreateAsyncRequest(titleCtx, param) > 0 (0xece748), CensorComment(req, comment, option)
+ * >= 0, then PollAsync(req, int *result) returns 0 (done; > 0 still running) with *result 0, which the
+ * game takes as "comment accepted" (0xa5b412). The comment is left as written. */
+static uint32_t wf_next_request=1;
+static ABI int32_t wf_create_title_ctx(int32_t user,const void *a,const void *b) { (void)user; (void)a; (void)b; return 1; }
+static ABI int32_t wf_create_request(int32_t title_ctx,const void *param) {
+    (void)title_ctx; (void)param;
+    return (int32_t)(__atomic_fetch_add(&wf_next_request,1,__ATOMIC_RELAXED) & 0x7fffffff);
+}
+static ABI int32_t wf_censor(int32_t request,const char *comment,const void *option) {
+    (void)option;
+    printf("Runtime: NpWordFilter request %d: comment of %zu bytes accepted locally\n",(int)request,comment ? strlen(comment) : 0);
+    return 0;
+}
+static ABI int32_t wf_poll(int32_t request,int32_t *result) {
+    (void)request;
+    if (result) *result=0;
+    return 0;
+}
+static ABI int32_t wf_ok(int32_t id) { (void)id; return 0; }
+
 static const RuntimeExport matching_exports[]={
+    {"sceNpWordFilterCreateTitleCtxA",wf_create_title_ctx},
+    {"sceNpWordFilterCreateAsyncRequest",wf_create_request},
+    {"sceNpWordFilterCensorComment",wf_censor},
+    {"sceNpWordFilterPollAsync",wf_poll},
+    {"sceNpWordFilterDeleteRequest",wf_ok},
+    {"sceNpWordFilterAbortRequest",wf_ok},
+    {"sceNpWordFilterDeleteTitleCtx",wf_ok},
     {"sceNpMatching2CreateContextA",m2_create_context_a},
     {"sceNpMatching2RegisterContextCallback",m2_register_context_cb},
     {"sceNpMatching2RegisterLobbyEventCallback",m2_register_cb},
