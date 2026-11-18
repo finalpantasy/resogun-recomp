@@ -91,9 +91,14 @@ def find_exe():
         fail(f'{exe} not found: build it with build.sh (MSYS2 CLANG64 shell on Windows).')
     # Development builds use the MSYS2 CLANG64 DLLs (SDL3, zlib, ...); a release has them in libs/.
     if WINDOWS and not (exe.parent / 'libs' / 'SDL3.dll').is_file():
-        clang64 = Path(os.environ.get('MSYS2_ROOT', r'C:\msys64')) / 'clang64' / 'bin'
-        if clang64.is_dir():
-            os.environ['PATH'] = f'{clang64}{os.pathsep}{os.environ.get("PATH", "")}'
+        # MSYS2_ROOT, else a toolchain kept beside the checkout (tools/msys2/msys64 of the parent
+        # project), else the default install.
+        roots = [Path(os.environ['MSYS2_ROOT'])] if os.environ.get('MSYS2_ROOT') else []
+        roots += [PORT.parent.parent / 'tools' / 'msys2' / 'msys64', Path(r'C:\msys64')]
+        clang64 = next((r / 'clang64' / 'bin' for r in roots if (r / 'clang64' / 'bin' / 'SDL3.dll').is_file()), None)
+        if clang64 is None:
+            fail('SDL3.dll not found: set MSYS2_ROOT to the MSYS2 install that built resogun.exe.')
+        os.environ['PATH'] = f'{clang64}{os.pathsep}{os.environ.get("PATH", "")}'
     return exe
 
 
