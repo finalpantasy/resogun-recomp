@@ -172,6 +172,7 @@ jobs:
           test -s "out/${release}-linux.tar.gz"
           test -s "$image"
           "$image" "$RUNNER_TEMP/golf data" --version | grep -F "Everybody's Golf"
+          "$image" "$RUNNER_TEMP/golf data" --guest-arg --data-dir --version | grep -F "Everybody's Golf"
           "$image" "$RUNNER_TEMP/golf data" --shortcut "$RUNNER_TEMP/golf shortcuts"
           grep -Fx "Exec=\"$(realpath "$image")\" \"$RUNNER_TEMP/golf data\"" \
             "$RUNNER_TEMP/golf shortcuts/everybodys-golf.desktop"

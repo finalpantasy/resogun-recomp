@@ -12,10 +12,17 @@ esac
 data=$1
 shift
 case $data in /*) ;; *) data=$PWD/$data ;; esac
+guest_value=0
 for arg do
-    if [ "$arg" = --data-dir ]; then
-        printf '%s\n' 'Pass the data directory as the first AppImage argument.' >&2
-        exit 2
+    if [ "$guest_value" = 1 ]; then
+        guest_value=0
+        continue
     fi
+    case $arg in
+        --guest-arg) guest_value=1 ;;
+        --data-dir)
+            printf '%s\n' 'Pass the data directory as the first AppImage argument.' >&2
+            exit 2 ;;
+    esac
 done
 exec "$appdir/everybodys-golf" --data-dir "$data" "$@"
