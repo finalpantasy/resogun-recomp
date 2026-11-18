@@ -34,6 +34,7 @@ static _Atomic int32_t http_next=0x10000;
 #define DAILY_SCORE_PATH "/nmg-us/replay-probe/gameapi_getscorelist"
 #define RIVAL_LIST_PATH "/nmg-us/replay-probe/gameapi_getrivallist"
 #define BOARD_LIST_PATH "/nmg-us/replay-probe/gameapi_getboardlist"
+#define CHARACTER_BOARD_PATH "/nmg-us/replay-probe/gameapi_getboardlistcharactordownload"
 #define NATIONAL_BOARD_PATH "/nmg-us/replay-probe/gameapi_getboardlistnational"
 #define CHARACTER_COUNT_PATH "/nmg-us/replay-probe/gameapi_getcountcharactordownload"
 #define PROPERTY_INFO_PATH "/nmg-us/replay-probe/gameapi_getgamepropertyinfo"
@@ -44,7 +45,10 @@ static _Atomic int32_t http_next=0x10000;
  * --score-registration). The game formats "%s%llu&n=%d&s=1" (eboot 0xb5d300), so the discovery
  * fixture ends these base URLs in "?account=". */
 #define SCORE_BOARD_PATH DAILY_SCORE_PATH "?account="
+#define TOP_PLAYER_PATH "/nmg-us/replay-probe/gameapi_gettopplayerlist"
+#define SCORE_DISTRIBUTION_PATH "/nmg-us/replay-probe/gameapi_getscoredistribution"
 #define OWN_SCORE_PATH "/nmg-us/replay-probe/gameapi_getmyscore"
+#define COURSE_ASSIGNMENT_PATH "/nmg-us/replay-probe/gameapi_assignmentcourseworld"
 #define USER_STATUS_PATH "/nmg-us/replay-probe/gameapi_getuserstatus"
 #define CHARACTER_ASSIGNMENT_PATH "/nmg-us/replay-probe/gameapi_assignmentcharactordownload"
 #define REGIST_PREFIX "/nmg-us/replay-probe/gameapi_registscore"
@@ -66,6 +70,7 @@ static const ReplayRoute replay_routes[]={
     {"https://127.0.0.1:8765" BOARD_LIST_PATH, BOARD_LIST_PATH, 138, 230, 40, 40, 4, NULL},
     /* Event schedule board: up to 18 rows (per-hole groups plus the Daily group). */
     {"https://127.0.0.1:8765" BOARD_LIST_PATH, BOARD_LIST_PATH, 394, 1418, 40, 1696, 4, NULL},
+    {"https://127.0.0.1:8765" CHARACTER_BOARD_PATH, CHARACTER_BOARD_PATH, 394, 1418, 40, 40, 4, NULL},
     /* Login completion is 24 bytes; with a score session it adds 0x2032 and the 0x0086..0x0088
      * user-status records (180 bytes). */
     {"https://127.0.0.1:8765" LOGIN_PREFIX, NULL, 194, 246, 24, 180, 4, NULL},
@@ -74,7 +79,10 @@ static const ReplayRoute replay_routes[]={
     /* Session boards (slots 0x19, 0x1b, 0x1d): OneHole_, Daily_, LongDriveContest_ groups. */
     {"https://127.0.0.1:8765" SCORE_BOARD_PATH "5932163534510096385&n=", NULL, 418, 1450, 16, 0xa2800, 4, NULL},
     {"https://127.0.0.1:8765" OWN_SCORE_PATH, OWN_SCORE_PATH, 402, 1434, 16, 0xa2800, 4, NULL},
+    {"https://127.0.0.1:8765" TOP_PLAYER_PATH, TOP_PLAYER_PATH, 410, 1410, 36, 36, 4, NULL},
+    {"https://127.0.0.1:8765" SCORE_DISTRIBUTION_PATH, SCORE_DISTRIBUTION_PATH, 402, 1414, 36, 36, 4, NULL},
     {"https://127.0.0.1:8765" USER_STATUS_PATH, USER_STATUS_PATH, 526, 1526, 16, 0x1000, 4, NULL},
+    {"https://127.0.0.1:8765" COURSE_ASSIGNMENT_PATH SESSION_QUERY, NULL, 370, 1370, 16, 16, 4, NULL},
     /* Character assignment (slot 0x3d); the lower bound is kept loose until the request size is logged. */
     {"https://127.0.0.1:8765" CHARACTER_ASSIGNMENT_PATH, CHARACTER_ASSIGNMENT_PATH, 66, 1370, 28, 28, 4, NULL},
     /* Score registration (slots 0x1a, 0x1c, 0x1e; builders 0xb63a30, 0xb63d93, 0xb646ea). */

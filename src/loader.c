@@ -229,12 +229,14 @@ static int break_trap(EXCEPTION_POINTERS *info) {
         if (break_sites[i].at!=(uintptr_t)info->ExceptionRecord->ExceptionAddress) continue;
         if (break_sites[i].hits++<40) {
             uint64_t caller=0; uint32_t field=0;
-            memcpy(&caller,(void *)(uintptr_t)c->Rsp,8);
-            if (c->Rsi>=0x10000 && c->Rsi<(1ull<<40)) memcpy(&field,(void *)(uintptr_t)(c->Rsi+0x18),4);
-            printf("Runtime: break %llx tid %lu rdi %llx rsi %llx rdx %llx [rsi+18] %x caller %llx\n",
+            HANDLE process=GetCurrentProcess();
+            ReadProcessMemory(process,(const void *)(uintptr_t)c->Rsp,&caller,sizeof caller,NULL);
+            if (c->Rsi>=0x10000 && c->Rsi<(1ull<<40))
+                ReadProcessMemory(process,(const void *)(uintptr_t)(c->Rsi+0x18),&field,sizeof field,NULL);
+            printf("Runtime: break %llx tid %lu rdi %llx rsi %llx rdx %llx [rsi+18] %x caller %llx rcx %llx\n",
                    (unsigned long long)(break_sites[i].at-(uintptr_t)image),GetCurrentThreadId(),
                    (unsigned long long)c->Rdi,(unsigned long long)c->Rsi,(unsigned long long)c->Rdx,field,
-                   (unsigned long long)(caller-(uintptr_t)image));
+                   (unsigned long long)(caller-(uintptr_t)image),(unsigned long long)c->Rcx);
             fflush(stdout);
         }
         break_write(break_sites[i].at,break_sites[i].orig);
