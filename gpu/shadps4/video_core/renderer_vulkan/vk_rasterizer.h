@@ -279,6 +279,8 @@ private:
                              u32 first_image_idx, bool& barrier, TextureSet*& slot);
     /// The prepared sharps of `stage` in the current prepared draw, if they fit it.
     const PreparedStage* FindPreparedStage(const Shader::Info& stage) const;
+    static bool VerifyPrepared();
+    static bool PreparedStageMatches(const PreparedStage& prepared, const Shader::Info& stage);
     /// Whether the helper may bind textures for this pipeline at all (fixed descriptor layout,
     /// no storage writes that invalidate cached images).
     bool HelperEligible(const Pipeline* pipeline) const;

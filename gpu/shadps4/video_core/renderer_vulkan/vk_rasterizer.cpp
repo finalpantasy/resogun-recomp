@@ -1439,10 +1439,55 @@ const PreparedStage* Rasterizer::FindPreparedStage(const Shader::Info& stage) co
             candidate.num_images == stage.images.size() &&
             candidate.num_samplers == stage.samplers.size() &&
             candidate.num_buffers == stage.buffers.size()) {
+            if (VerifyPrepared() && !PreparedStageMatches(candidate, stage)) {
+                return nullptr;
+            }
             return &candidate;
         }
     }
     return nullptr;
+}
+
+bool Rasterizer::VerifyPrepared() {
+    // resogun: RESOGUN_VERIFY_PREPARED=1 compares what a draw-preparation worker read with what
+    // the draw reads now, names the first differences and binds the fresh values.
+    static const bool verify = [] {
+        const char* env = std::getenv("RESOGUN_VERIFY_PREPARED");
+        return env && env[0] == '1';
+    }();
+    return verify;
+}
+
+bool Rasterizer::PreparedStageMatches(const PreparedStage& prepared, const Shader::Info& stage) {
+    static std::atomic<u32> logged{0};
+    const auto differs = [&](const char* kind, u32 index) {
+        if (logged.fetch_add(1, std::memory_order_relaxed) < 40) {
+            std::fprintf(stderr, "resogun: prepared %s %u of stage %u (program %016llx) differs\n",
+                         kind, index, u32(stage.sw_stage),
+                         static_cast<unsigned long long>(stage.pgm_hash));
+        }
+        return false;
+    };
+    for (u32 i = 0; i < prepared.num_images; ++i) {
+        const auto sharp = stage.images[i].GetSharp(stage);
+        if (std::memcmp(&sharp, &prepared.image_sharps[i], sizeof(sharp)) != 0) {
+            return differs("image", i);
+        }
+    }
+    for (u32 i = 0; i < prepared.num_samplers; ++i) {
+        const auto sharp = stage.samplers[i].GetSharp(stage);
+        if (std::memcmp(&sharp, &prepared.sampler_sharps[i], sizeof(sharp)) != 0) {
+            return differs("sampler", i);
+        }
+    }
+    for (u32 i = 0; i < prepared.num_buffers; ++i) {
+        const auto& res = stage.buffers[i];
+        const auto sharp = res.IsSpecial() ? AmdGpu::Buffer::Null() : res.GetSharp(stage);
+        if (std::memcmp(&sharp, &prepared.buffer_sharps[i], sizeof(sharp)) != 0) {
+            return differs("buffer", i);
+        }
+    }
+    return true;
 }
 
 bool Rasterizer::BindHelperWanted() {
@@ -1722,6 +1767,20 @@ void Rasterizer::ResolveVertexBuffers(const GraphicsPipeline* pipeline,
                 !ResogunToggle::Disabled(ResogunToggle::PreparedResources)
             ? &prepared->vertex
             : nullptr;
+    if (ready) {
+        // resogun: the V#s come from a table the fetch shader's user data points at, which the
+        // flattened user data check does not cover. A game that rewrites that table for every
+        // frame (Everybody's Golf) leaves a worker that ran early with the earlier frame's
+        // vertex addresses, so the prepared inputs hold only while every V# still reads the same.
+        const auto& vs_info = pipeline->GetStage(Shader::SwStage::Vertex);
+        for (u32 i = 0; i < ready->count; ++i) {
+            const auto sharp = fetch->attributes[i].GetSharp(vs_info);
+            if (std::memcmp(&sharp, &ready->buffers[i], sizeof(sharp)) != 0) {
+                ready = nullptr;
+                break;
+            }
+        }
+    }
     if (ready) {
         attributes.assign(ready->attributes, ready->attributes + ready->count);
         bindings.assign(ready->bindings, ready->bindings + ready->count);
