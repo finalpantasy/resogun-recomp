@@ -91,6 +91,20 @@ int main(void) {
     render();
     assert(flags()==0 && out[0]==0.0f);
 
+    /* Matrix levels and the port 0 volume place the voice: right channel only, at 0.5*0.25. */
+    float levels[8]={0,0.5f,0,0,0,0,0,0};
+    struct { uint32_t head[2]; uint32_t matrix, count; const float *levels; } matrix={{0x18,1},0,8,levels};
+    assert(ngs2_voice_control(voice,&matrix)==0);
+    struct { uint32_t head[2]; uint32_t port; float level; } volume={{0x10,2},0,0.25f};
+    assert(ngs2_voice_control(voice,&volume)==0);
+    assert(ngs2_voice_control(voice,&blocks)==0);
+    event(0);
+    render();
+    assert(out[0]==0.0f && fabsf(out[1]-0.5f*0.5f*0.25f*MASTER_LEVEL)<1e-4f);
+    event(1);
+    levels[0]=1.0f; levels[1]=1.0f; volume.level=1.0f;
+    assert(ngs2_voice_control(voice,&matrix)==0 && ngs2_voice_control(voice,&volume)==0);
+
     /* HE-VAG, mono at the system rate: predictor 0 and shift 0 make every code c a sample c*4096. */
     uint32_t vag_setup[10]={0x28,0x10000000,0x1c,1,48000,0,0,0,0,0};
     assert(ngs2_voice_control(voice,vag_setup)==0);
@@ -101,7 +115,7 @@ int main(void) {
     assert(ngs2_voice_control(voice,&vag_blocks)==0);
     event(0);
     render();
-    const float vag_level=0.125f*MIX_LEVEL*0.7071f;
+    const float vag_level=0.125f*MASTER_LEVEL;
     assert(fabsf(out[0]-vag_level)<1e-4f && fabsf(out[(GRAIN-1)*8+1]-vag_level)<1e-4f && flags()==3);
     for (int i=0;i<3;++i) render(); /* 560 samples: over within three grains */
     assert(flags()==0);

@@ -94,7 +94,8 @@ enum { CODEC_NONE, CODEC_PCM16, CODEC_FLOAT, CODEC_ATRAC9, CODEC_VAG };
 static const float hevag_coefs[128][4]={
 #include "hevag_coefs.inc"
 };
-#define MIX_LEVEL 0.35f
+#define MIX_LEVEL 0.35f /* a voice the game gave no matrix levels */
+#define MASTER_LEVEL 0.8f
 typedef struct { const uint8_t *data; uint32_t size, repeats, skip, samples; uint64_t user; } Block;
 typedef struct Voice {
     int codec, playing, paused, primed;
@@ -105,6 +106,8 @@ typedef struct Voice {
     float frame[2][MAX_CHANNELS];
     void *atrac9; int superframe_bytes, superframe_samples;
     int32_t history[MAX_CHANNELS][4];
+    /* Matrix 0 (a gain per input channel and output channel) and the volume of port 0. */
+    float matrix[2][MAX_CHANNELS], volume; int has_matrix, has_volume;
     float *decoded; uint32_t decoded_count, decoded_pos;
     uint64_t decoded_samples, decoded_bytes;
 } Voice;
@@ -205,7 +208,13 @@ static void voice_mix(Voice *v,float *mix,uint32_t frames,uint32_t system_rate) 
             v->phase-=1.0;
         }
         float t=(float)v->phase, *out=mix+(size_t)i*MAX_CHANNELS;
-        if (v->channels==1) {
+        if (v->has_matrix && v->channels<=2) {
+            float gain=(v->has_volume ? v->volume : 1.0f)*MASTER_LEVEL;
+            for (uint32_t c=0;c<v->channels;++c) {
+                float s=(v->frame[0][c]+(v->frame[1][c]-v->frame[0][c])*t)*gain;
+                for (int o=0;o<MAX_CHANNELS;++o) out[o]+=s*v->matrix[c][o];
+            }
+        } else if (v->channels==1) {
             float s=(v->frame[0][0]+(v->frame[1][0]-v->frame[0][0])*t)*MIX_LEVEL*0.7071f;
             out[0]+=s; out[1]+=s;
         } else for (uint32_t c=0;c<v->channels;++c)
@@ -218,7 +227,10 @@ static void voice_mix(Voice *v,float *mix,uint32_t frames,uint32_t system_rate) 
 static void voice_setup(Voice *v,const uint8_t *param) {
     uint32_t format[4];
     memcpy(format,param+8,sizeof format);
+    float matrix[2][MAX_CHANNELS], volume=v->volume; int has_matrix=v->has_matrix, has_volume=v->has_volume;
+    memcpy(matrix,v->matrix,sizeof matrix);
     voice_release(v);
+    memcpy(v->matrix,matrix,sizeof matrix); v->volume=volume; v->has_matrix=has_matrix; v->has_volume=has_volume;
     v->type=format[0]; v->channels=format[1]; v->rate=format[2]; v->pitch=1.0f;
     if (!v->channels || v->channels>MAX_CHANNELS || v->rate<1000 || v->rate>192000) return;
     uint32_t capacity=DECODE_FRAMES;
@@ -419,7 +431,8 @@ static void trace_params(uint64_t voice,const void *params) {
         while (n<48 && ids[n].seen && ids[n].id!=id) ++n;
         if (n<48) { ids[n].id=id; show=ids[n].seen++<6u; }
         /* The sampler rack: every parameter but the matrices and volumes, in order. */
-        if (rack==0x1000) show=id!=1 && id!=2 && id!=3 && sampler_lines++<400;
+        static unsigned level_lines;
+        if (rack==0x1000) show=id==1 || id==2 ? level_lines++<160 : id!=3 && sampler_lines++<400;
         pthread_mutex_unlock(&lock);
         if (show) {
             printf("Runtime: Ngs2 trace rack %#x voice %u id %#x size %#x:",rack,handle_voice(voice),id,size);
@@ -431,6 +444,12 @@ static void trace_params(uint64_t voice,const void *params) {
                     printf(" | block %u: offset %#x size %#x repeats %u skip %u samples %u",b,block[b*8],block[b*8+1],
                            block[b*8+2],block[b*8+3],block[b*8+4]);
                 if (data) { printf(" | data"); for (int i=0;i<24;++i) printf(" %02x",data[i]); }
+            }
+            if (id==1 && size>=0x18) {
+                uint32_t count; const float *levels;
+                memcpy(&count,p+12,4); memcpy(&levels,p+16,8);
+                printf(" | levels");
+                for (uint32_t i=0;levels && i<count && i<16;++i) printf(" %.3f",levels[i]);
             }
             printf("%c",10);
         }
@@ -461,6 +480,20 @@ static ABI int32_t ngs2_voice_control(uint64_t voice,const void *params) {
         else if (id==0x10000001 && size>=0x20) voice_blocks(v,p);
         else if (id==0x10000005 && size>=0x10) memcpy(&v->pitch,p+8,4);
         else if (id==6 && size>=0xc) { uint32_t event; memcpy(&event,p+8,4); voice_event(v,event); }
+        else if (id==1 && size>=0x18) {
+            /* Matrix levels {matrixId, numLevels, aLevel}: 8 output gains per input channel. */
+            uint32_t matrix, count; const float *levels;
+            memcpy(&matrix,p+8,4); memcpy(&count,p+12,4); memcpy(&levels,p+16,8);
+            if (!matrix && levels && count>=MAX_CHANNELS) {
+                memset(v->matrix,0,sizeof v->matrix);
+                memcpy(v->matrix,levels,sizeof(float)*(count<2*MAX_CHANNELS ? MAX_CHANNELS : 2*MAX_CHANNELS));
+                v->has_matrix=1;
+            }
+        } else if (id==2 && size>=0x10) {
+            /* Port volume {port, level}: port 0 is the dry output; the others feed submixers. */
+            uint32_t port; memcpy(&port,p+8,4);
+            if (!port) { memcpy(&v->volume,p+12,4); v->has_volume=1; }
+        }
         if (!next) break;
         p+=next;
     }
