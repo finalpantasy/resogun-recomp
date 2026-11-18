@@ -52,15 +52,25 @@ static const ReplayRoute replay_routes[]={
     {"http://127.0.0.1:8765" TELEMETRY_PATH, TELEMETRY_PATH, 1, 8192, 0, 0, 1, "application/json"},
 };
 static pthread_mutex_t discovery_lock=PTHREAD_MUTEX_INITIALIZER;
-static struct {
+typedef struct {
     int32_t id;
     unsigned port;
     const ReplayRoute *route;
-    int status, read;
-    size_t length, request_size;
+    int status, read, sending;
+    size_t length, request_size, uploaded;
     char login_path[sizeof LOGIN_PREFIX+sizeof "-2147483648&s=1"];
-    unsigned char *body;
-} discovery;
+    unsigned char *body, *upload;
+} ReplayRequest;
+static ReplayRequest replay_requests[sizeof replay_routes/sizeof *replay_routes];
+
+/* Called with discovery_lock held. Each approved route owns one request slot. */
+static ReplayRequest *replay_find(int32_t id) {
+    if (!id) return NULL;
+    for (size_t i=0;i<sizeof replay_requests/sizeof *replay_requests;++i) {
+        if (replay_requests[i].id==id) return &replay_requests[i];
+    }
+    return NULL;
+}
 
 static unsigned discovery_port(void) {
     const char *text=getenv("GOLF_DISCOVERY_PORT");
@@ -92,12 +102,12 @@ static int discovery_send(DiscoverySocket sock,const void *data,int size) {
     return 1;
 }
 
-static int discovery_exchange(const void *data,int size) {
+static int discovery_exchange(ReplayRequest *req,const void *data,int size) {
     static const char request_format[]=
         "%s %s HTTP/1.1\r\nHost: 127.0.0.1:%u\r\n"
         "User-Agent: PS4Application nolib/0.0 (U-UP9000-CUSA04687_00-EVERYBODYSGOLF07/2017022700/1170)\r\n"
         "%sConnection: close\r\n\r\n";
-    const ReplayRoute *route=discovery.route;
+    const ReplayRoute *route=req->route;
 #ifdef _WIN32
     WSADATA wsa;
     if (WSAStartup(MAKEWORD(2,2),&wsa)) return 0;
@@ -114,7 +124,7 @@ static int discovery_exchange(const void *data,int size) {
     struct sockaddr_in target={0};
     target.sin_family=AF_INET;
     target.sin_addr.s_addr=htonl(INADDR_LOOPBACK);
-    target.sin_port=htons((uint16_t)discovery.port);
+    target.sin_port=htons((uint16_t)req->port);
     if (connect(sock,(const struct sockaddr *)&target,sizeof target)) goto done;
 
     char request[384], headers[96]="";
@@ -124,8 +134,8 @@ static int discovery_exchange(const void *data,int size) {
         if (n<0 || (size_t)n>=sizeof headers) goto done;
     }
     const char *method=size ? "POST" : "GET";
-    const char *path=route->path ? route->path : discovery.login_path;
-    int request_size=snprintf(request,sizeof request,request_format,method,path,discovery.port,headers);
+    const char *path=route->path ? route->path : req->login_path;
+    int request_size=snprintf(request,sizeof request,request_format,method,path,req->port,headers);
     if (request_size<0 || (size_t)request_size>=sizeof request ||
         !discovery_send(sock,request,request_size) || !discovery_send(sock,data,size)) goto done;
 
@@ -169,10 +179,10 @@ static int discovery_exchange(const void *data,int size) {
     } while (!header_size || received<header_size+length);
     if (received!=header_size+length) goto done;
     if (length) memmove(response,response+header_size,length);
-    discovery.body=(unsigned char *)response;
+    req->body=(unsigned char *)response;
     response=NULL;
-    discovery.status=status;
-    discovery.length=length;
+    req->status=status;
+    req->length=length;
     ok=1;
 done:
     free(response);
@@ -185,25 +195,74 @@ done:
 
 static ABI int32_t http_send(int32_t id,const void *data,uint64_t length) {
     pthread_mutex_lock(&discovery_lock);
-    int ok=0;
-    if (discovery.id && id==discovery.id && length==discovery.request_size && (!length || data)) {
-        free(discovery.body);
-        discovery.body=NULL;
-        discovery.status=discovery.read=0;
-        discovery.length=0;
-        ok=discovery_exchange(data,(int)length);
-        printf("Runtime: http replay request %d sent to 127.0.0.1:%u: %s, status %d, %llu body bytes\n",id,discovery.port,
-               ok ? "answered" : "no valid answer",discovery.status,(unsigned long long)discovery.length);
+    ReplayRequest *slot=replay_find(id);
+    if (!slot || slot->sending || (length && !data)) {
+        pthread_mutex_unlock(&discovery_lock);
+        return HTTP_NETWORK;
+    }
+    const size_t remaining=slot->request_size-slot->uploaded;
+    if (length!=remaining && (!length || length>remaining || !slot->route->path ||
+                              strcmp(slot->route->path,TELEMETRY_PATH))) {
+        pthread_mutex_unlock(&discovery_lock);
+        return HTTP_NETWORK;
+    }
+    if (length<remaining && !slot->upload) {
+        slot->upload=malloc(slot->request_size);
+        if (!slot->upload) {
+            pthread_mutex_unlock(&discovery_lock);
+            return HTTP_NETWORK;
+        }
+    }
+    free(slot->body);
+    slot->body=NULL;
+    slot->length=0;
+    slot->status=slot->read=0;
+
+    /* Telemetry sends its declared JSON body in slices of at most 2048 bytes. */
+    unsigned char *upload=slot->upload;
+    if (upload) {
+        memcpy(upload+slot->uploaded,data,(size_t)length);
+        slot->uploaded+=(size_t)length;
+        if (slot->uploaded<slot->request_size) {
+            pthread_mutex_unlock(&discovery_lock);
+            return 0;
+        }
+        data=upload;
+        length=slot->request_size;
+        slot->upload=NULL;
+        slot->uploaded=0;
+    }
+    slot->sending=1;
+    ReplayRequest req=*slot;
+    pthread_mutex_unlock(&discovery_lock);
+
+    int ok=discovery_exchange(&req,data,(int)length);
+    free(upload);
+
+    pthread_mutex_lock(&discovery_lock);
+    /* The slot can be deleted and reused while its former request is in flight. */
+    if (slot->id==id) {
+        slot->body=req.body;
+        slot->status=req.status;
+        slot->length=req.length;
+        slot->sending=0;
+    } else {
+        free(req.body);
+        ok=0;
     }
     pthread_mutex_unlock(&discovery_lock);
+    printf("Runtime: http replay request %d sent to 127.0.0.1:%u: %s, status %d, %llu body bytes\n",
+           id,req.port,ok ? "answered" : "no valid answer",ok ? req.status : 0,
+           ok ? (unsigned long long)req.length : 0ull);
     return ok ? 0 : HTTP_NETWORK;
 }
 
 static ABI int32_t http_status(int32_t id,int *status) {
     if (!status) return HTTP_INVALID_VALUE;
     pthread_mutex_lock(&discovery_lock);
-    int ok=id==discovery.id && discovery.status;
-    if (ok) *status=discovery.status;
+    const ReplayRequest *slot=replay_find(id);
+    int ok=slot && slot->status;
+    if (ok) *status=slot->status;
     pthread_mutex_unlock(&discovery_lock);
     return ok ? 0 : HTTP_NETWORK;
 }
@@ -211,8 +270,9 @@ static ABI int32_t http_status(int32_t id,int *status) {
 static ABI int32_t http_length(int32_t id,int *result,uint64_t *length) {
     if (!result || !length) return HTTP_INVALID_VALUE;
     pthread_mutex_lock(&discovery_lock);
-    int ok=id==discovery.id && discovery.status;
-    if (ok) { *result=0; *length=discovery.length; }
+    const ReplayRequest *slot=replay_find(id);
+    int ok=slot && slot->status;
+    if (ok) { *result=0; *length=slot->length; }
     pthread_mutex_unlock(&discovery_lock);
     return ok ? 0 : HTTP_NETWORK;
 }
@@ -220,13 +280,14 @@ static ABI int32_t http_length(int32_t id,int *result,uint64_t *length) {
 static ABI int32_t http_read(int32_t id,void *data,uint64_t capacity) {
     if (!data) return HTTP_INVALID_VALUE;
     pthread_mutex_lock(&discovery_lock);
+    ReplayRequest *slot=replay_find(id);
     int32_t result=HTTP_NETWORK;
-    if (id==discovery.id && discovery.status==200 && discovery.length<=capacity) {
+    if (slot && slot->status==200 && slot->length<=capacity) {
         result=0;
-        if (!discovery.read) {
-            memcpy(data,discovery.body,discovery.length);
-            result=(int32_t)discovery.length;
-            discovery.read=1;
+        if (!slot->read) {
+            memcpy(data,slot->body,slot->length);
+            result=(int32_t)slot->length;
+            slot->read=1;
         }
     }
     pthread_mutex_unlock(&discovery_lock);
@@ -235,9 +296,11 @@ static ABI int32_t http_read(int32_t id,void *data,uint64_t capacity) {
 
 static ABI int32_t http_delete_request(int32_t id) {
     pthread_mutex_lock(&discovery_lock);
-    if (discovery.id && id==discovery.id) {
-        free(discovery.body);
-        memset(&discovery,0,sizeof discovery);
+    ReplayRequest *slot=replay_find(id);
+    if (slot) {
+        free(slot->body);
+        free(slot->upload);
+        memset(slot,0,sizeof *slot);
     }
     pthread_mutex_unlock(&discovery_lock);
     return 0;
@@ -313,13 +376,14 @@ static ABI int32_t http_request_url(int32_t conn,int32_t method,const char *url,
         const unsigned port=discovery_port();
         if (port) {
             pthread_mutex_lock(&discovery_lock);
-            if (!discovery.id) {
-                discovery.id=id;
-                discovery.port=port;
-                discovery.route=replay;
-                discovery.request_size=(size_t)length;
+            ReplayRequest *slot=&replay_requests[replay-replay_routes];
+            if (!slot->id) {
+                slot->id=id;
+                slot->port=port;
+                slot->route=replay;
+                slot->request_size=(size_t)length;
                 if (!replay->path)
-                    strcpy(discovery.login_path,url+sizeof("https://127.0.0.1:8765")-1);
+                    strcpy(slot->login_path,url+sizeof("https://127.0.0.1:8765")-1);
                 pthread_mutex_unlock(&discovery_lock);
                 printf("Runtime: http replay request %d opened: %s\n",id,url);
                 return id;
@@ -333,7 +397,7 @@ static ABI int32_t http_request_url(int32_t conn,int32_t method,const char *url,
     for (const char *c=url;*c;++c) hash=(hash^(unsigned char)*c)*16777619u;
     if (atomic_exchange(&last_url,hash)==hash) return id;
     printf("Runtime: http request method %d, %llu body bytes: %s (not sent: %s)\n",method,(unsigned long long)length,url,
-           !replay ? "no replay route" : discovery_port() ? "another replay is open" : "GOLF_DISCOVERY_PORT is not set");
+           !replay ? "no replay route" : discovery_port() ? "a replay for this route is open" : "GOLF_DISCOVERY_PORT is not set");
     return id;
 }
 /* sceHttpGetAllResponseHeaders(request, header, size): no request gets a response. */
