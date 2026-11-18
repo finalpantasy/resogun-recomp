@@ -1,6 +1,9 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <cstdio>
+#include <cstdlib>
+
 #include "gnm_error.h"
 #include "gnmdriver.h"
 
@@ -293,7 +296,53 @@ int PS4_SYSV_ABI sceGnmDestroyWorkloadStream() {
     return ORBIS_OK;
 }
 
+// resogun (RESOGUN_TRACE_DINGDONG=1): the labels a command buffer waits for (WAIT_REG_MEM) and
+// the ones it releases (RELEASE_MEM), following indirect buffers one level.
+static bool TraceLabels() {
+    static const bool trace = [] {
+        const char* env = std::getenv("RESOGUN_TRACE_DINGDONG");
+        return env && env[0] == '1';
+    }();
+    return trace;
+}
+static void TraceLabelPackets(const char* what, const u32* p, u32 size_dw, bool follow = true) {
+    for (const u32* end = p + size_dw; p < end;) {
+        const u32 header = *p;
+        const u32 count = (header >> 30) == 2 ? 0 : ((header >> 16) & 0x3fff) + 1;
+        const u32 op = (header >> 30) == 3 ? (header >> 8) & 0xff : 0;
+        if (op == 0x3c && count >= 6 && (p[1] & 0x10)) {
+            const u64 label = (u64(p[3]) << 32) | (p[2] & ~3u);
+            std::fprintf(stderr, "Labels: frame %llu %s waits for 0x%llx, now 0x%x\n",
+                         static_cast<unsigned long long>(frames_submitted), what,
+                         static_cast<unsigned long long>(label),
+                         *reinterpret_cast<const u32*>(label));
+        } else if (op == 0x49 && count >= 6) {
+            std::fprintf(stderr, "Labels: frame %llu %s releases 0x%llx\n",
+                         static_cast<unsigned long long>(frames_submitted), what,
+                         static_cast<unsigned long long>((u64(p[4]) << 32) | p[3]));
+        } else if (op == 0x3f && count >= 3 && follow) {
+            TraceLabelPackets(what, reinterpret_cast<const u32*>((u64(p[2] & 0xffff) << 32) | p[1]),
+                              p[3] & 0xfffff, false);
+        }
+        p += count + 1;
+    }
+}
+
+static void DingDong(u32 gnm_vqid, u32 next_offs_dw);
+
 void PS4_SYSV_ABI sceGnmDingDong(u32 gnm_vqid, u32 next_offs_dw) {
+    DingDong(gnm_vqid, next_offs_dw);
+    // resogun: the game reuses its compute command buffers once this returns, so the queue runs
+    // them first (liverpool.cpp, WaitAsc).
+    if (gnm_vqid != 0 && !liverpool->WaitAsc(gnm_vqid, std::chrono::milliseconds(2000))) {
+        static u32 misses = 0;
+        if (misses++ < 8) {
+            std::fprintf(stderr, "DingDong: queue %u still busy after 2 s\n", gnm_vqid);
+        }
+    }
+}
+
+static void DingDong(u32 gnm_vqid, u32 next_offs_dw) {
     HLE_TRACE;
     LOG_DEBUG(Lib_GnmDriver, "vqid {}, offset_dw {}", gnm_vqid, next_offs_dw);
 
@@ -301,6 +350,17 @@ void PS4_SYSV_ABI sceGnmDingDong(u32 gnm_vqid, u32 next_offs_dw) {
         return;
     }
 
+    // resogun: RESOGUN_TRACE_DINGDONG=1 lists the compute submits, for hangs on a value a compute
+    // queue should write.
+    static const bool trace = [] {
+        const char* env = std::getenv("RESOGUN_TRACE_DINGDONG");
+        return env && env[0] == '1';
+    }();
+    if (trace) {
+        std::fprintf(stderr, "DingDong: queue %u to offset 0x%x (was 0x%x), GPU %s\n", gnm_vqid,
+                     next_offs_dw, asc_next_offs_dw[gnm_vqid - 1],
+                     submission_lock ? "busy after submit done" : "taking submits");
+    }
     std::scoped_lock lk{m_submit_lock};
     WaitGpuIdle();
 
@@ -330,6 +390,9 @@ void PS4_SYSV_ABI sceGnmDingDong(u32 gnm_vqid, u32 next_offs_dw) {
     const std::span acb_span{acb_ptr, acb_size_dw};
 
     asc_next_offs_dw[vqid] = next_offs_dw;
+    if (TraceLabels()) {
+        TraceLabelPackets("compute", acb_ptr, acb_size_dw);
+    }
 
     if (DebugState.DumpingCurrentFrame()) {
         static auto last_frame_num = -1LL;
@@ -2178,6 +2241,11 @@ static inline s32 PerformSubmit(u32 count, const u32* dcb_gpu_addrs[], u32* dcb_
                                 const u32* ccb_gpu_addrs[], u32* ccb_sizes_in_bytes) {
     if (DebugState.ShouldPauseInSubmit()) {
         DebugState.PauseGuestThreads();
+    }
+    if (TraceLabels()) {
+        for (u32 i = 0; i < count; ++i) {
+            TraceLabelPackets("graphics", dcb_gpu_addrs[i], dcb_sizes_in_bytes[i] / 4);
+        }
     }
 
     if (send_init_packet) {

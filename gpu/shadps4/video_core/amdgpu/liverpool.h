@@ -5,6 +5,7 @@
 
 #include <cstdlib>
 
+#include <chrono>
 #include <condition_variable>
 #include <deque>
 #include <coroutine>
@@ -98,6 +99,8 @@ public:
 
     void SubmitGfx(std::span<const u32> dcb, std::span<const u32> ccb);
     void SubmitAsc(u32 gnm_vqid, std::span<const u32> acb);
+    /// resogun: waits until a compute queue has run everything submitted to it, or the time is up.
+    bool WaitAsc(u32 gnm_vqid, std::chrono::milliseconds timeout);
 
     void SubmitDone() noexcept {
         std::scoped_lock lk{submit_mutex};

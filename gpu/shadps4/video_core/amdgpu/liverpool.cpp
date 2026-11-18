@@ -600,6 +600,49 @@ void Liverpool::ApplyGraphicsRegisterPacket(Regs& regs, const PM4Header* header,
     checksum = HashRegisterPacket(checksum, reinterpret_cast<const u32*>(header), count + 1);
 }
 
+// resogun: reports a WAIT_REG_MEM that stays unmet (once per packet address after 5 s), for hangs
+// where the GPU thread spins on a value nobody writes.
+static void NoteStuckWait(const PM4CmdWaitRegMem* wait, std::span<const u32> regs, const char* queue,
+                          std::chrono::steady_clock::time_point start, const u32* base = nullptr,
+                          const u32* end = nullptr) {
+    static const void* reported{};
+    if (reported == wait || std::chrono::steady_clock::now() - start < std::chrono::seconds(5)) {
+        return;
+    }
+    reported = wait;
+    const bool memory = wait->mem_space.Value() == PM4CmdWaitRegMem::MemSpace::Memory;
+    std::fprintf(stderr,
+                 "Hang: %s WAIT_REG_MEM unmet for 5 s: %s 0x%llx holds 0x%x, function %u, ref 0x%x, "
+                 "mask 0x%x\n",
+                 queue, memory ? "memory" : "register",
+                 memory ? static_cast<unsigned long long>(wait->Address<VAddr>())
+                        : static_cast<unsigned long long>(wait->Reg()),
+                 memory ? *wait->Address() : regs[wait->Reg()],
+                 static_cast<u32>(wait->function.Value()), wait->ref, wait->mask);
+    if (memory) {
+        const u32* words = reinterpret_cast<const u32*>(wait->Address<VAddr>() & ~0xfULL) - 32;
+        for (u32 row = 0; row < 12; ++row, words += 8) {
+            std::fprintf(stderr, "Hang:   mem %p: %08x %08x %08x %08x %08x %08x %08x %08x\n",
+                         static_cast<const void*>(words), words[0], words[1], words[2], words[3],
+                         words[4], words[5], words[6], words[7]);
+        }
+    }
+    // The type 3 packets of the buffer around the wait: opcode and first three body words.
+    const u32* at = reinterpret_cast<const u32*>(wait);
+    for (const u32* p = base; p && p < end;) {
+        const u32 header = *p;
+        const u32 type = header >> 30;
+        const u32 count = type == 2 ? 0 : ((header >> 16) & 0x3fff) + 1;
+        if (type == 3 && p + 0x400 > at && p < at + 0x100) {
+            std::fprintf(stderr, "Hang:   %s+0x%05x op 0x%02x count %u: %08x %08x %08x\n",
+                         p == at ? "*" : " ", static_cast<u32>(p - base), (header >> 8) & 0xff, count,
+                         count > 0 ? p[1] : 0, count > 1 ? p[2] : 0, count > 2 ? p[3] : 0);
+        }
+        p += count + 1;
+    }
+    std::fflush(stderr);
+}
+
 Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<const u32> ccb,
                                            u64 seq) {
     FIBER_ENTER(dcb_task_name);
@@ -1151,7 +1194,52 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 }
                 // Else the value may come from a fence that thread has yet to write: let it
                 // catch up before yielding to other queues.
+                const auto wait_start = std::chrono::steady_clock::now();
                 while (!wait_reg_mem->Test(regs.reg_array)) {
+                    NoteStuckWait(wait_reg_mem, regs.reg_array, "graphics", wait_start,
+                                  reinterpret_cast<const u32*>(base_addr),
+                                  dcb.data() + dcb.size());
+                    if (static const void* queues_reported{};
+                        queues_reported != wait_reg_mem &&
+                        std::chrono::steady_clock::now() - wait_start > std::chrono::seconds(5)) {
+                        queues_reported = wait_reg_mem;
+                        for (u32 q = 0; q < num_mapped_queues; ++q) {
+                            std::scoped_lock lock{mapped_queues[q].m_access};
+                            std::fprintf(stderr, "Hang:   queue %u holds %zu submit(s)\n", q,
+                                         mapped_queues[q].submits.size());
+                        }
+                        // The last compute submits: each ring entry calls an indirect buffer.
+                        if (asc_queues.is_allocated({0})) {
+                            const auto& asc = asc_queues[{0}];
+                            const u32* ring = reinterpret_cast<const u32*>(asc.map_addr);
+                            const u32 read = *asc.read_addr % asc.ring_size_dw;
+                            std::fprintf(stderr, "Hang:   compute ring read offset 0x%x\n", read);
+                            for (u32 back = 12; back >= 4 && read >= back; back -= 4) {
+                                const u32* ib = ring + read - back;
+                                std::fprintf(stderr, "Hang:   ring+0x%x: %08x %08x %08x %08x\n",
+                                             read - back, ib[0], ib[1], ib[2], ib[3]);
+                                if (((ib[0] >> 8) & 0xff) != 0x3f) {
+                                    continue;
+                                }
+                                const u32* p = reinterpret_cast<const u32*>(
+                                    (u64(ib[2] & 0xffff) << 32) | ib[1]);
+                                const u32* end = p + (ib[3] & 0xfffff);
+                                while (p < end) {
+                                    const u32 header = *p;
+                                    const u32 count =
+                                        (header >> 30) == 2 ? 0 : ((header >> 16) & 0x3fff) + 1;
+                                    std::fprintf(stderr,
+                                                 "Hang:     op 0x%02x count %u: %08x %08x %08x %08x\n",
+                                                 (header >> 8) & 0xff, count, count > 0 ? p[1] : 0,
+                                                 count > 1 ? p[2] : 0, count > 2 ? p[3] : 0,
+                                                 count > 3 ? p[4] : 0);
+                                    p += count + 1;
+                                }
+                            }
+                        }
+                        std::fprintf(stderr, "Hang:   %u submit(s) in all\n",
+                                     static_cast<u32>(num_submits));
+                    }
                     if (rasterizer && !rasterizer->DrawPipeIdle()) {
                         rasterizer->DrainDrawPipe(static_cast<u32>(opcode));
                         continue;
@@ -1493,7 +1581,9 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
         case PM4ItOpcode::WaitRegMem: {
             const auto* wait_reg_mem = reinterpret_cast<const PM4CmdWaitRegMem*>(header);
             ASSERT(wait_reg_mem->engine.Value() == PM4CmdWaitRegMem::Engine::Me);
+            const auto wait_start = std::chrono::steady_clock::now();
             while (!wait_reg_mem->Test(regs.reg_array)) {
+                NoteStuckWait(wait_reg_mem, regs.reg_array, "compute", wait_start);
                 YIELD_ASC(vqid);
             }
             break;
@@ -1516,6 +1606,18 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
                 [this](VAddr dst, u16 gds_index, u16 num_dwords) {
                     rasterizer->CopyBuffer(dst, gds_index, num_dwords * sizeof(u32), false, true);
                 });
+            {
+                // resogun: RESOGUN_TRACE_DINGDONG=1 also lists the releases a compute queue ran.
+                static const bool trace = [] {
+                    const char* env = std::getenv("RESOGUN_TRACE_DINGDONG");
+                    return env && env[0] == '1';
+                }();
+                if (trace) {
+                    std::fprintf(stderr, "Labels: compute ran release to 0x%llx, now 0x%x\n",
+                                 static_cast<unsigned long long>(release_mem->Address<u64>()),
+                                 *release_mem->Address<const u32*>());
+                }
+            }
             break;
         }
         case PM4ItOpcode::EventWrite: {
@@ -1616,6 +1718,33 @@ void Liverpool::SubmitAsc(u32 gnm_vqid, std::span<const u32> acb) {
     ++num_submits;
     work_retired = false;
     submit_cv.notify_one();
+}
+
+// resogun: a game may rebuild a compute command buffer in place as soon as sceGnmDingDong
+// returns (the console runs these small buffers at once), so the submitter waits here for the
+// queue to finish them. The time limit covers a buffer that waits for a later submit.
+bool Liverpool::WaitAsc(u32 gnm_vqid, std::chrono::milliseconds timeout) {
+    if (std::this_thread::get_id() == gpu_id) {
+        return true;
+    }
+    auto& queue = mapped_queues[gnm_vqid];
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    for (u32 spins = 0;; ++spins) {
+        {
+            std::scoped_lock lock{queue.m_access};
+            if (queue.submits.empty()) {
+                return true;
+            }
+        }
+        if (std::chrono::steady_clock::now() >= deadline) {
+            return false;
+        }
+        if (spins < 200) {
+            std::this_thread::yield();
+        } else {
+            std::this_thread::sleep_for(std::chrono::microseconds(100));
+        }
+    }
 }
 
 } // namespace AmdGpu
