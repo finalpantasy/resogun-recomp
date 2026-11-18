@@ -404,6 +404,47 @@ static void start_output(Prep *p, const char *dir, const char *name) {
 }
 
 typedef struct { Vector modules, bindings, exports, unwind, segments, imports, relocs; } Link;
+/* Check the length of a counted table before seeking past it. */
+static int skip_table(FILE *file, long *remaining, size_t record_size) {
+    uint8_t count[8];
+    if (*remaining < (long)sizeof count || fread(count, 1, sizeof count, file) != sizeof count) return 0;
+    *remaining -= (long)sizeof count;
+    uint64_t rows = U64(count);
+    if (rows > (uint64_t)*remaining / record_size) return 0;
+    long bytes = (long)(rows * record_size);
+    *remaining -= bytes;
+    return !fseek(file, bytes, SEEK_CUR);
+}
+
+int prepare_boot_complete(const char *path) {
+    FILE *file = fopen(path, "rb");
+    if (!file) return 0;
+    int complete = 0;
+    /* RGIMAGE7 puts four counted tables between the fixed header and image records. */
+    uint8_t header[96];
+    if (fseek(file, 0, SEEK_END)) goto done;
+    long length = ftell(file);
+    if (length < (long)sizeof header || fseek(file, 0, SEEK_SET) ||
+        fread(header, 1, sizeof header, file) != sizeof header ||
+        memcmp(header, "RGIMAGE7", 8)) goto done;
+    uint64_t image = U64(header + 8), segments = U64(header + 24);
+    uint64_t relocs = U64(header + 32), imports = U64(header + 40);
+    if (!image || image > LIMIT || !segments || segments > 64 || relocs > 1000000 || imports > 100000)
+        goto done;
+    uint64_t tail = image + segments * sizeof(PrepareSegment) + relocs * sizeof(Relocation) +
+                    imports * sizeof(((Import *)0)->name);
+    long remaining = length - (long)sizeof header;
+    if (tail > (uint64_t)remaining) goto done;
+    remaining -= (long)tail;
+    complete = skip_table(file, &remaining, sizeof(Module)) &&
+               skip_table(file, &remaining, sizeof(Binding)) &&
+               skip_table(file, &remaining, sizeof(ImageExport)) &&
+               skip_table(file, &remaining, sizeof(Unwind)) && !remaining;
+done:
+    fclose(file);
+    return complete;
+}
+
 static void write_image(Prep *p, const char *dir, const Object *main, const Link *link,
                         const uint8_t *image, uint64_t size, uint64_t flags) {
     const Segment *param = segment(main, PARAM), *tls = segment(main, TLS);

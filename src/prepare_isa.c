@@ -1,4 +1,5 @@
 /* Generate RGISA1 with the same decoder the renderer already links. */
+#include "prepare.h"
 #include "isa_rewrite.h"
 #include <Zydis/Zydis.h>
 #include <stdlib.h>
@@ -66,6 +67,27 @@ static int site_order(const void *a, const void *b) {
     return l == r ? 0 : l < r ? -1 : 1;
 }
 
+typedef struct {
+    char magic[8];
+    uint64_t size;
+    uint8_t hash[32];
+    uint32_t count, unsupported;
+    uint64_t reserved;
+} IsaHeader;
+_Static_assert(sizeof(IsaHeader) == 64, "RGISA1 header layout");
+
+int prepare_isa_complete(const char *path) {
+    FILE *file = fopen(path, "rb");
+    if (!file) return 0;
+    IsaHeader header;
+    int complete = fread(&header, 1, sizeof header, file) == sizeof header &&
+                   !memcmp(header.magic, "RGISA1\0", 8) && header.count <= (1u << 20) &&
+                   !fseek(file, 0, SEEK_END) &&
+                   ftell(file) == (long)(sizeof header + header.count * sizeof(IsaSite));
+    fclose(file);
+    return complete;
+}
+
 int prepare_isa_table(const char *path, const uint8_t *image, size_t size,
                       const PrepareSegment *segments, size_t segment_count) {
     ZydisDecoder decoder;
@@ -110,14 +132,7 @@ int prepare_isa_table(const char *path, const uint8_t *image, size_t size,
         unsupported += sites[i].mode == ISA_MODE_UNSUPPORTED;
         sites[records++] = sites[i];
     }
-    struct {
-        char magic[8];
-        uint64_t size;
-        uint8_t hash[32];
-        uint32_t count, unsupported;
-        uint64_t reserved;
-    } header = {"RGISA1", size, {0}, records, unsupported, 0};
-    _Static_assert(sizeof header == 64, "RGISA1 header layout");
+    IsaHeader header = {"RGISA1", size, {0}, records, unsupported, 0};
     isa_sha256(image, size, header.hash);
     FILE *f = fopen(path, "wb");
     if (!f) goto done;

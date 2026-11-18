@@ -669,19 +669,21 @@ static int write_paths(const char *ini, const char *image_name, const char *key)
     return ok;
 }
 
-static int magic(const char *path, const char *expected, size_t length, long minimum) {
-    FILE *f = fopen(path, "rb");
-    if (!f) return 0;
-    char header[8];
-    int ok = fread(header, 1, sizeof header, f) == sizeof header &&
-             !memcmp(header, expected, length) && !fseek(f, 0, SEEK_END) && ftell(f) >= minimum;
-    fclose(f);
-    return ok;
+static int content_complete(const char *path) {
+    FILE *file = fopen(path, "rb");
+    if (!file) return 0;
+    unsigned char data[28];
+    int complete = fread(data, 1, sizeof data, file) == sizeof data &&
+                   !memcmp(data, "RGCONT01", 8) && fgetc(file) == EOF && !ferror(file);
+    fclose(file);
+    return complete;
 }
+
 static int image_paths(const char *dir, int need_isa) {
-    return join_path(boot, dir, "boot-linked.bin") && magic(boot, "RGIMAGE7", 8, 128) &&
-           join_path(profile, dir, "content.bin") && magic(profile, "RGCONT01", 8, 28) &&
-           join_path(isa, dir, "isa-rewrite.bin") && (!need_isa || magic(isa, "RGISA1", 6, 64));
+    return join_path(boot, dir, "boot-linked.bin") && prepare_boot_complete(boot) &&
+           join_path(profile, dir, "content.bin") && content_complete(profile) &&
+           join_path(isa, dir, "isa-rewrite.bin") &&
+           ((!need_isa && !exists(isa)) || prepare_isa_complete(isa));
 }
 static void discard_image(const char *dir) {
     const char *files[] = {"boot-linked.bin", "content.bin", "isa-rewrite.bin"};
