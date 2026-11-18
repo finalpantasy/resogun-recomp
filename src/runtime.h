@@ -169,6 +169,7 @@ void runtime_pad_report(void);
 int runtime_pad_describe(void);
 uintptr_t runtime_rtc_resolve(const char *name);
 uintptr_t runtime_ngs2_resolve(const char *name);
+uintptr_t runtime_font_resolve(const char *name);
 uintptr_t runtime_json_resolve(const char *name);
 uintptr_t runtime_fiber_resolve(const char *name);
 const char *runtime_file_user_dir(void);
