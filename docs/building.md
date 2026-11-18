@@ -86,6 +86,11 @@ are resolved from the portable root. Linux driver shader cache redirects point
 to the portable shader directory. The Windows runner redirects its AppData environment into the portable
 root. Graphics drivers may also maintain caches through Windows.
 
+With the Golf AppContent provider, `--entitlements original` reports only
+installed add-on folders. `--entitlements builtin` selects the game's
+built-in entitlement table and overrides the inherited `GOLF_ENTITLEMENTS`
+environment value. This setting applies to the current launch.
+
 `python run.py prepare --game DIR --out DIR` forwards to the native preparer.
 For existing developer images, `--prepared DIR --game DIR` uses their
 `boot-linked.bin`, `content.bin`, and optional `isa-rewrite.bin`.

@@ -472,6 +472,7 @@ static void usage(void) {
            "  --data-dir DIR       Portable state root (default: executable directory)\n"
            "  --dlc DIR            Extra directory of extracted add-on folders\n"
            "  --no-dlc             Ignore the extra add-on directory\n"
+           "  --entitlements MODE  Built-in or installed-folder mode: builtin | original\n"
            "  --save DIR           Save location (default: DATA/save)\n"
            "  --config FILE        Settings file (default: SAVE/settings.ini)\n"
            "  --log FILE           Append launcher and runtime output here\n"
@@ -535,6 +536,12 @@ static int parse(Options *o, int argc, char **argv) {
         if (!strcmp(flag, "--reprepare")) { o->reprepare = 1; continue; }
         if (!strcmp(flag, "--any-build")) { o->any_build = 1; continue; }
         if (!strcmp(flag, "--no-dlc")) { o->dlc = NULL; o->no_dlc = 1; continue; }
+        if (!strcmp(flag, "--entitlements")) {
+            if (++i >= argc || (strcmp(argv[i], "builtin") && strcmp(argv[i], "original")))
+                return option_error(flag, "expected builtin or original");
+            if (!set_env("GOLF_ENTITLEMENTS", argv[i])) return option_error(flag, "cannot set entitlement mode");
+            continue;
+        }
         if (!strcmp(flag, "--no-crash-watch")) { if (!env_set("CRASH_WATCH", "0")) return LAUNCH_ERROR; continue; }
         if (!strcmp(flag, "--fullscreen") || !strcmp(flag, "--windowed") || !strcmp(flag, "--borderless")) {
             if (!env_set("DISPLAY_MODE", flag + 2)) return LAUNCH_ERROR;

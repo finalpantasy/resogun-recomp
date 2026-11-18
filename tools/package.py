@@ -51,6 +51,8 @@ Keep the dump available for the runner to mount as /app0.
 Run --help for options. The first command remembers the dump, builds the
 linked image and exits. Later starts reuse the image when its inputs match.
 Use --reprepare to rebuild and --dlc DIR for extracted add-on folders.
+--entitlements original limits AppContent to installed add-on folders
+when the Golf AppContent provider is present.
 
 By default the executable's folder holds game/, save/, shaders/, gpu/, log/
 and paths.ini. Windows also directs AppData from the runner process into host/.
