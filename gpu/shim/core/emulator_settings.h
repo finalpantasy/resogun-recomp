@@ -69,7 +69,9 @@ public:
     bool IsPatchShaders() { return false; }
     bool IsPipelineCacheArchived() { return false; }
     bool IsPipelineCacheEnabled() { static const auto value = Flag("RESOGUN_PIPELINE_CACHE", true); return value; }
-    bool IsReadbackLinearImagesEnabled() { static const auto value = Flag("RESOGUN_READBACK_LINEAR", false); return value; }
+    // resogun: on by default: Everybody's Golf draws course terrain data (lie, height) into linear
+    // render targets and reads it on the CPU; without the readback every lie is judged O.B.
+    bool IsReadbackLinearImagesEnabled() { static const auto value = Flag("RESOGUN_READBACK_LINEAR", true); return value; }
     bool IsRenderdocEnabled() { return false; }
     bool IsShaderCollect() { return false; }
     bool IsVkCrashDiagnosticEnabled() { return false; }
