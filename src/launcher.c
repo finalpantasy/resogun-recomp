@@ -955,16 +955,24 @@ static void desktop_arg(FILE *f, const char *arg) {
 }
 static int shortcut(const char *destination) {
     char folder[PATH_CHARS], file[PATH_CHARS], target[PATH_CHARS];
-    ssize_t n = readlink("/proc/self/exe", target, sizeof target - 1);
-    if (n <= 0 || n == (ssize_t)sizeof target - 1 || !from_cwd(folder, destination) || !make_dirs(folder) ||
+    const char *image = getenv("APPIMAGE"), *appdir = getenv("APPDIR");
+    int appimage = image && *image && appdir && *appdir;
+    if (appimage) {
+        if (!is_absolute(image) || !exists(image) || is_directory(image) || !copy_path(target, image))
+            return complain("Cannot locate the AppImage file");
+    } else {
+        ssize_t n = readlink("/proc/self/exe", target, sizeof target - 1);
+        if (n <= 0 || n == (ssize_t)sizeof target - 1) return complain("Cannot locate the executable");
+        target[n] = 0;
+        if (strpbrk(target, "\r\n")) return complain("Invalid executable path");
+    }
+    if (!from_cwd(folder, destination) || !make_dirs(folder) ||
         !join_path(file, folder, "everybodys-golf.desktop")) return complain("Cannot set shortcut paths");
-    target[n] = 0;
-    if (strpbrk(target, "\r\n")) return complain("Invalid executable path");
     FILE *f = fopen(file, "wb");
     if (!f) return complain("Cannot create the shortcut");
     fputs("[Desktop Entry]\nType=Application\nName=" TITLE "\nCategories=Game;\nExec=", f);
     desktop_arg(f, target);
-    fputs(" --data-dir ", f);
+    fputs(appimage ? " " : " --data-dir ", f);
     desktop_arg(f, data_dir);
     fputs("\nTerminal=false\n", f);
     int ok = !ferror(f);
