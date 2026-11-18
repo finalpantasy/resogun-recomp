@@ -481,6 +481,8 @@ static void usage(void) {
            "  --np-mode MODE      Synthetic local account or signed out: local | offline\n"
            "  --online-id NAME    Local account name (up to 16 bytes)\n"
            "  --discovery-port N  Local replay port (0 disables replay)\n"
+           "  --ticket-grants N   Synthetic ticket fixture, 0 or 1\n"
+           "  --tus MODE          In-process Title User Storage, local or off\n"
            "  --font-file FILE    Host font for guest text\n"
            "  --save DIR           Save location (default: DATA/save)\n"
            "  --config FILE        Settings file (default: SAVE/settings.ini)\n"
@@ -555,6 +557,8 @@ static int parse(Options *o, int argc, char **argv) {
         if (!strcmp(flag, "--np-mode")) golf_env = "GOLF_NP";
         else if (!strcmp(flag, "--online-id")) golf_env = "GOLF_ONLINE_ID";
         else if (!strcmp(flag, "--discovery-port")) golf_env = "GOLF_DISCOVERY_PORT";
+        else if (!strcmp(flag, "--ticket-grants")) golf_env = "GOLF_TICKET_GRANTS";
+        else if (!strcmp(flag, "--tus")) golf_env = "GOLF_TUS";
         else if (!strcmp(flag, "--font-file")) golf_env = "GOLF_FONT_FILE";
         if (golf_env) {
             if (++i >= argc || !argv[i][0] || !strncmp(argv[i], "--", 2)) return option_error(flag, "missing argument");
@@ -566,6 +570,10 @@ static int parse(Options *o, int argc, char **argv) {
                 return option_error(flag, "expected a name of at most 16 bytes");
             if (!strcmp(golf_env, "GOLF_DISCOVERY_PORT") && (strlen(value) > 5 || !number(value, 65535)))
                 return option_error(flag, "expected a loopback port from 0 through 65535");
+            if (!strcmp(golf_env, "GOLF_TICKET_GRANTS") && strcmp(value, "0") && strcmp(value, "1"))
+                return option_error(flag, "expected 0 or 1");
+            if (!strcmp(golf_env, "GOLF_TUS") && strcmp(value, "local") && strcmp(value, "off"))
+                return option_error(flag, "expected local or off");
             if (!strcmp(golf_env, "GOLF_FONT_FILE")) {
                 if (!from_cwd(absolute, value)) return option_error(flag, "invalid path");
                 value = absolute;

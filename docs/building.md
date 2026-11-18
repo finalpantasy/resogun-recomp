@@ -97,6 +97,10 @@ and `--discovery-port N` for local replay. They override
 launch. A port of 0 disables loopback replay. Use `--font-file FILE` to
 select a host font for guest text.
 
+`--ticket-grants 1` enables synthetic ticket grants in the local WebAPI fixture.
+`--tus local` enables in-process Title User Storage for the local account.
+Pass `--ticket-grants 0` or `--tus off` to disable the corresponding fixture.
+
 `python run.py prepare --game DIR --out DIR` forwards to the native preparer.
 For existing developer images, `--prepared DIR --game DIR` uses their
 `boot-linked.bin`, `content.bin`, and optional `isa-rewrite.bin`.
