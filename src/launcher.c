@@ -671,16 +671,39 @@ static void read_paths(const char *ini, Saved *saved) {
     fclose(f);
 }
 
-static const char *relative_to_root(const char *path) {
-    if (!*path) return path;
-    size_t n = strlen(data_dir);
-    while (n && data_dir[n - 1] == '/') --n;
-    if (strncmp(path, data_dir, n)) return path;
-
+static const char *relative_below(const char *root, const char *path) {
+    size_t n = strlen(root);
+    while (n && root[n - 1] == '/') --n;
+    if (strncmp(path, root, n)) return NULL;
     const char *relative = path + n;
-    if (*relative && *relative != '/') return path;
+    if (*relative && *relative != '/') return NULL;
     while (*relative == '/') ++relative;
     return *relative ? relative : ".";
+}
+#ifdef _WIN32
+static int final_directory(char out[PATH_CHARS], const char *path) {
+    HANDLE dir = CreateFileA(path, FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                             NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+    if (dir == INVALID_HANDLE_VALUE) return 0;
+    DWORD length = GetFinalPathNameByHandleA(dir, out, PATH_CHARS, FILE_NAME_NORMALIZED);
+    CloseHandle(dir);
+    return length && length < PATH_CHARS && copy_path(out, out);
+}
+#endif
+static const char *relative_to_root(const char *path, char resolved[PATH_CHARS]) {
+    if (!*path) return path;
+    const char *relative = relative_below(data_dir, path);
+#ifdef _WIN32
+    /* Consult the filesystem when the two paths spell the same directory differently. */
+    if (!relative) {
+        char root[PATH_CHARS];
+        if (final_directory(root, data_dir) && final_directory(resolved, path))
+            relative = relative_below(root, resolved);
+    }
+#else
+    (void)resolved;
+#endif
+    return relative ? relative : path;
 }
 static unsigned long process_id(void) {
 #ifdef _WIN32
@@ -690,13 +713,14 @@ static unsigned long process_id(void) {
 #endif
 }
 static int write_paths(const char *ini, const char *image_name, const char *key) {
-    char tmp[PATH_CHARS];
+    char tmp[PATH_CHARS], resolved_game[PATH_CHARS], resolved_dlc[PATH_CHARS];
     int n = snprintf(tmp, sizeof tmp, "%s.%lu.tmp", ini, process_id());
     if (n < 0 || n >= PATH_CHARS) return 0;
     FILE *f = fopen(tmp, "wb");
     if (!f) return 0;
     int ok = fprintf(f, "[paths]\ngame=%s\ndlc=%s\nimage=%s\nkey=%s\n",
-                     relative_to_root(game), relative_to_root(dlc), image_name, key) >= 0;
+                     relative_to_root(game, resolved_game), relative_to_root(dlc, resolved_dlc),
+                     image_name, key) >= 0;
     if (fclose(f)) ok = 0;
 #ifdef _WIN32
     if (ok) ok = MoveFileExA(tmp, ini, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0;
