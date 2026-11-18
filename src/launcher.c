@@ -572,8 +572,11 @@ static int parse(Options *o, int argc, char **argv) {
                 return option_error(flag, "expected local or offline");
             if (!strcmp(golf_env, "GOLF_ONLINE_ID") && strlen(value) > 16)
                 return option_error(flag, "expected a name of at most 16 bytes");
-            if (!strcmp(golf_env, "GOLF_DISCOVERY_PORT") && (strlen(value) > 5 || !number(value, 65535)))
-                return option_error(flag, "expected a loopback port from 0 through 65535");
+            if (!strcmp(golf_env, "GOLF_DISCOVERY_PORT")) {
+                if (strlen(value) > 5 || !number(value, 65535))
+                    return option_error(flag, "expected a loopback port from 0 through 65535");
+                if (value[strspn(value, "0")] == '\0') value = "";
+            }
             if ((!strcmp(golf_env, "GOLF_LOCAL_AUTH") || !strcmp(golf_env, "GOLF_TICKET_GRANTS"))
                     && strcmp(value, "0") && strcmp(value, "1"))
                 return option_error(flag, "expected 0 or 1");
