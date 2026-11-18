@@ -1,5 +1,6 @@
 /* The guest's TSC: sceKernelReadTsc and sceKernelGetTscFrequency (src/runtime_kernel.c). */
 #define _GNU_SOURCE
+#define _CRT_RAND_S /* runtime_kernel.c uses rand_s; stdlib.h must see this first */
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>

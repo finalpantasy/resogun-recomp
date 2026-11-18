@@ -22,6 +22,7 @@ int resogun_gpu_text_input_poll(char *text, uint64_t size) { (void)text; (void)s
 void resogun_gpu_common_dialog_initialized(void) {}
 static int second_pad;
 int runtime_pad_second_user(void) { return second_pad; }
+int runtime_golf_local_account(void) { return 0; } /* the test console has no local PSN account */
 /* Not the repository's user/ (run.py's save folder: a real trophies.dat there failed the checks). */
 #define MOCK_USER "out/test_services_no_user"
 static char mock_user_dir[512]=MOCK_USER;

@@ -21,6 +21,7 @@ int32_t *runtime_errno(void) { static int32_t value; return &value; }
 int64_t runtime_file_fstat(int fd, void *guest_stat) { (void)guest_stat; return fd==3 ? 0 : -9; }
 uintptr_t runtime_lookup(const RuntimeExport *table, size_t count, const char *nid) { (void)table; (void)count; (void)nid; return 0; }
 void runtime_restart(void) { abort(); }
+int runtime_golf_local_account(void) { return 0; } /* no local PSN account in the test */
 
 static void test_http(void) {
     assert(http_connection(1,NULL,"http",80,1)==HTTP_INVALID_VALUE);
