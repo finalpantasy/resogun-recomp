@@ -6,6 +6,7 @@ Build with bash build.sh. --zip writes the Windows zip or Linux tar.gz.
 On Linux, --appimage also writes an AppImage using a locally installed appimagetool.
 """
 import argparse
+import hashlib
 import os
 from pathlib import Path
 import re
@@ -170,13 +171,33 @@ def min_glibc(paths):
     return max(versions, key=lambda v: tuple(map(int, v.split('.'))), default=None)
 
 
+def git(*args):
+    return subprocess.run(['git', *args], cwd=PORT, capture_output=True, text=True).stdout.strip()
+
+
 def release_name(product='everybodys-golf-pc'):
     """Name artifacts after the source revision."""
-    def git(*args):
-        return subprocess.run(['git', *args], cwd=PORT, capture_output=True, text=True).stdout.strip()
     described = git('describe', '--tags', '--always', '--dirty') or 'unknown'
     when = git('log', '-1', '--format=%cs') or time.strftime('%Y-%m-%d')
     return f'{product}-{described}-{when}'
+
+
+def verify_build(executable, revision):
+    """Verify the build receipt before using the checkout revision in the archive name."""
+    rebuild = 'Run bash build.sh before packaging.'
+    receipt = executable.with_name(f'{executable.name}.build')
+    try:
+        lines = receipt.read_text(encoding='ascii').splitlines()
+    except (OSError, UnicodeError):
+        raise SystemExit(f'Cannot read build receipt for {executable.name}. {rebuild}') from None
+    if len(lines) != 2 or lines[0] != revision:
+        raise SystemExit(f'{executable.name} was built from a different revision. {rebuild}')
+    digest = hashlib.sha256()
+    with executable.open('rb') as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b''):
+            digest.update(block)
+    if lines[1] != digest.hexdigest():
+        raise SystemExit(f'{executable.name} differs from its build receipt. {rebuild}')
 
 
 def copy(source, target):
@@ -221,9 +242,12 @@ def main():
     bin_dir = Path(os.environ.get('MSYS2_ROOT', r'C:\msys64')) / 'clang64' / 'bin'
     if a.appimage and (not LINUX or a.debug):
         p.error('--appimage requires a Linux player build')
-    for exe in EXES:
-        if not (PORT / 'out' / exe).is_file():
-            raise SystemExit(f'out/{exe} not found: build first (bash build.sh).')
+    programs = {exe: PORT / 'out' / exe for exe in EXES}
+    revision = git('rev-parse', '--verify', 'HEAD') or 'unknown'
+    for name, executable in programs.items():
+        if not executable.is_file():
+            raise SystemExit(f'out/{name} not found: build first (bash build.sh).')
+        verify_build(executable, revision)
     out = (a.out or PORT / 'dist').resolve()
     if any((out / old).exists() for old in ('resogun.exe', 'resogun', 'resogun-setup.exe', 'resogun-setup', 'prepare')):
         raise SystemExit(f'{out} contains a legacy release. Choose a fresh --out directory.')
@@ -234,7 +258,6 @@ def main():
         copy(source, out / name)
         shipped.append(name)
 
-    programs = {exe: PORT / 'out' / exe for exe in EXES}
     for name, source in programs.items():
         if a.debug:
             ship(source, name)

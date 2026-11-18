@@ -101,6 +101,9 @@ For existing developer images, `--prepared DIR --game DIR` uses their
 python tools/package.py --zip
 ```
 
+The packager checks the runner against the build receipt in `out/`. Rebuild
+after switching revisions or replacing the executable.
+
 The script stages the runner, native shared libraries, settings template, and
 license. The Windows zip and Linux tar.gz contain one executable and no game
 files. Use `--debug --out dist-debug` to keep debug information and include the

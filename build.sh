@@ -23,6 +23,7 @@ Linux)
 *) echo 'Windows (Git Bash or an MSYS2 shell) or Linux only.' >&2; exit 1 ;;
 esac
 jobs=${GOLF_BUILD_JOBS:-8}
+revision=$(git rev-parse --verify HEAD 2>/dev/null || printf unknown)
 version=$(git describe --tags --always 2>/dev/null || printf development)
 launcher_cmake=$PWD/packaging/launcher.cmake
 command -v cygpath >/dev/null && launcher_cmake=$(cygpath -m "$launcher_cmake")
@@ -54,6 +55,11 @@ fi
 cp "out/gpu/everybodys-golf$exe" out/
 cp settings.example.ini out/
 [[ -n $exe ]] && mkdir -p out/libs && cp out/gpu/libs/libs.manifest out/libs/
+runner="out/everybodys-golf$exe"
+checksum=$(sha256sum "$runner")
+receipt="$runner.build"
+printf '%s\n%s\n' "$revision" "${checksum%% *}" > "$receipt.tmp"
+mv -f -- "$receipt.tmp" "$receipt"
 echo "Built everybodys-golf$exe in $PWD/out"
 if [[ ${1:-} == --test ]]; then
     # run_test <name> <source> [extra flags...]: builds out/<name>-test and runs it.
