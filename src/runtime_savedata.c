@@ -306,6 +306,132 @@ typedef struct { int32_t user; int32_t pad; const TitleId *title; const DirName 
 typedef struct { int32_t user; int32_t pad; const TitleId *title; const DirName *dir; const void *fingerprint;
                  uint8_t reserved[32]; } TransferringMount;
 
+static int copy_file(const char *from, const char *to) {
+    FILE *in=fopen(from,"rb"), *out=in ? fopen(to,"wb") : NULL;
+    int ok=in && out;
+    char buffer[65536]; size_t n;
+    while (ok && (n=fread(buffer,1,sizeof(buffer),in))) ok=fwrite(buffer,1,n,out)==n;
+    if (in) fclose(in);
+    if (out && fclose(out)) ok=0;
+    return ok ? 0 : -1;
+}
+static int copy_tree(const char *from, const char *to) {
+    if (make_dirs(to)) return -1;
+    DIR *d=opendir(from);
+    if (!d) return -1;
+    int r=0;
+    for (struct dirent *e; !r && (e=readdir(d));) {
+        if (!strcmp(e->d_name,".") || !strcmp(e->d_name,"..")) continue;
+        char a[1000], b[1000]; struct stat st;
+        if ((size_t)snprintf(a,sizeof(a),"%s/%s",from,e->d_name)>=sizeof(a) ||
+            (size_t)snprintf(b,sizeof(b),"%s/%s",to,e->d_name)>=sizeof(b) || stat(a,&st)) { r=-1; break; }
+        r=S_ISDIR(st.st_mode) ? copy_tree(a,b) : copy_file(a,b);
+    }
+    closedir(d);
+    return r;
+}
+/* Events wait in a small queue (oldest first); a full queue drops the oldest. */
+static Event events[8];
+static unsigned event_count;
+static void queue_event(uint32_t type, int32_t error, int32_t user, const char *dir) {
+    if (event_count==8) { memmove(events,events+1,7*sizeof(*events)); --event_count; }
+    Event *e=&events[event_count++];
+    memset(e,0,sizeof(*e));
+    e->type=type; e->error=error; e->user=user;
+    snprintf(e->title.data,sizeof(e->title.data),"%.9s",title_id);
+    snprintf(e->dir.data,sizeof(e->dir.data),"%.31s",dir);
+}
+/* host is <base>/<dir>; the backup is <base>/<dir>.sce_backup/{data,sce_sys}. Called with the lock. */
+static int32_t backup_locked(const char *host, const char *meta) {
+    char to[900];
+    snprintf(to,sizeof(to),"%s.sce_backup",host); remove_tree(to);
+    snprintf(to,sizeof(to),"%s.sce_backup/data",host);
+    if (copy_tree(host,to)) return ERR_INTERNAL;
+    snprintf(to,sizeof(to),"%s.sce_backup/sce_sys",host);
+    if (copy_tree(meta,to)) return ERR_INTERNAL;
+    ++backups_done;
+    return 0;
+}
+/* sceSaveDataUmountWithBackup(mount point): sceSaveDataUmount, then the backup; its result is
+ * event 1. Everybody's Golf calls it at 0xba01c4. */
+static ABI int32_t save_umount_backup(const MountPoint *point) {
+    if (!initialized) return ERR_NOT_INITIALIZED;
+    pthread_mutex_lock(&lock);
+    int slot=slot_of(point);
+    if (slot>=0) {
+        runtime_file_unmount(point->data); slots[slot].used=0;
+        const char *dir=strrchr(slots[slot].host,'/');
+        dir=dir ? dir+1 : slots[slot].host;
+        const int32_t r=backup_locked(slots[slot].host,slots[slot].meta);
+        queue_event(1,r,slots[slot].user,dir);
+        printf("Runtime: save data '%s' unmounted and backed up (0x%x)\n",dir,(unsigned)r);
+    }
+    pthread_mutex_unlock(&lock);
+    return slot>=0 ? 0 : ERR_NOT_FOUND;
+}
+/* sceSaveDataGetEventResult(param, event): the oldest finished event, or NOT_FOUND when none waits. */
+static ABI int32_t save_event(const void *param, Event *event) {
+    (void)param;
+    if (!initialized) return ERR_NOT_INITIALIZED;
+    if (!event) return ERR_PARAMETER;
+    pthread_mutex_lock(&lock);
+    int32_t r=ERR_NOT_FOUND;
+    if (event_count) { *event=events[0]; --event_count; memmove(events,events+1,event_count*sizeof(*events)); r=0; }
+    pthread_mutex_unlock(&lock);
+    return r;
+}
+static int backup_paths(int32_t user, const TitleId *title, const DirName *dir, char *host, size_t host_size, char *meta, size_t meta_size) {
+    if (!dir || !valid_name(dir->data,sizeof(dir->data))) return -1;
+    char base[600];
+    root(user,title ? title->data : NULL,base,sizeof(base));
+    snprintf(host,host_size,"%s/%s",base,dir->data);
+    snprintf(meta,meta_size,"%s/%s.sce_sys",base,dir->data);
+    return 0;
+}
+static int mounted_host(const char *host) {
+    for (int i=0;i<SLOTS;++i) if (slots[i].used && !strcmp(slots[i].host,host)) return 1;
+    return 0;
+}
+/* sceSaveDataCheckBackupData(check): 0 when the save has a backup (its param is returned when
+ * asked for), NOT_FOUND when it has none, BUSY while the save is mounted. */
+static ABI int32_t save_check_backup(const CheckBackup *c) {
+    if (!initialized) return ERR_NOT_INITIALIZED;
+    char host[640], meta[680], path[900]; struct stat st;
+    if (!c || backup_paths(c->user,c->title,c->dir,host,sizeof(host),meta,sizeof(meta))) return ERR_PARAMETER;
+    pthread_mutex_lock(&lock);
+    int32_t r=0;
+    snprintf(path,sizeof(path),"%s.sce_backup/data",host);
+    if (mounted_host(host)) r=ERR_BUSY;
+    else if (stat(path,&st)) r=ERR_NOT_FOUND;
+    else if (c->param) {
+        snprintf(path,sizeof(path),"%s.sce_backup/sce_sys",host);
+        read_param(path,c->param);
+    }
+    pthread_mutex_unlock(&lock);
+    return r;
+}
+/* sceSaveDataRestoreBackupData(restore): the backup's files replace the save's. */
+static ABI int32_t save_restore_backup(const RestoreBackup *b) {
+    if (!initialized) return ERR_NOT_INITIALIZED;
+    char host[640], meta[680], from[900]; struct stat st;
+    if (!b || backup_paths(b->user,b->title,b->dir,host,sizeof(host),meta,sizeof(meta))) return ERR_PARAMETER;
+    pthread_mutex_lock(&lock);
+    int32_t r=0;
+    snprintf(from,sizeof(from),"%s.sce_backup/data",host);
+    if (mounted_host(host)) r=ERR_BUSY;
+    else if (stat(from,&st)) r=ERR_NOT_FOUND;
+    else {
+        remove_tree(host);
+        if (copy_tree(from,host)) r=ERR_INTERNAL;
+        snprintf(from,sizeof(from),"%s.sce_backup/sce_sys",host);
+        remove_tree(meta);
+        if (!r && copy_tree(from,meta)) r=ERR_INTERNAL;
+        printf("Runtime: save data '%s' restored from its backup (0x%x)\n",b->dir->data,(unsigned)r);
+    }
+    pthread_mutex_unlock(&lock);
+    return r;
+}
+
 /* RESOGUN_SAVE_TRACE=1: every call above with its result (polls only when the result changes). */
 static int save_trace(void) { static int v=-1; if (v<0) { const char *e=getenv("RESOGUN_SAVE_TRACE"); v=e && e[0]=='1'; } return v; }
 static int32_t traced(const char *call, const char *detail, int32_t r) {
@@ -326,12 +452,23 @@ static ABI int32_t t_set_param(const MountPoint *p, uint32_t type, const void *b
     return traced("SetParam",d,save_set_param(p,type,b,n));
 }
 static ABI int32_t t_icon(const MountPoint *p, const Icon *i) { return traced("SaveIcon",point_name(p),save_icon(p,i)); }
+static ABI int32_t t_umount_backup(const MountPoint *p) { return traced("UmountWithBackup",point_name(p),save_umount_backup(p)); }
+static ABI int32_t t_event(const void *param, Event *e) {
+    static int32_t last=1;
+    const int32_t r=save_event(param,e);
+    if (r!=last) { last=r; traced("GetEventResult",NULL,r); }
+    return r;
+}
+static ABI int32_t t_check_backup(const CheckBackup *c) { return traced("CheckBackupData",c ? dir_name(c->dir) : "null",save_check_backup(c)); }
+static ABI int32_t t_restore_backup(const RestoreBackup *b) { return traced("RestoreBackupData",b ? dir_name(b->dir) : "null",save_restore_backup(b)); }
 static ABI int32_t t_delete(const Delete *d) { return traced("Delete",d ? dir_name(d->dir) : "null",save_delete(d)); }
 
 static const RuntimeExport exports[]={
     {"sceSaveDataInitialize3",t_initialize}, {"sceSaveDataTerminate",t_terminate},
     {"sceSaveDataMount2",t_mount2}, {"sceSaveDataUmount",t_umount},
     {"sceSaveDataSetParam",t_set_param}, {"sceSaveDataSaveIcon",t_icon}, {"sceSaveDataDelete",t_delete},
+    {"sceSaveDataUmountWithBackup",t_umount_backup}, {"sceSaveDataGetEventResult",t_event},
+    {"sceSaveDataCheckBackupData",t_check_backup}, {"sceSaveDataRestoreBackupData",t_restore_backup},
 };
 uintptr_t runtime_savedata_resolve(const char *name) { return RUNTIME_LOOKUP(exports,name); }
 void runtime_savedata_report(void) { printf("Runtime: save data mounts=%zu, memory writes=%zu, backups=%zu\n",mounts_done,memory_writes,backups_done); }

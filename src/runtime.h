@@ -1,6 +1,7 @@
 #ifndef RESOGUN_RUNTIME_H
 #define RESOGUN_RUNTIME_H
 #include <stdint.h>
+#include <stdio.h>
 #include <stddef.h>
 #ifdef _WIN32
 #include "compat_win.h"
@@ -112,6 +113,7 @@ uintptr_t runtime_time_resolve(const char *name);
 void runtime_content_configure(const uint32_t values[5]);
 /* An extra folder of add-ons next to <user>/addcont/ (its <title_id>/ subfolder when it has one). */
 void runtime_content_extra_dir(const char *folder,const char *title_id);
+void runtime_content_set_title(const char *title_id);
 uintptr_t runtime_content_resolve(const char *name);
 void runtime_content_report(void);
 typedef struct { const char *name; void *function; } RuntimeExport;
@@ -141,8 +143,13 @@ uintptr_t runtime_services_resolve(const char *name);
  * devices the PC lacks (camera, Audio3d, social screen): runtime_net.c, runtime_np.c, runtime_devices.c. */
 uintptr_t runtime_net_resolve(const char *name);
 uintptr_t runtime_np_resolve(const char *name);
+/* Everybody's Golf's local PSN account (runtime_golf.c): set from the title id before imports resolve. */
+void runtime_golf_set_title(const char *title_id);
+int runtime_golf_local_account(void);
+uintptr_t runtime_golf_resolve(const char *name);
 uintptr_t runtime_devices_resolve(const char *name);
 void runtime_file_report(void);
+void runtime_file_recent_missing(FILE *out);
 void runtime_file_configure(const char *app0, const char *user);
 int runtime_file_mount(const char *guest, const char *host);
 void runtime_file_unmount(const char *guest);

@@ -1,6 +1,7 @@
 /* Networking for an offline console (the cable is unplugged, as in runtime_services.c): the
  * libSceHttp calls runtime_services.c does not have create objects, and no request ever gets a
  * response (HTTP NETWORK); the Second Screen companion server never sees a client. */
+#include <stdio.h>
 #include "runtime.h"
 #include <ctype.h>
 #include <stdatomic.h>
@@ -38,12 +39,22 @@ static ABI int32_t http_connection_url(int32_t tmpl,const char *url,int32_t keep
     if (!n || n>=sizeof scheme) return HTTP_UNKNOWN_SCHEME;
     memcpy(scheme,url,n); scheme[n]=0;
     if (!same(scheme,"http") && !same(scheme,"https")) return HTTP_UNKNOWN_SCHEME;
+    printf("Runtime: http connection to %s (nothing connects)%c",url,10);
     return atomic_fetch_add(&http_next,1);
 }
 /* sceHttpCreateRequest2(connection, method, path, content length): an id; the path is required. */
 static ABI int32_t http_request2(int32_t conn,const char *method,const char *path,uint64_t length) {
     (void)conn; (void)method; (void)length;
     if (!path) return HTTP_INVALID_VALUE;
+    return atomic_fetch_add(&http_next,1);
+}
+/* sceHttpCreateRequestWithURL(connection, method, url, content length) (NID Aeu5wVKkF9w; Golf at
+ * 0xec9174 passes method 0..2 from a table and keeps a result >= 0 as the request id): an id; the
+ * URL is required. The URL is logged: it is the game server's contract. Nothing is sent. */
+static ABI int32_t http_request_url(int32_t conn,int32_t method,const char *url,uint64_t length) {
+    (void)conn;
+    if (!url) return HTTP_INVALID_VALUE;
+    printf("Runtime: http request method %d, %llu body bytes: %s (not sent)\n",method,(unsigned long long)length,url);
     return atomic_fetch_add(&http_next,1);
 }
 /* sceHttpGetAllResponseHeaders(request, header, size): no request gets a response. */
@@ -71,6 +82,8 @@ static const RuntimeExport exports[]={
     {"sceNetInit",net_init},
     {"sceHttpsSetSslCallback",https_ssl_callback},
     {"sceHttpCreateConnectionWithURL",http_connection_url},
+    {"sceHttpCreateRequestWithURL",http_request_url},
+    {"sceHttpsDisableOption",https_option}, {"sceHttpSetChunkedTransferEnabled",http_ok},
     {"sceHttpsEnableOption",https_option},
     {"sceCompanionHttpdInitialize2",http_ok}, {"sceCompanionHttpdTerminate",http_ok},
     {"sceCompanionHttpdStart",http_ok}, {"sceCompanionHttpdStop",http_ok},

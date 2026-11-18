@@ -885,7 +885,22 @@ static ABI int32_t posix_msync(void *address, uint64_t size, int flags) { (void)
 static int32_t protect_locked(uintptr_t start, uint64_t size, int prot, int type) {
     uintptr_t end=start+align_up(size,PAGE);
     start&=~(uintptr_t)(PAGE-1);
-    if ((prot & ~0x37) || !covered(start,end,0)) return INVALID;
+    if (prot & ~0x37) return INVALID;
+    if (!covered(start,end,0)) {
+        /* The PS4 kernel skips pages that are not mapped and protects the mapped ones in the range
+         * (shadPS4 memory.cpp, MemoryManager::Protect). Everybody's Golf type-protects 64 GiB at
+         * 0x3000000000 in one sceKernelBatchMap entry, with a few megabytes mapped inside it. */
+        int32_t result=0;
+        for (uintptr_t at=start; at<end && !result;) {
+            const size_t i=vma_index(at);
+            if (i==vma_count || vmas[i].start>=end) break;
+            const uintptr_t from=vmas[i].start>at ? vmas[i].start : at;
+            const uintptr_t to=vmas[i].end<end ? vmas[i].end : end;
+            if (vmas[i].kind!=KIND_RESERVED) result=protect_locked(from,to-from,prot,type);
+            at=to;
+        }
+        return result;
+    }
     if (host_protect(start,end-start,host_prot(prot))) return INVALID;
     int error; size_t i=carve(start,end,&error);
     if (error) return NO_MEMORY;
@@ -925,6 +940,44 @@ static ABI int32_t virtual_query(const void *address, int flags, VirtualQueryInf
 /* The allocated block holding `offset`; with flag 1 (SCE_KERNEL_DMQ_FIND_NEXT) the first block at
  * or after it when none holds it. Unallocated memory is ACCESS, as on the PS4. */
 typedef struct { int64_t start, end; int32_t type; } DirectQueryInfo;
+/* sceKernelBatchMap(entries, count, processed) / sceKernelBatchMap2(..., flags): the entries in
+ * order, stopping at the first error; *processed is how many succeeded. Operations: 0 map direct
+ * (start, length, prot, offset), 1 unmap, 2 protect, 3 map flexible, 4 type protect (the memory
+ * type is not tracked here, so it is a protect). BatchMap maps at the given addresses (MAP_FIXED).
+ * Each entry takes the region lock on its own; the PS4 applies the batch under one lock. */
+typedef struct { void *start; uint64_t offset, length; int8_t prot, type; int16_t reserved; int32_t operation; } BatchEntry;
+_Static_assert(sizeof(BatchEntry)==32,"PS4 batch map entry layout");
+static ABI int32_t batch_map2(BatchEntry *entries, int count, int *processed, int flags) {
+    if (!entries || count<0) return INVALID;
+    int32_t result=0; int done=0;
+    for (; done<count; ++done) {
+        BatchEntry *e=&entries[done];
+        switch (e->operation) {
+        case 0: result=direct_map(&e->start,e->length,(uint8_t)e->prot,flags,(int64_t)e->offset,0); break;
+        case 1: result=direct_unmap(e->start,e->length); break;
+        case 2: case 4: result=kernel_mprotect(e->start,e->length,(uint8_t)e->prot); break;
+        case 3: result=map_flexible(&e->start,e->length,(uint8_t)e->prot,flags); break;
+        default: result=INVALID;
+        }
+        if (result) {
+            printf("Runtime: batch map entry %d failed: operation %d, start %p, length 0x%llx, prot 0x%x, type %d, offset 0x%llx\n",
+                   done,e->operation,e->start,(unsigned long long)e->length,(unsigned)(uint8_t)e->prot,e->type,(unsigned long long)e->offset);
+            break;
+        }
+    }
+    if (runtime_verbose() || result)
+        printf("Runtime: batch map of %d entries, %d done, result 0x%x\n",count,done,(unsigned)result);
+    if (processed) *processed=done;
+    return result;
+}
+static ABI int32_t batch_map(BatchEntry *entries, int count, int *processed) {
+    return batch_map2(entries,count,processed,MAP_FIXED_FLAG);
+}
+/* sceKernelMtypeprotect(address, size, memory type, prot): the type is not tracked, so a protect. */
+static ABI int32_t kernel_mtypeprotect(const void *address, uint64_t size, int type, int prot) {
+    (void)type;
+    return kernel_mprotect(address,size,prot);
+}
 static const RuntimeExport exports[]={
     {"mmap",posix_mmap}, {"msync",posix_msync},
     {"sceKernelGetDirectMemorySize",direct_size}, {"sceKernelAllocateDirectMemory",direct_allocate},
@@ -935,6 +988,11 @@ static const RuntimeExport exports[]={
     {"sceKernelMapNamedFlexibleMemory",map_flexible_named},
     {"sceKernelReserveVirtualRange",reserve_range},
     {"sceKernelVirtualQuery",virtual_query},
+    {"sceKernelMtypeprotect",kernel_mtypeprotect},
+    /* sceKernelCheckedReleaseDirectMemory(start, size): the release that fails on a range that is
+     * not allocated, which direct_release already does. */
+    {"sceKernelCheckedReleaseDirectMemory",direct_release},
+    {"sceKernelBatchMap",batch_map}, {"sceKernelBatchMap2",batch_map2},
 };
 uintptr_t runtime_memory_resolve(const char *name) {
     /* Direct-memory NIDs resolve before import_names.inc names them. */

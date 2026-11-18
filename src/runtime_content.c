@@ -117,12 +117,43 @@ static void scan_folder(const char *path) {
     }
     closedir(d);
 }
+/* Everybody's Golf (CUSA04687): its add-ons are entitlements with no files (carts, courses,
+ * boosters, character boxes, outfits, tickets). The game's own table
+ * (xbdata/param/entitlement/entitlement_param.xb: label, product label, item save-data id) lists
+ * 31; 24 are in the supplied packages, the other 7 (16, 17, 20, 22, 24, 25, 26) have no
+ * package here. All 31 are reported as installed by default; GOLF_ENTITLEMENTS=original reports only
+ * the add-on folders, as for any other game. */
+static const char *const golf_addons[]={
+    "EN00000000000001","EN00000000000002","EN00000000000003","EN00000000000004",
+    "EN00000000000005","EN00000000000006","EN00000000000007","EN00000000000008",
+    "EN00000000000009","EN00000000000010","EN00000000000011","EN00000000000012",
+    "EN00000000000013","EN00000000000014","EN00000000000015","EN00000000000016",
+    "EN00000000000017","EN00000000000018","EN00000000000019","EN00000000000020",
+    "EN00000000000021","EN00000000000022","EN00000000000023","EN00000000000024",
+    "EN00000000000025","EN00000000000026","EN00000000000027","EN00000000000028",
+    "EN00000000000029","EN00010000000000","EN00020000000000"
+};
+static int golf_title;
+void runtime_content_set_title(const char *title_id) { golf_title=title_id && !strncmp(title_id,"CUSA04687",9); }
+static void builtin_addons(void) {
+    const char *mode=getenv("GOLF_ENTITLEMENTS");
+    if (!golf_title || (mode && !strcmp(mode,"original"))) return;
+    unsigned added=0;
+    for (size_t i=0;i<sizeof(golf_addons)/sizeof(golf_addons[0]) && addon_count<MAX_ADDONS;++i) {
+        if (find_addon(golf_addons[i])>=0) continue;
+        Addon *a=&addons[addon_count++];
+        memcpy(a->label,golf_addons[i],LABEL_SIZE); strcpy(a->folder,"built in");
+        ++added;
+    }
+    printf("Runtime: %u built-in add-ons unlocked (GOLF_ENTITLEMENTS=original turns this off)\n",added);
+}
 static void scan_addons(void) {
     if (addons_scanned) return;
     addons_scanned=1;
     char path[600]; snprintf(path,sizeof(path),"%s/addcont",runtime_file_user_dir());
     scan_folder(path);
     if (extra_dir[0]) scan_folder(extra_dir);
+    builtin_addons();
     qsort(addons,addon_count,sizeof(*addons),addon_order);
     for (unsigned i=0;i<addon_count;++i) printf("Runtime: add-on %s installed (%s)\n",addons[i].label,addons[i].folder);
 }
@@ -143,6 +174,24 @@ static ABI int32_t addon_info(uint32_t service,const char *label,void *info) {
         return 0;
     }
     return NO_ENTITLEMENT;
+}
+/* sceAppContentGetAddcontInfoList(service, list, list size, hits): the installed add-ons, 24 bytes
+ * each (label, status 4 = installed); with no list, only their number (shadPS4 app_content.cpp). */
+static ABI int32_t addon_list(uint32_t service,unsigned char *list,uint32_t size,uint32_t *hits) {
+    require_initialized();
+    (void)service;
+    if (!hits) return PARAMETER;
+    scan_addons();
+    ++queries;
+    if (!list || !size) { *hits=addon_count; return 0; }
+    uint32_t n=0;
+    for (; n<addon_count && n<size; ++n) {
+        unsigned char *out=list+(size_t)n*24; const uint32_t installed=4;
+        memset(out,0,24); memcpy(out,addons[n].label,strlen(addons[n].label)); memcpy(out+20,&installed,4);
+    }
+    *hits=n;
+    printf("Runtime: add-on list: %u of %u reported\n",n,addon_count);
+    return 0;
 }
 /* sceAppContentTemporaryDataMount2(option, mount) (shadPS4 app_content.cpp): names /temp0, kept in
  * <user>/temp0; the folder is made and mounted on the first call (Resogun's boot makes none). */
@@ -166,6 +215,7 @@ uintptr_t runtime_content_resolve(const char *name) {
     if (!strcmp(name,"R9lA82OraNs#libSceAppContent")) return (uintptr_t)content_init;
     if (!strcmp(name,"99b82IKXpH4#libSceAppContent")) return (uintptr_t)param_int;
     if (!strcmp(name,"m47juOmH0VE#libSceAppContent")) return (uintptr_t)addon_info;
+    if (!strcmp(name,"xnd8BJzAxmk#libSceAppContent")) return (uintptr_t)addon_list;
     return 0;
 }
 void runtime_content_report(void) {

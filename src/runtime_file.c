@@ -5,6 +5,8 @@
  * Paths containing ".." components are rejected rather than normalized. */
 #define _GNU_SOURCE
 #include "runtime.h"
+#include <stdatomic.h>
+#include <time.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -246,6 +248,36 @@ static int64_t device_read(int kind,void *buffer,uint64_t size) {
     return done==size ? (int64_t)size : -EIO;
 #endif
 }
+/* Missing files are logged at most 8 a second unless RESOGUN_LOG_MISSING=1: a game
+ * that probes loose files before its archives (Everybody's Golf: about 70 a second while loading)
+ * otherwise spends its load threads waiting on the unbuffered log. The total is in the summary. */
+static char recent_missing[8][192];
+static _Atomic unsigned recent_next;
+/* The last files that were not found, oldest first: a fault report names them (the log is rate limited). */
+void runtime_file_recent_missing(FILE *out) {
+    const unsigned n=atomic_load(&recent_next);
+    for (unsigned i=n>=8 ? n-8 : 0;i<n;++i) fprintf(out,"  not found before this: %s%c",recent_missing[i%8],10);
+}
+/* RESOGUN_FILE_TRACE_MATCH=text: opens whose path contains it are logged, found or not. */
+static int trace_match(const char *guest) {
+    static const char *match;
+    static int match_read;
+    if (!match_read) { match=getenv("RESOGUN_FILE_TRACE_MATCH"); match_read=1; }
+    return match && *match && strstr(guest,match);
+}
+static void note_missing(const char *guest) {
+    snprintf(recent_missing[atomic_fetch_add(&recent_next,1)%8],sizeof(recent_missing[0]),"%s",guest);
+    static int all=-1;
+    static _Atomic long long second;
+    static _Atomic int logged;
+    if (all<0) { const char *e=getenv("RESOGUN_LOG_MISSING"); all=e && e[0]=='1'; }
+    if (!all && !trace_match(guest)) { /* at most 8 a second: a lone miss before a fault is still named */
+        const long long now=(long long)time(NULL);
+        if (atomic_exchange(&second,now)!=now) atomic_store(&logged,0);
+        if (atomic_fetch_add(&logged,1)>=8) return;
+    }
+    printf("Runtime: open(%s) -> not found\n",guest);
+}
 /* All operations return >=0 or -(host errno); wrappers adapt the convention. */
 static int64_t do_open(const char *guest,int flags,int mode) {
     int device=device_kind(guest);
@@ -276,13 +308,13 @@ static int64_t do_open(const char *guest,int flags,int mode) {
         if (!(dir=list_directory(path))) return -EACCES;
     } else if (flags&0x20000) {
         e=errno==ENOENT ? ENOENT : ENOTDIR;
-        if (e==ENOENT) { ++missing; printf("Runtime: open(%s) -> not found\n",guest); }
+        if (e==ENOENT) { ++missing; note_missing(guest); }
         return -e;
     } else {
         host=open(path,host_flags(flags)&~O_DIRECTORY,_S_IREAD|_S_IWRITE);
         if (host<0) {
             e=errno;
-            if (e==ENOENT) { ++missing; printf("Runtime: open(%s) -> not found\n",guest); }
+            if (e==ENOENT) { ++missing; note_missing(guest); }
             return -e;
         }
         if (host_fstat(host,&s)) memset(&s,0,sizeof(s));
@@ -291,7 +323,7 @@ static int64_t do_open(const char *guest,int flags,int mode) {
     int host=open(path,host_flags(flags),mode ? mode : 0644);
     if (host<0) {
         e=errno;
-        if (e==ENOENT) { ++missing; printf("Runtime: open(%s) -> not found\n",guest); }
+        if (e==ENOENT) { ++missing; note_missing(guest); }
         return -e;
     }
     struct stat s;
@@ -306,6 +338,7 @@ static int64_t do_open(const char *guest,int flags,int mode) {
     snprintf(files[fd].path,sizeof(files[fd].path),"%s",guest);
     ++opens;
     pthread_mutex_unlock(&lock);
+    if (trace_match(guest)) printf("File trace: open(%s) -> fd %d, %lld bytes\n",guest,fd,(long long)s.st_size);
     if (file_trace() && !game_path(guest)) {
         char frames[2048];
         runtime_guest_backtrace(frames,sizeof(frames),32);

@@ -102,6 +102,53 @@ static ABI int32_t rtc_add_seconds(uint64_t *out, const uint64_t *in, int64_t se
     if (!out || !in) return ERR_INVALID_POINTER;
     *out=*in+(uint64_t)(seconds*1000000LL); return 0;
 }
+/* sceRtcTickAddMinutes/Days/Weeks(out, in, count): the same for the other fixed-length units.
+ * Everybody's Golf calls AddDays(tick, tick, 1) at 0xeab06 and ignores the result. */
+static ABI int32_t rtc_add_minutes(uint64_t *out, const uint64_t *in, int64_t minutes) {
+    if (!out || !in) return ERR_INVALID_POINTER;
+    *out=*in+(uint64_t)(minutes*60000000LL); return 0;
+}
+static ABI int32_t rtc_add_days(uint64_t *out, const uint64_t *in, int32_t days) {
+    if (!out || !in) return ERR_INVALID_POINTER;
+    *out=*in+(uint64_t)((int64_t)days*(int64_t)TICKS_PER_DAY); return 0;
+}
+static ABI int32_t rtc_add_weeks(uint64_t *out, const uint64_t *in, int32_t weeks) {
+    if (!out || !in) return ERR_INVALID_POINTER;
+    *out=*in+(uint64_t)((int64_t)weeks*7*(int64_t)TICKS_PER_DAY); return 0;
+}
+/* sceRtcTickAddMonths/Years(out, in, count): calendar arithmetic; a day past the end of the
+ * target month becomes its last day (shadPS4 rtc.cpp). The time of day is kept. */
+static int32_t add_months(uint64_t *out, const uint64_t *in, int64_t months) {
+    if (!out || !in) return ERR_INVALID_POINTER;
+    DateTime t; from_tick(*in,&t);
+    int64_t total=(int64_t)t.year*12+(t.month-1)+months;
+    int64_t year=total/12, month=total%12+1;
+    if (year<1 || year>9999) return ERR_INVALID_YEAR;
+    t.year=(uint16_t)year; t.month=(uint16_t)month;
+    const int last=days_in_month(t.year,t.month);
+    if (t.day>last) t.day=(uint16_t)last;
+    *out=to_tick(&t); return 0;
+}
+static ABI int32_t rtc_add_months(uint64_t *out, const uint64_t *in, int32_t months) { return add_months(out,in,months); }
+static ABI int32_t rtc_add_years(uint64_t *out, const uint64_t *in, int32_t years) { return add_months(out,in,(int64_t)years*12); }
+/* sceRtcConvertUtcToLocalTime(utc tick, local tick): plus the host time zone's offset at that time. */
+static ABI int32_t rtc_utc_to_local(const uint64_t *utc, uint64_t *local) {
+    if (!utc || !local) return ERR_INVALID_POINTER;
+    if (*utc<UNIX_EPOCH_TICKS) { *local=*utc; return 0; }
+    time_t seconds=(time_t)((*utc-UNIX_EPOCH_TICKS)/1000000u);
+    struct tm l;
+    if (!localtime_r(&seconds,&l)) { *local=*utc; return 0; }
+    const DateTime t={(uint16_t)(l.tm_year+1900),(uint16_t)(l.tm_mon+1),(uint16_t)l.tm_mday,(uint16_t)l.tm_hour,
+                      (uint16_t)l.tm_min,(uint16_t)(l.tm_sec>59 ? 59 : l.tm_sec),(uint32_t)(*utc%1000000u)};
+    *local=to_tick(&t); return 0;
+}
+/* sceRtcGetDayOfWeek(year, month, day): 0 Sunday to 6 Saturday, or the invalid-field error. */
+static ABI int32_t rtc_day_of_week(int32_t year, int32_t month, int32_t day) {
+    if (year<1 || year>9999) return ERR_INVALID_YEAR;
+    if (month<1 || month>12) return ERR_INVALID_MONTH;
+    if (day<1 || day>days_in_month(year,month)) return ERR_INVALID_DAY;
+    return (int32_t)((days_from_civil(year,month,day)+1)%7); /* 0001-01-01 is a Monday */
+}
 static ABI int32_t rtc_get_time_t(const DateTime *t, int64_t *seconds) {
     if (!t || !seconds) return ERR_INVALID_POINTER;
     int32_t e=validate(t);
@@ -160,6 +207,9 @@ static const RuntimeExport exports[]={
 
     {"sceRtcGetTick",rtc_get_tick}, {"sceRtcSetTick",rtc_set_tick},
     {"sceRtcGetTickResolution",rtc_tick_resolution}, {"sceRtcTickAddHours",rtc_add_hours}, {"sceRtcTickAddSeconds",rtc_add_seconds},
+    {"sceRtcTickAddMinutes",rtc_add_minutes}, {"sceRtcTickAddDays",rtc_add_days}, {"sceRtcTickAddWeeks",rtc_add_weeks},
+    {"sceRtcTickAddMonths",rtc_add_months}, {"sceRtcTickAddYears",rtc_add_years},
+    {"sceRtcConvertUtcToLocalTime",rtc_utc_to_local}, {"sceRtcGetDayOfWeek",rtc_day_of_week},
     {"sceRtcGetTime_t",rtc_get_time_t}, {"sceRtcParseDateTime",rtc_parse_date_time},
 };
 uintptr_t runtime_rtc_resolve(const char *name) { return RUNTIME_LOOKUP(exports,name); }

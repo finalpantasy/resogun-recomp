@@ -262,10 +262,13 @@ static ABI int32_t np_poll_request(int32_t id,int32_t *result) {
 }
 /* sceNpCheckNpAvailabilityA(request, user), sceNpGetParentalControlInfoA(request, user, age, info). */
 static ABI int32_t np_availability(int32_t id,int32_t user) {
-    return user==-1 ? NP_INVALID_ARGUMENT : np_complete(id,NP_SIGNED_OUT);
+    return user==-1 ? NP_INVALID_ARGUMENT : np_complete(id,runtime_golf_local_account() ? 0 : NP_SIGNED_OUT);
 }
 static ABI int32_t np_parental(int32_t id,int32_t user,int8_t *age,void *info) {
-    return !age || !info || user==-1 ? NP_INVALID_ARGUMENT : np_complete(id,NP_SIGNED_OUT);
+    if (!age || !info || user==-1) return NP_INVALID_ARGUMENT;
+    if (!runtime_golf_local_account()) return np_complete(id,NP_SIGNED_OUT);
+    *age=18; memset(info,0,3); /* an adult account: no chat, content or UGC restriction */
+    return np_complete(id,0);
 }
 /* sceNpGetAccountIdA(user, account): the user's PSN account, kept by the console while PSN is out
  * of reach (sceNpGetState stays signed out). sceNpGetUserIdByAccountId: that account is the one
@@ -351,8 +354,26 @@ static int32_t dialog_open_mode(int i, const unsigned char *param, size_t mode_o
     return mode==progress_mode ? dialog_open_progress(i) : dialog_open(i);
 }
 static ABI int32_t msg_init(void) { return dialog_init(1); }
-static ABI int32_t msg_open(const unsigned char *p) { return dialog_open_mode(1,p,56,2); }
+/* sceMsgDialogOpen(param). For a user message (mode 1) userMsgParam @64 points at
+ * {int32 buttonType; char *msg @8}; the text is logged because nothing is displayed. */
+static ABI int32_t msg_open(const unsigned char *p) {
+    if (p) {
+        uint32_t mode; memcpy(&mode,p+56,4);
+        const unsigned char *user; memcpy(&user,p+64,8);
+        if (mode==1 && user) {
+            int32_t buttons; const char *text;
+            memcpy(&buttons,user,4); memcpy(&text,user+8,8);
+            printf("Runtime: message dialog (buttons %d): %.400s\n",buttons,text ? text : "(null)");
+        } else printf("Runtime: message dialog mode %u\n",mode);
+    }
+    return dialog_open_mode(1,p,56,2);
+}
 static ABI int32_t msg_status(void) { return dialog_status(1); }
+/* sceCommonDialogIsUsed(): true while any common dialog is running. */
+static ABI int32_t common_is_used(void) {
+    for (size_t i=0;i<sizeof(dialogs)/sizeof(dialogs[0]);++i) if (dialogs[i].status==DIALOG_RUNNING) return 1;
+    return 0;
+}
 static ABI int32_t msg_term(void) { return dialog_term(1); }
 static ABI int32_t msg_close(void) { return dialog_close(1); }
 static ABI int32_t msg_result(unsigned char *out) { return dialog_result(1,out,0); }
@@ -927,6 +948,108 @@ static ABI int32_t discmap_on_hdd(const char *path,int64_t offset,int64_t size,i
     (void)path; (void)offset; (void)size; (void)result; return DISC_MAP_NO_BITMAP;
 }
 
+/* PART B: runtime_services.c (after trophy_release / np_account_id; uses its helpers)    */
+/* ======================================================================================= */
+
+/* ---- NpManager requests (P np_manager.cpp, S np_create/np_complete) ----
+ * sceNpCreateRequest(): a synchronous request id, as sceNpCreateAsyncRequest without the async
+ * flag. sceNpCheckNpReachability(req, user) is np_availability (user -1 INVALID_ARGUMENT, then
+ * the request completes with SIGNED_OUT). sceNpCheckNpAvailability(req, OrbisNpOnlineId *): null
+ * INVALID_ARGUMENT, then no user has an online id while signed out: USER_NOT_FOUND (P).
+ * C: eboot 0xb9aa2d/0xb9ae2a: CreateRequest > 0 is used as the id, CheckNpReachability == 0 means
+ * reachable (state 2), anything else state 0; a request id <= 0 skips to the failure path. */
+static ABI int32_t np_create_sync(void) { return np_create(0); }
+static ABI int32_t np_availability_id(int32_t id,const void *online_id) {
+    (void)id; return !online_id ? NP_INVALID_ARGUMENT : NP_USER_NOT_FOUND;
+}
+/* ---- sceNpGetUserIdByAccountId(u64 account, int32 *user): 0/null INVALID_ARGUMENT; the account
+ * of np_account_id gives its user, else USER_NOT_FOUND (S comment above np_account_id; P returns
+ * SIGNED_OUT without a shadnet session). sceNpGetAccountCountryA and sceNpGetOnlineId are in
+ * runtime_golf.c already (not repeated). ---- */
+static ABI int32_t np_user_by_account(uint64_t account,int32_t *user) {
+    if (!account || !user) return NP_INVALID_ARGUMENT;
+    uint64_t index=account-NP_ACCOUNT_ID;
+    if (account<NP_ACCOUNT_ID || index>1 || !logged_in(USER_ID+(int32_t)index)) return NP_USER_NOT_FOUND;
+    *user=USER_ID+(int32_t)index; return 0;
+}
+
+/* ---- Trophies (S trophy section; P np_trophy.cpp for the checks) ----
+ * sceNpTrophyAbortHandle(handle): nothing is in flight on a local trophy set: OK; handle <= 0
+ * INVALID_HANDLE. C: the eboot wrapper at 0xef78b0 passes *handlePtr and returns the result.
+ * sceNpTrophyShowTrophyList(ctx, handle): the system list is not drawn: OK after the id checks.
+ * sceNpTrophyCaptureScreenshot(): no capture facility: SCREENSHOT_DISABLED (P returns OK from a
+ * stub, not copied). GetGameIcon(ctx, handle, buffer, *size) / GetGroupIcon(ctx, handle, group,
+ * buffer, *size) / GetTrophyIcon(ctx, handle, id, buffer, *size): *size null INVALID_ARGUMENT,
+ * ctx/handle <= 0 INVALID_CONTEXT / INVALID_HANDLE, the PNG from the TRP (ICON0.PNG, GR%03d.PNG,
+ * TROP%03d.PNG) else ICON_FILE_NOT_FOUND; no buffer: *size = file size; smaller buffer:
+ * INSUFFICIENT_BUFFER; else the file is copied and *size set. A trophy icon needs the trophy
+ * unlocked (P): TROPHY_NOT_UNLOCKED; id outside 0..TROPHY_MAX INVALID_TROPHY_ID; group outside
+ * 0..TROPHY_MAX INVALID_GROUP_ID (the base-game group id NOT_VERIFIED). */
+#define TROPHY_INVALID_TROPHY_ID ((int32_t)0x8055160A)
+#define TROPHY_INVALID_GROUP_ID ((int32_t)0x8055160B)
+#define TROPHY_NOT_UNLOCKED ((int32_t)0x8055161A)
+#define TROPHY_SCREENSHOT_DISABLED ((int32_t)0x8055162B)
+static ABI int32_t trophy_abort(int32_t handle) { return handle>0 ? 0 : TROPHY_INVALID_HANDLE; }
+static ABI int32_t trophy_show_list(int32_t ctx,int32_t handle) {
+    if (ctx<=0) return TROPHY_INVALID_CONTEXT;
+    return handle>0 ? 0 : TROPHY_INVALID_HANDLE;
+}
+static ABI int32_t trophy_screenshot(void) { return TROPHY_SCREENSHOT_DISABLED; }
+static int32_t trophy_send_png(const unsigned char *png,uint64_t len,void *buffer,uint64_t *size) {
+    if (!png) return TROPHY_ICON_NOT_FOUND;
+    if (!buffer) { *size=len; return 0; }
+    if (*size<len) return TROPHY_INSUFFICIENT_BUFFER;
+    memcpy(buffer,png,len); *size=len; return 0;
+}
+static int32_t trophy_icon_checks(int32_t ctx,int32_t handle,uint64_t *size) {
+    if (!size) return TROPHY_INVALID;
+    if (ctx<=0) return TROPHY_INVALID_CONTEXT;
+    return handle>0 ? 0 : TROPHY_INVALID_HANDLE;
+}
+static ABI int32_t trophy_game_icon(int32_t ctx,int32_t handle,void *buffer,uint64_t *size) {
+    int32_t r=trophy_icon_checks(ctx,handle,size);
+    if (r) return r;
+    const unsigned char *png=0; uint64_t len=0;
+    pthread_mutex_lock(&lock); trophy_load_once();
+    r=trophy_send_png(trp_file("ICON0.PNG",&png,&len) ? png : 0,len,buffer,size);
+    pthread_mutex_unlock(&lock);
+    return r;
+}
+static ABI int32_t trophy_group_icon(int32_t ctx,int32_t handle,int32_t group,void *buffer,uint64_t *size) {
+    int32_t r=trophy_icon_checks(ctx,handle,size);
+    if (r) return r;
+    if (group<0 || group>=TROPHY_MAX) return TROPHY_INVALID_GROUP_ID;
+    char want[16]; snprintf(want,sizeof(want),"GR%03d.PNG",group);
+    const unsigned char *png=0; uint64_t len=0;
+    pthread_mutex_lock(&lock); trophy_load_once();
+    r=trophy_send_png(trp_file(want,&png,&len) ? png : 0,len,buffer,size);
+    pthread_mutex_unlock(&lock);
+    return r;
+}
+static ABI int32_t trophy_trophy_icon(int32_t ctx,int32_t handle,int32_t id,void *buffer,uint64_t *size) {
+    int32_t r=trophy_icon_checks(ctx,handle,size);
+    if (r) return r;
+    if (id<0 || id>=TROPHY_MAX) return TROPHY_INVALID_TROPHY_ID;
+    const unsigned char *png=0; uint64_t len=0;
+    pthread_mutex_lock(&lock); trophy_load_once();
+    if (!(trophy_flags[id/32]>>(id%32)&1u)) r=TROPHY_NOT_UNLOCKED;
+    else r=trophy_send_png(trophy_icon(id,&png,&len) ? png : 0,len,buffer,size);
+    pthread_mutex_unlock(&lock);
+    return r;
+}
+
+/* ---- sceImeDialogAbort() (P ime_dialog.cpp): no dialog ever opened IME DIALOG NOT_IN_USE
+ * (0x80BC0107), one that already finished NOT_RUNNING (0x80BC0105), a running one ends as
+ * aborted (end status 2) and returns OK. C: eboot 0xef5aa4 returns (result == 0).
+ * NOTE: ime_result above returns 0x80BC0101 for "not finished"; P's DIALOG_NOT_FINISHED is
+ * 0x80BC0106 (0x80BC0101 is INVALID_TITLE). ---- */
+static ABI int32_t ime_abort(void) {
+    if (!ime.running && !ime.finished) return (int32_t)0x80BC0107;
+    if (!ime.running) return (int32_t)0x80BC0105;
+    ime_complete(2,"");
+    return 0;
+}
+
 static const RuntimeExport exports[]={
     {"sceUserServiceInitialize",user_initialize}, {"sceUserServiceTerminate",user_terminate},
     {"sceUserServiceGetInitialUser",user_initial}, {"sceUserServiceGetLoginUserIdList",user_list},
@@ -1011,7 +1134,7 @@ static const RuntimeExport exports[]={
 
     {"sceNpMatching2Initialize",ok_void}, {"sceNpMatching2Terminate",ok_void},
 
-    {"sceCommonDialogInitialize",common_init},
+    {"sceCommonDialogInitialize",common_init}, {"sceCommonDialogIsUsed",common_is_used}, {"sceMsgDialogGetStatus",msg_status},
     {"sceMsgDialogInitialize",msg_init}, {"sceMsgDialogOpen",msg_open},
     {"sceMsgDialogUpdateStatus",msg_status}, {"sceMsgDialogTerminate",msg_term},
     {"sceMsgDialogClose",msg_close},
@@ -1038,5 +1161,16 @@ static const RuntimeExport exports[]={
     {"sceNpTrophyDestroyHandle",trophy_release}, {"sceNpTrophyDestroyContext",trophy_release},
 
     {"sceDiscMapIsRequestOnHDD",discmap_on_hdd},
+    {"sceNpCreateRequest",np_create_sync},
+    {"sceNpCheckNpReachability",np_availability},
+    {"sceNpCheckNpAvailability",np_availability_id},
+    {"sceNpGetUserIdByAccountId",np_user_by_account},
+    {"sceNpTrophyAbortHandle",trophy_abort},
+    {"sceNpTrophyShowTrophyList",trophy_show_list},
+    {"sceNpTrophyCaptureScreenshot",trophy_screenshot},
+    {"sceNpTrophyGetGameIcon",trophy_game_icon},
+    {"sceNpTrophyGetGroupIcon",trophy_group_icon},
+    {"sceNpTrophyGetTrophyIcon",trophy_trophy_icon},
+    {"sceImeDialogAbort",ime_abort},
 };
 uintptr_t runtime_services_resolve(const char *name) { return RUNTIME_LOOKUP(exports,name); }

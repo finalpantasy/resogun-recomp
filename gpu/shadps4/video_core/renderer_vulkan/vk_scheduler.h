@@ -9,6 +9,8 @@
 #include <condition_variable>
 #include <deque>
 #include <functional>
+#include <array>
+#include <cstddef>
 #include <memory>
 #include <span>
 #include <source_location>
@@ -785,11 +787,24 @@ public:
         }
         // Room for the data and the command that follows it, so both stay in one chunk.
         const size_t bytes = data.size_bytes();
+        // resogun: data too large for a chunk (Everybody's Golf copies thousands of regions at
+        // once) lives on the heap. Waiting for the recorder first means every command that used
+        // an older block has run; the last 8 blocks are kept for commands not yet recorded.
+        if (bytes + alignof(T) + 1024 > RecordChunk::Capacity) {
+            SyncRecording();
+            auto& block = large_record_data[large_record_next++ % large_record_data.size()];
+            block = std::make_unique<std::max_align_t[]>(bytes / sizeof(std::max_align_t) + 1);
+            std::memcpy(block.get(), data.data(), bytes);
+            return {reinterpret_cast<const T*>(block.get()), data.size()};
+        }
         ReserveRecordData(bytes + alignof(T));
         auto* dst = static_cast<T*>(record_chunk->Allocate(bytes, alignof(T)));
         std::memcpy(dst, data.data(), bytes);
         return {dst, data.size()};
     }
+
+    std::array<std::unique_ptr<std::max_align_t[]>, 8> large_record_data;
+    size_t large_record_next{};
 
     /// Hands recorded commands to the recording thread. Called at points where no caller holds
     /// the raw command buffer (end of draws and dispatches); small batches are kept.

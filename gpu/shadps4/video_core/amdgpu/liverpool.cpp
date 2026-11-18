@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <array>
+#include <atomic>
 #include <chrono>
 #include <pthread.h>
 #ifndef _WIN32
@@ -631,10 +633,25 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
         default:
             UNREACHABLE_MSG("Wrong PM4 type {}", type);
             break;
-        case 0:
-            UNREACHABLE_MSG("Unimplemented PM4 type 0, base reg: {}, size: {}",
-                            header->type0.base.Value(), header->type0.NumWords());
+        case 0: {
+            // resogun: a type-0 packet writes NumWords() consecutive registers starting at
+            // base (header: base 0..15, count-1 16..29). Everybody's Golf sends register 0x47 =
+            // 0x1c after an EVENT_WRITE_EOP while a course loads. No register in that range is
+            // modelled here, so the write is skipped and each base is named once.
+            static std::array<std::atomic_bool, 0x100> named{};
+            const u32 base = header->type0.base.Value();
+            const u32 count = header->type0.NumWords();
+            if (count + 1 > dcb.size()) {
+                UNREACHABLE_MSG("PM4 type 0 runs past the buffer, base reg: {}, size: {}", base,
+                                count);
+            }
+            if (!named[base & 0xff].exchange(true)) {
+                LOG_WARNING(Render, "resogun: PM4 type 0 write of {} register(s) at {:#x} ignored (first value {:#x})",
+                            count, base, dcb[1]);
+            }
+            dcb = NextPacket(dcb, count + 1);
             break;
+        }
         case 2:
             // Type-2 packet are used for padding purposes
             dcb = NextPacket(dcb, 1);

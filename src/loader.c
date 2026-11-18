@@ -145,6 +145,18 @@ static LONG fatal_exception(EXCEPTION_POINTERS *info) {
         fprintf(stderr,"Fault: exception 0x%08lx at %s (thread %lu)\n",record->ExceptionCode,where,GetCurrentThreadId());
     fprintf(stderr,"  rax=%016llx rbx=%016llx rcx=%016llx rdx=%016llx\n  rsi=%016llx rdi=%016llx rbp=%016llx rsp=%016llx\n",
             c->Rax,c->Rbx,c->Rcx,c->Rdx,c->Rsi,c->Rdi,c->Rbp,c->Rsp);
+    runtime_file_recent_missing(stderr);
+    /* RESOGUN_FAULT_PEEK=rbp-0x81a0 (a register, a sign and a hex offset): the text at that address. */
+    const char *peek=getenv("RESOGUN_FAULT_PEEK");
+    if (peek && strlen(peek)>4) {
+        const uintptr_t reg=!strncmp(peek,"rbp",3) ? c->Rbp : !strncmp(peek,"rsp",3) ? c->Rsp : !strncmp(peek,"rbx",3) ? c->Rbx :
+                            !strncmp(peek,"rdi",3) ? c->Rdi : !strncmp(peek,"rsi",3) ? c->Rsi : 0;
+        const uintptr_t offset=(uintptr_t)strtoull(peek+4,NULL,16);
+        char text[257]={0};
+        SIZE_T got=0;
+        if (reg && ReadProcessMemory(GetCurrentProcess(),(void *)(peek[3]=='-' ? reg-offset : reg+offset),text,256,&got))
+            fprintf(stderr,"  %s: '%s'\n",peek,text);
+    }
     /* rbp chain (guest and host code keep frame pointers). */
     uintptr_t rbp=(uintptr_t)c->Rbp;
     for (int depth=0; depth<24 && rbp; ++depth) {
@@ -154,6 +166,22 @@ static LONG fatal_exception(EXCEPTION_POINTERS *info) {
         describe_address(where,sizeof(where),frame[1]);
         fprintf(stderr,"  #%d %s\n",depth,where);
         rbp=frame[0];
+    }
+    /* A raised exception (a C++ throw nobody caught) has no rbp chain from RaiseException: name the
+     * code addresses on the stack instead (the runner's own and the guest's; not every one is a frame). */
+    if (record->ExceptionCode!=EXCEPTION_ACCESS_VIOLATION) {
+        const uintptr_t self=(uintptr_t)GetModuleHandleA(NULL);
+        uintptr_t words[768];
+        SIZE_T got=0;
+        ReadProcessMemory(GetCurrentProcess(),(void *)(uintptr_t)c->Rsp,words,sizeof(words),&got);
+        int named=0;
+        for (size_t i=0; i<got/sizeof(words[0]) && named<28; ++i) {
+            const uintptr_t a=words[i];
+            if (!((image && a-(uintptr_t)image<0x20000000) || a-self<0x8000000)) continue;
+            describe_address(where,sizeof(where),a);
+            fprintf(stderr,"  stack+0x%zx %s\n",i*sizeof(words[0]),where);
+            ++named;
+        }
     }
     if (isa_table) isa_rewrite_report(isa_table,stderr);
     fflush(NULL);
@@ -685,6 +713,7 @@ int main(int argc, char **argv) {
         sfo_value(sfo,"TITLE_ID",title_id,sizeof(title_id),NULL);
         sfo_value(sfo,"APP_VER",version,sizeof(version),NULL); /* the patch's version (VERSION stays the disc's) */
         runtime_game_identify(title_id,version,app0,argv[1]);
+        runtime_content_set_title(title_id); runtime_golf_set_title(title_id);
         if (dlc_dir && dlc_dir[0]) runtime_content_extra_dir(dlc_dir, title_id[0] ? title_id : NULL);
     }
     resogun_gpu_register_kernel();

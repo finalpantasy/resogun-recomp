@@ -12,10 +12,13 @@
 namespace Shader {
 
 static constexpr u32 NUM_USER_DATA_REGS = 16;
-static constexpr u32 NUM_IMAGES = 64;
+// resogun: Everybody's Golf binds more images and samplers per stage than the stock limits (64,
+// 16, 8 fmasks) hold; a shader past them failed with boost::container::bad_alloc. The sizes follow
+// golf-fix v41. NUM_BUFFERS stays 40: PushData carries one byte per buffer and must fit 128 bytes.
+static constexpr u32 NUM_IMAGES = 128;
 static constexpr u32 NUM_BUFFERS = 40;
-static constexpr u32 NUM_SAMPLERS = 16;
-static constexpr u32 NUM_FMASKS = 8;
+static constexpr u32 NUM_SAMPLERS = 64;
+static constexpr u32 NUM_FMASKS = 32;
 
 using SharpLocation = u16;
 

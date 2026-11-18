@@ -61,6 +61,13 @@ void Pipeline::BindResources(DescriptorWrites& set_writes,
                           sizeof(vk::BufferView)) +
                      32;
         }
+        // resogun: a push too large for a recording chunk (Everybody's Golf binds thousands of
+        // descriptors at once) goes into the command buffer directly, after what was recorded.
+        if (bytes + 1024 > RecordChunk::Capacity) {
+            scheduler.SyncRecording();
+            scheduler.CommandBuffer().pushDescriptorSetKHR(bind_point, layout, 0, set_writes);
+            return;
+        }
         scheduler.ReserveRecordData(bytes);
         const auto writes = scheduler.RecordData(std::span<const vk::WriteDescriptorSet>{set_writes});
         auto* patched = const_cast<vk::WriteDescriptorSet*>(writes.data());
