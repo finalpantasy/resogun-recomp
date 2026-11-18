@@ -3,6 +3,8 @@
 #include "../src/runtime_thread.c"
 #include <assert.h>
 
+GuestCallback runtime_guest_thread_dtors;
+
 void *runtime_low_alloc(size_t size) { return calloc(1, size); }
 void runtime_low_free(void *pointer) { free(pointer); }
 /* Linux guest stacks: none low here, so pthreads places them. */

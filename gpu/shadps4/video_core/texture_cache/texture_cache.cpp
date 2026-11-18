@@ -873,6 +873,23 @@ std::tuple<ImageId, int, int> TextureCache::ResolveOverlap(const ImageInfo& imag
             return {ExpandImage(image_info, cache_image_id), -1, -1};
         }
 
+        // resogun: the same one-row memory bound once as a 2D and once as a 1D texture
+        // (Everybody's Golf ramps). A 1D view of a 2D Vulkan image is not valid, so the image is
+        // recreated with the type this binding asks for.
+        const auto is_1d = [](AmdGpu::ImageType type) { return type == AmdGpu::ImageType::Color1D; };
+        if (image_info.guest_size == cache_image.info.guest_size &&
+            image_info.size == cache_image.info.size &&
+            is_1d(image_info.type) != is_1d(cache_image.info.type) &&
+            IsVulkanFormatCompatible(cache_image.info.pixel_format, image_info.pixel_format)) {
+            static std::atomic<u32> logged{};
+            if (logged.fetch_add(1) < 8) {
+                LOG_ERROR(Render_Vulkan, "resogun: {}x{} image at {:#x} recreated as type {}",
+                          image_info.size.width, image_info.size.height, image_info.guest_address,
+                          static_cast<int>(image_info.type));
+            }
+            return {ExpandImage(image_info, cache_image_id), -1, -1};
+        }
+
         const bool pow2_padding_only =
             image_info.props.is_pow2 != cache_image.info.props.is_pow2 &&
             image_info.tile_mode == cache_image.info.tile_mode &&

@@ -83,6 +83,14 @@ static ABI int32_t param_int(uint32_t id,int32_t *out) {
 typedef struct { char label[LABEL_SIZE]; char folder[700]; } Addon;
 static Addon addons[MAX_ADDONS];
 static unsigned addon_count, addons_scanned;
+static int golf_title;
+/* The ticket package's ProductLabel is longer than its EntitlementLabel. */
+static const char *golf_entitlement_label(const char *label) {
+    if (!golf_title) return label;
+    if (!strcmp(label,"EN00010000000000")) return "EN0001";
+    if (!strcmp(label,"EN00020000000000")) return "EN0002";
+    return label;
+}
 static char extra_dir[600];
 static int addon_order(const void *a,const void *b) { return strcmp(((const Addon *)a)->label,((const Addon *)b)->label); }
 static int find_addon(const char *label) {
@@ -108,11 +116,12 @@ static void scan_folder(const char *path) {
     DIR *d=opendir(path);
     if (!d) return;
     for (struct dirent *e; addon_count<MAX_ADDONS && (e=readdir(d));) {
-        size_t n=strlen(e->d_name);
-        if (e->d_name[0]=='.' || n>=LABEL_SIZE || find_addon(e->d_name)>=0) continue;
+        const char *label=golf_entitlement_label(e->d_name);
+        size_t n=strlen(label);
+        if (e->d_name[0]=='.' || n>=LABEL_SIZE || find_addon(label)>=0) continue;
         Addon *a=&addons[addon_count];
         if ((size_t)snprintf(a->folder,sizeof(a->folder),"%s/%s",path,e->d_name)>=sizeof(a->folder) || !is_folder(a->folder)) continue;
-        memcpy(a->label,e->d_name,n+1);
+        memcpy(a->label,label,n+1);
         ++addon_count;
     }
     closedir(d);
@@ -131,9 +140,8 @@ static const char *const golf_addons[]={
     "EN00000000000017","EN00000000000018","EN00000000000019","EN00000000000020",
     "EN00000000000021","EN00000000000022","EN00000000000023","EN00000000000024",
     "EN00000000000025","EN00000000000026","EN00000000000027","EN00000000000028",
-    "EN00000000000029","EN00010000000000","EN00020000000000"
+    "EN00000000000029","EN0001","EN0002"
 };
-static int golf_title;
 void runtime_content_set_title(const char *title_id) { golf_title=title_id && !strncmp(title_id,"CUSA04687",9); }
 static void builtin_addons(void) {
     const char *mode=getenv("GOLF_ENTITLEMENTS");
@@ -166,9 +174,10 @@ static ABI int32_t addon_info(uint32_t service,const char *label,void *info) {
     if (!label || !info) return PARAMETER;
     scan_addons();
     char want[17]; memcpy(want,label,16); want[16]=0;
+    const char *canonical=golf_entitlement_label(want);
     ++queries;
     for (unsigned i=0;i<addon_count;++i) {
-        if (strcmp(addons[i].label,want)) continue;
+        if (strcmp(addons[i].label,canonical)) continue;
         unsigned char *out=info; uint32_t installed=4;
         memset(out,0,24); memcpy(out,addons[i].label,strlen(addons[i].label)); memcpy(out+20,&installed,4);
         return 0;

@@ -92,6 +92,8 @@ static void answer(Request *r,const char *sent,size_t sent_size) {
     r->status=200;
     if (!strncmp(r->path,"/v1/users/me/entitlements?",26)) body="{\"entitlements\":[],\"start\":0,\"size\":0,\"total_results\":0}";
     else if (!strncmp(r->path,"/v1/users/me/entitlements/",26)) body=r->method==0 ? "{\"use_count\":0,\"use_limit\":0}" : "{}";
+    else if (r->method==0 && !strcmp(r->group,"sdk:commerce") &&
+             !strcmp(r->path,"/v1/users/me/container/?size=128&serviceLabel=0")) body="[]";
     else if (strstr(r->path,"/friendList")) body="{\"friendList\":[],\"start\":0,\"size\":0,\"totalResults\":0}";
     else if (strstr(r->path,"/presence/")) body="{}";
     else { r->status=404; body="{\"error\":{\"code\":2105356,\"message\":\"Not found\"}}"; }

@@ -157,8 +157,10 @@ ImageView::ImageView(const Vulkan::Instance& instance, const ImageViewInfo& info
         },
     };
     if (!IsViewTypeCompatible(info.type, image.info.type)) {
-        LOG_ERROR(Render_Vulkan, "image view type {} is incompatible with image type {}",
-                  magic_enum::enum_name(info.type), magic_enum::enum_name(image.info.type));
+        LOG_ERROR(Render_Vulkan,
+                  "image view type {} is incompatible with image type {} ({}x{} at {:#x})",
+                  magic_enum::enum_name(info.type), magic_enum::enum_name(image.info.type),
+                  image.info.size.width, image.info.size.height, image.info.guest_address);
     }
 
     auto [view_result, view] = instance.GetDevice().createImageViewUnique(image_view_ci);
