@@ -211,14 +211,16 @@ static LONG CALLBACK vectored_fault(EXCEPTION_POINTERS *info) {
         }
     }
     if (code==EXCEPTION_ACCESS_VIOLATION && record->NumberParameters>=2) {
-        /* GPU page tracking (write-protected guest pages) is resolved first. */
         static int fault_logged;
         if (runtime_fault_trace && fault_logged<40) {
             ++fault_logged;
             fprintf(stderr,"FaultLog: tid %lu rip %p addr %p write %llu\n",GetCurrentThreadId(),(void *)(uintptr_t)info->ContextRecord->Rip,
                     (void *)record->ExceptionInformation[1],(unsigned long long)record->ExceptionInformation[0]);
         }
-        if (gpu_enabled && resogun_gpu_handle_fault(info,(void *)record->ExceptionInformation[1])) return EXCEPTION_CONTINUE_EXECUTION;
+        /* GPU page tracking (write-protected guest pages) is resolved first. An execute fault (8: a
+         * jump into data) is never a tracked page: resuming it would spin on the fault forever. */
+        if (gpu_enabled && record->ExceptionInformation[0]!=8 &&
+            resogun_gpu_handle_fault(info,(void *)record->ExceptionInformation[1])) return EXCEPTION_CONTINUE_EXECUTION;
         if (runtime_fault_recover) {
             /* A speculative guest memory read (GPU draw preparation) faulted: the thread resumes
              * in resogun_longjmp, outside the exception dispatcher, back at its recovery point. */
@@ -611,7 +613,7 @@ static int cpu_supported(char *missing, size_t size) {
     return 1;
 }
 
-/* GOLF_PEEK="offset:bytes,*offset+delta:bytes" (hex; * follows the pointer stored there): a debug thread prints those guest image ranges every
+/* GOLF_PEEK="offset:bytes,*offset+delta:bytes,offset>d1>d2:bytes" (hex; * follows the pointer stored there, >d loads a pointer and adds d): a debug thread prints those guest image ranges every
  * two seconds when they change. */
 static unsigned char *peek_image;
 static int SDLCALL peek_thread(void *spec_) {
@@ -625,6 +627,9 @@ static int SDLCALL peek_thread(void *spec_) {
             int deref=0; while (*p=='*') { ++deref; ++p; }
             char *end; unsigned long long off=strtoull(p,&end,16), delta=0; unsigned long len=16;
             if (*end=='+') delta=strtoull(end+1,&end,16);
+            /* ">d" steps: load the pointer at the current address, then add d (pointer chains). */
+            unsigned long long chain[6]; int chained=0;
+            while (*end=='>' && chained<6) chain[chained++]=strtoull(end+1,&end,16);
             if (*end==':') len=strtoul(end+1,&end,16);
             if (len>64) len=64;
             p=*end ? end+1 : end;
@@ -633,6 +638,8 @@ static int SDLCALL peek_thread(void *spec_) {
             for (int d=0;d<deref && !bad;++d) { memcpy(&at,at,8); bad=(uintptr_t)at<0x10000; }
             if (bad) continue;
             if (deref) at+=delta;
+            for (int c=0;c<chained && !bad;++c) { memcpy(&at,at,8); bad=(uintptr_t)at<0x10000; at+=chain[c]; }
+            if (bad) continue;
             unsigned char now[64]; memcpy(now,at,len);
             if (!memcmp(now,last[n],len)) continue;
             memcpy(last[n],now,len);

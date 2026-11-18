@@ -436,7 +436,7 @@ static ABI int32_t m2_signaling_context_a(int32_t user,void *cb,void *arg,int32_
  * SetDefaultRequestOptParam. Each answer is the smallest one the game accepts, layouts from the
  * game's own reads (analysis/online/matching2-entry-contract.md):
  * GetWorldInfoList -> event 0x2, {rows *, u32 count}, 0x28-byte rows (u32 worldId at +8, u32 lobby
- *   count at +0xc, population at +0x14): one world with one lobby.
+ *   count at +0xc, population at +0x14): worlds 1..50 (M2_WORLDS), one lobby each.
  * GetLobbyInfoList -> event 0x6, {.., u32 count at +8, rows * at +0x10}, 0x50-byte rows (u64 lobbyId
  *   at +0x10, u16 members at +0x1a): the one lobby, empty.
  * JoinLobby -> event 0x201, {P *}: P+0x10 u64 lobbyId, P+0x18 u16 memberIds *, P+0x20 u64 count,
@@ -445,9 +445,12 @@ static ABI int32_t m2_signaling_context_a(int32_t user,void *cb,void *arg,int32_
  *   online id at +0x20, u16 member id at +0x34: the local player alone.
  * LeaveLobby -> event 0x202, no data. */
 typedef struct { M2RequestCb cb; void *arg; uint32_t timeout, pad; } M2Opt;
+/* The game's world table (*(*0x2c7e0a0+0x38), 0x18-byte entries, ids 0..49) names worlds 1..50; the
+ * Open Course screen only goes on when the list has the row for its chosen world (eboot 0xef44a). */
+#define M2_WORLDS 50
 static M2Opt m2_default_opt;
 static uint32_t m2_next_request=1;
-static uint8_t m2_world_row[0x28], m2_lobby_row[0x50], m2_join_info[0x30], m2_member[0x40];
+static uint8_t m2_world_rows[M2_WORLDS][0x28], m2_lobby_row[0x50], m2_join_info[0x30], m2_member[0x40];
 static uint16_t m2_member_ids[1]={1};
 static struct { void *rows; uint32_t count; } m2_world_list;
 static struct { uint64_t pad; uint32_t count, pad2; void *rows; } m2_lobby_list;
@@ -472,10 +475,15 @@ static int32_t m2_answer(const char *what,uint16_t ctx,const M2Opt *opt,uint32_t
 }
 static ABI int32_t m2_world_info_list(uint16_t ctx,const void *request,const M2Opt *opt,uint32_t *id) {
     if (!request) return NP_INVALID_ARGUMENT;
-    const uint32_t world=1, lobbies=1;
-    memset(m2_world_row,0,sizeof m2_world_row);
-    memcpy(m2_world_row+8,&world,4); memcpy(m2_world_row+0xc,&lobbies,4);
-    m2_world_list.rows=m2_world_row; m2_world_list.count=1;
+    const uint32_t lobbies=1;
+    memset(m2_world_rows,0,sizeof m2_world_rows);
+    for (uint32_t i=0;i<M2_WORLDS;++i) {
+        const uint32_t world=i+1;
+        void *next=i+1<M2_WORLDS ? m2_world_rows[i+1] : NULL;
+        memcpy(m2_world_rows[i],&next,8);
+        memcpy(m2_world_rows[i]+8,&world,4); memcpy(m2_world_rows[i]+0xc,&lobbies,4);
+    }
+    m2_world_list.rows=m2_world_rows; m2_world_list.count=M2_WORLDS;
     return m2_answer("GetWorldInfoList",ctx,opt,id,0x2,&m2_world_list);
 }
 static ABI int32_t m2_lobby_info_list(uint16_t ctx,const void *request,const M2Opt *opt,uint32_t *id) {
