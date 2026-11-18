@@ -141,16 +141,22 @@ def so_closure(exes):
     found, missing = {}, []
     for exe in exes:
         listing = subprocess.run(['ldd', str(exe)], capture_output=True, text=True, check=True).stdout
-        for name, path in re.findall(r'^\s*(\S+)\s+=>\s+(\S+)', listing, re.MULTILINE):
+        for line in listing.splitlines():
+            match = re.fullmatch(r'\s*(\S+)\s+=>\s+(.+?)\s*', line)
+            if not match:
+                continue
+            name, resolution = match.groups()
             if HOST_LIBS.match(name):
                 continue
-            if path == 'not':
+            if resolution == 'not found':
                 missing.append(name)
             else:
+                # Keep spaces in the full path and retain its lookup name as the archive name.
+                path = re.sub(r'\s+\(0x[0-9a-fA-F]+\)$', '', resolution)
                 found[name] = Path(path)
     if missing:
         raise SystemExit(f'ldd cannot find {", ".join(sorted(set(missing)))}')
-    return [found[name] for name in sorted(found)]
+    return dict(sorted(found.items()))
 
 
 def set_rpath(path, rpath):
@@ -268,18 +274,17 @@ def main():
             set_rpath(out / name, '$ORIGIN/lib')
     if LINUX:
         libs = so_closure(list(programs.values()))
-        wanted = {lib.name for lib in libs}
         for old in (out / 'lib').glob('*') if (out / 'lib').is_dir() else ():
-            if old.name not in wanted:
+            if old.name not in libs:
                 old.unlink()
-        for lib in libs:
-            target = out / 'lib' / lib.name
+        for name, lib in libs.items():
+            target = out / 'lib' / name
             if a.debug:
                 copy(lib, target)
             else:
                 strip(lib, target, bin_dir, '--strip-unneeded')
             set_rpath(target, '$ORIGIN')
-            shipped.append(f'lib/{lib.name}')
+            shipped.append(f'lib/{name}')
         dlls = libs
     else:
         # The kit's own files come and go with --debug; its captures and log stay.
