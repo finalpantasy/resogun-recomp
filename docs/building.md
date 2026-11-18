@@ -101,6 +101,10 @@ select a host font for guest text.
 `--tus local` enables in-process Title User Storage for the local account.
 Pass `--ticket-grants 0` or `--tus off` to disable the corresponding fixture.
 
+With the runtime login patches applied, `--local-auth 1` enables the
+synthetic login probe for the local account. Use `--local-auth 0` to
+override an inherited `GOLF_LOCAL_AUTH=1`.
+
 `python run.py prepare --game DIR --out DIR` forwards to the native preparer.
 For existing developer images, `--prepared DIR --game DIR` uses their
 `boot-linked.bin`, `content.bin`, and optional `isa-rewrite.bin`.
