@@ -249,8 +249,8 @@ def appimage(out, shipped, release, tarball):
     if not tarball.is_file() or not tarball.stat().st_size:
         raise SystemExit('The Linux tarball must exist before building its AppImage.')
     builder = linux_tool('appimagetool')
-    image = PORT / 'out' / f'{release}-linux-x86_64.AppImage'
-    with tempfile.TemporaryDirectory(prefix='golf-appimage-', dir=PORT / 'out') as temp:
+    image = tarball.parent / f'{release}-linux-x86_64.AppImage'
+    with tempfile.TemporaryDirectory(prefix='golf-appimage-', dir=image.parent) as temp:
         root = Path(temp) / 'Golf.AppDir'
         for name in shipped:
             copy(out / name, root / name)
@@ -263,8 +263,46 @@ def appimage(out, shipped, release, tarball):
         if runtime := os.environ.get('APPIMAGE_RUNTIME_FILE'):
             command += ['--runtime-file', runtime]
         subprocess.run(command + [str(root), str(staged)], env={**os.environ, 'ARCH': 'x86_64'}, check=True)
+        if not staged.is_file() or not staged.stat().st_size:
+            raise SystemExit('appimagetool produced no AppImage.')
         staged.replace(image)
-    print(f'{image}: {image.stat().st_size / 2**20:.0f} MiB')
+    return image
+
+
+def write_archive(path, entries):
+    if LINUX:
+        # tar keeps the executable bits a zip would lose.
+        with tarfile.open(path, 'w:gz', compresslevel=9) as archive:
+            for source, name in entries:
+                archive.add(source, name)
+    else:
+        with zipfile.ZipFile(path, 'w', zipfile.ZIP_DEFLATED, compresslevel=9) as archive:
+            for source, name in entries:
+                archive.write(source, name)
+
+
+def archive_bundle(out, shipped, release, *, debug, include_appimage):
+    destination = PORT / 'out'
+    name = f'{release}-linux' if LINUX else release
+    extension = '.tar.gz' if LINUX else '.zip'
+    # Finish every artifact before replacing any previous archive.
+    with tempfile.TemporaryDirectory(prefix='golf-archives-', dir=destination) as temp:
+        stage = Path(temp)
+        player = stage / f'{name}{"-debug" if debug else ""}{extension}'
+        write_archive(player, ((out / path, f'{release}/{path}') for path in sorted(shipped)))
+        artifacts = [(player, '')]
+        if not debug:
+            symbols = stage / f'{name}-symbols{extension}'
+            write_archive(symbols, ((destination / exe, exe) for exe in EXES))
+            artifacts.append((symbols, ' (not for players)'))
+        if include_appimage:
+            artifacts.append((appimage(out, shipped, release, player), ''))
+
+        for item, _ in artifacts:
+            check_output(destination / item.name)
+        for item, note in artifacts:
+            published = item.replace(destination / item.name)
+            print(f'{published}: {published.stat().st_size / 2**20:.0f} MiB{note}')
 
 
 def main():
@@ -362,33 +400,8 @@ def main():
     else:
         print(f'{out}: {release}{" (debug)" if a.debug else ""}, {len(dlls)} DLLs, {len(shipped)} files, {size / 2**20:.0f} MiB')
 
-    if (a.zip or a.appimage) and LINUX:
-        # tar keeps the exec bits a zip would lose.
-        archive = PORT / 'out' / f'{release}-linux{"-debug" if a.debug else ""}.tar.gz'
-        with tarfile.open(archive, 'w:gz', compresslevel=9) as t:
-            for name in sorted(shipped):
-                t.add(out / name, f'{release}/{name}')
-        print(f'{archive}: {archive.stat().st_size / 2**20:.0f} MiB')
-        if not a.debug:
-            symbols = PORT / 'out' / f'{release}-linux-symbols.tar.gz'
-            with tarfile.open(symbols, 'w:gz', compresslevel=9) as t:
-                for exe in EXES:
-                    t.add(PORT / 'out' / exe, exe)
-            print(f'{symbols}: {symbols.stat().st_size / 2**20:.0f} MiB (not for players)')
-        if a.appimage:
-            appimage(out, shipped, release, archive)
-    elif a.zip:
-        archive = PORT / 'out' / f'{release}{"-debug" if a.debug else ""}.zip'
-        with zipfile.ZipFile(archive, 'w', zipfile.ZIP_DEFLATED, compresslevel=9) as z:
-            for name in sorted(shipped):
-                z.write(out / name, f'{release}/{name}')
-        print(f'{archive}: {archive.stat().st_size / 2**20:.0f} MiB')
-        if not a.debug:
-            symbols = PORT / 'out' / f'{release}-symbols.zip'
-            with zipfile.ZipFile(symbols, 'w', zipfile.ZIP_DEFLATED, compresslevel=9) as z:
-                for exe in EXES:
-                    z.write(PORT / 'out' / exe, exe)
-            print(f'{symbols}: {symbols.stat().st_size / 2**20:.0f} MiB (not for players)')
+    if a.zip or a.appimage:
+        archive_bundle(out, shipped, release, debug=a.debug, include_appimage=a.appimage)
     return 0
 
 
