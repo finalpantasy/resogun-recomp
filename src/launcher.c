@@ -431,6 +431,7 @@ static const Setting settings[] = {
     {"--vblank-hz", "VBLANK_HZ", 0},
     {"--vblank-timer", "VBLANK_TIMER", 0},
     {"--verbose", "VERBOSE", 0},
+    {"--verify-prepared", "VERIFY_PREPARED", 0},
     {"--vk-markers", "VK_MARKERS", 0},
     {"--vk-record-thread", "VK_RECORD_THREAD", 0},
     {"--vk-validation-sync", "VK_VALIDATION_SYNC", 0},
