@@ -27,8 +27,10 @@ static int report_string(const char *head, const char *key, char *out, size_t si
     return 1;
 }
 
+static int clock_foreign; /* Everybody's Golf: no Resogun frame clock to look for */
 void runtime_game_identify(const char *title_id, const char *app_version, const char *app0, const char *image_path) {
     (void)app0;
+    clock_foreign=!strncmp(title_id,"CUSA04687",9);
     char sha[65]="", build[16]="", path[4096], head[4096];
     const char *slash=strrchr(image_path,'/'), *back=strrchr(image_path,'\\');
     if (back>slash) slash=back;
@@ -70,6 +72,12 @@ void runtime_game_frame_rate(void) {
         cheats_sync();
     }
     if (!game_image || clock_unknown) return;
+    if (clock_foreign) { /* that address holds other data in another game: do not follow it */
+        clock_unknown=1;
+        resogun_set_frame_rate(60);
+        puts("Frame rate: not Resogun's eboot; the vblank stays 60");
+        return;
+    }
     float *clock=*(float **)(game_image+0x152cd28);
     if (!clock) return;
     void **vtable=*(void ***)clock;

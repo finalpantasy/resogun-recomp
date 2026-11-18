@@ -50,6 +50,10 @@ ImageInfo::ImageInfo(const Libraries::VideoOut::BufferAttributeGroup& group,
     ASSERT(num_bits == 32);
 
     guest_address = cpu_address;
+    // resogun: on a Pro (Neo mode) tiled display buffers use the alternate tile layout. A game
+    // that draws straight into its display buffer binds it as a colour target with alt_tile_mode
+    // set; without this the two descriptions of one surface differ in layout and guest size.
+    alt_tile = props.is_tiled && Libraries::Kernel::sceKernelIsNeoMode();
     UpdateSize();
 }
 
