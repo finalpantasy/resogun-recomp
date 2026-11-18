@@ -107,6 +107,10 @@ With the runtime login patches applied, `--local-auth 1` enables the
 synthetic login probe for the local account. Use `--local-auth 0` to
 override an inherited `GOLF_LOCAL_AUTH=1`.
 
+Use `--ngs2-mix 0` to mute the sampler mix and `--ngs2-trace 1` to log
+voice parameters. The launcher passes these settings to the audio runtime
+through `RESOGUN_NGS2_MIX` and `RESOGUN_NGS2_TRACE`.
+
 `python run.py prepare --game DIR --out DIR` forwards to the native preparer.
 For existing developer images, `--prepared DIR --game DIR` uses their
 `boot-linked.bin`, `content.bin`, and optional `isa-rewrite.bin`.

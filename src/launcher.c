@@ -382,6 +382,8 @@ static const Setting settings[] = {
     {"--low-handles", "LOW_HANDLES", 0},
     {"--log-missing", "LOG_MISSING", 0},
     {"--monitor", "MONITOR", 0},
+    {"--ngs2-mix", "NGS2_MIX", 0},
+    {"--ngs2-trace", "NGS2_TRACE", 0},
     {"--no-msaa", "NO_MSAA", 0},
     {"--null-gpu", "NULL_GPU", 0},
     {"--resolution", "OUTPUT_RESOLUTION", 0},
