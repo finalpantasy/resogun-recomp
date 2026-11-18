@@ -233,7 +233,10 @@ def appimage(out, shipped, release, tarball):
         (root / 'AppRun').chmod(0o755)
         (root / '.DirIcon').symlink_to('everybodys-golf.svg')
         staged = Path(temp) / image.name
-        subprocess.run([builder, str(root), str(staged)], env={**os.environ, 'ARCH': 'x86_64'}, check=True)
+        command = [builder]
+        if runtime := os.environ.get('APPIMAGE_RUNTIME_FILE'):
+            command += ['--runtime-file', runtime]
+        subprocess.run(command + [str(root), str(staged)], env={**os.environ, 'ARCH': 'x86_64'}, check=True)
         staged.replace(image)
     print(f'{image}: {image.stat().st_size / 2**20:.0f} MiB')
 
