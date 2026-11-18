@@ -426,6 +426,7 @@ static const Setting settings[] = {
     {"--throw-trace", "THROW_TRACE", 0},
     {"--title-back-exits", "TITLE_BACK_EXITS", 0},
     {"--toggle-file", "TOGGLE_FILE", 1},
+    {"--trace-dingdong", "TRACE_DINGDONG", 0},
     {"--uffd", "UFFD", 0},
     {"--ui-language", "UI_LANGUAGE", 0},
     {"--vblank-hz", "VBLANK_HZ", 0},
