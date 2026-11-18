@@ -9,6 +9,8 @@ function(golf_launcher_target)
     target_compile_definitions(resogun PRIVATE "GOLF_LAUNCHER_VERSION=\"${GOLF_LAUNCHER_VERSION}\"")
     if(WIN32)
         target_link_libraries(resogun PRIVATE ole32 uuid)
+        # The test includes Windows headers before runtime_kernel.c requests rand_s.
+        target_compile_definitions(tsc-clock-test PRIVATE "_CRT_RAND_S=")
     endif()
 endfunction()
 
