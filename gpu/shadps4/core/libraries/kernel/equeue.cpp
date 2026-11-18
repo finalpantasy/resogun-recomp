@@ -195,7 +195,16 @@ int EqueueInternal::WaitForEvents(OrbisKernelEvent* ev, int num, const OrbisKern
     if (micros == 0) {
         // Wait indefinitely for events
         std::unique_lock lock{m_mutex};
-        m_cond.wait(lock, predicate);
+        // resogun: name a wait that has lasted 5 s once, with the events it could wake on.
+        if (!m_cond.wait_for(lock, std::chrono::seconds(5), predicate)) {
+            std::string list;
+            for (const auto& event : m_events) {
+                list += fmt::format(" {:#x}/{}", event.event.ident, s16(event.event.filter));
+            }
+            fmt::print(stderr, "Equeue: '{}' waited 5 s with no event; registered (ident/filter):{}\n",
+                       m_name, list);
+            m_cond.wait(lock, predicate);
+        }
     } else {
         // Wait up until the timeout value
         std::unique_lock lock{m_mutex};
