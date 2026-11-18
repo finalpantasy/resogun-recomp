@@ -680,30 +680,49 @@ static const char *relative_below(const char *root, const char *path) {
     while (*relative == '/') ++relative;
     return *relative ? relative : ".";
 }
-#ifdef _WIN32
+static int has_parent_step(const char *path) {
+    const char *part = path;
+    while (part) {
+        if (part[0] == '.' && part[1] == '.' && (!part[2] || part[2] == '/')) return 1;
+        part = strchr(part, '/');
+        if (part) ++part;
+    }
+    return 0;
+}
 static int final_directory(char out[PATH_CHARS], const char *path) {
+#ifdef _WIN32
     HANDLE dir = CreateFileA(path, FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                              NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
     if (dir == INVALID_HANDLE_VALUE) return 0;
     DWORD length = GetFinalPathNameByHandleA(dir, out, PATH_CHARS, FILE_NAME_NORMALIZED);
     CloseHandle(dir);
     return length && length < PATH_CHARS && copy_path(out, out);
-}
+#else
+    char *absolute = realpath(path, NULL);
+    if (!absolute) return 0;
+    int ok = copy_path(out, absolute);
+    free(absolute);
+    return ok;
 #endif
+}
 static const char *relative_to_root(const char *path, char resolved[PATH_CHARS]) {
     if (!*path) return path;
     const char *relative = relative_below(data_dir, path);
-#ifdef _WIN32
-    /* Consult the filesystem when the two paths spell the same directory differently. */
-    if (!relative) {
-        char root[PATH_CHARS];
-        if (final_directory(root, data_dir) && final_directory(resolved, path))
-            relative = relative_below(root, resolved);
+    if (relative && !has_parent_step(relative)) return relative;
+
+    /* Resolve aliases and decide whether parent steps leave the portable root. */
+    char root[PATH_CHARS];
+    if (!final_directory(resolved, path)) return path;
+    if (final_directory(root, data_dir)) {
+        relative = relative_below(root, resolved);
+        if (relative) return relative;
     }
+    if (!has_parent_step(path)) return path;
+#ifdef _WIN32
+    return from_cwd(resolved, path) ? resolved : path;
 #else
-    (void)resolved;
+    return resolved;
 #endif
-    return relative ? relative : path;
 }
 static unsigned long process_id(void) {
 #ifdef _WIN32
@@ -767,7 +786,9 @@ static int prepare_launch(const Options *o, const Saved *saved, const char *ini)
     if (!join_path(folder, data_dir, "game") || !make_dirs(folder)) return complain("Cannot create the image cache");
     if (!o->reprepare && !strcmp(saved->key, key) && saved->image[0] &&
         join_path(image, folder, saved->image) && image_paths(image, 1)) {
-        if ((o->game || o->dlc || o->no_dlc) && !write_paths(ini, saved->image, key))
+        int legacy_paths = (has_parent_step(saved->game) || has_parent_step(saved->dlc)) &&
+                           !env_option("GAME_DIR") && !env_option("DLC_DIR");
+        if ((o->game || o->dlc || o->no_dlc || legacy_paths) && !write_paths(ini, saved->image, key))
             return complain("Cannot save paths.ini");
         printf("Using prepared image: %s\n", image);
         return LAUNCH_RUN;
