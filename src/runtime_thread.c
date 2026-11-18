@@ -55,6 +55,7 @@ typedef struct GuestThread {
     char name[32];
     int detached, finished, joined, host_owned;
     int released; /* set once scePthreadCreate is about to return to the creator */
+    int cancel_pending; /* scePthreadCancel: acted on at the thread's next cancellation point */
     int tid;
     void *stack_low; uint64_t stack_size; /* the host stack, recorded by attach() on the thread */
 #ifdef _WIN32
@@ -448,6 +449,25 @@ static ABI __attribute__((noreturn)) void thread_exit(void *value) {
     /* No host unwinder: guest frames have no registered FDEs. */
     exit_longjmp(t);
 }
+/* scePthreadCancel (deferred, the PS4 default): marks the thread; it exits with PTHREAD_CANCELED
+ * ((void *)1 on FreeBSD) at its next cancellation point (runtime_thread_testcancel, called from
+ * sleeps and condition waits). A thread blocked for good stays blocked. Cleanup handlers are not
+ * run. Everybody's Golf cancels a worker when it leaves the daily ranking, then frees its object
+ * without a join (caller 0x6fdf2c). */
+static ABI int32_t thread_cancel(GuestThread *t) {
+    if (!find_thread(t) || t->host_owned) return ERR(3);
+    __atomic_store_n(&t->cancel_pending,1,__ATOMIC_RELEASE);
+    if (runtime_verbose()) printf("Runtime: guest thread '%s' cancel requested\n",t->name);
+    return 0;
+}
+void runtime_thread_testcancel(void) {
+    GuestThread *t=current;
+    if (!t || t->host_owned || !__atomic_load_n(&t->cancel_pending,__ATOMIC_ACQUIRE)) return;
+    if (runtime_verbose()) printf("Runtime: guest thread '%s' cancelled\n",t->name);
+    t->result=(void *)1;
+    exit_longjmp(t);
+}
+static ABI void thread_testcancel(void) { runtime_thread_testcancel(); }
 static ABI int32_t thread_yield(void) { runtime_thread_count_yield(0); sched_yield(); return 0; }
 static ABI int32_t thread_get_prio(GuestThread *t,int *prio) {
     if (!find_thread(t)) return ERR(3);
@@ -502,6 +522,7 @@ uintptr_t runtime_thread_resolve(const char *name) {
 
         {"oIRFTjoILbg#libkernel",thread_set_sched},
         {"EI-5-jlq2dE#libkernel",thread_get_id},
+        {"qBDmpCyGssE#libkernel",thread_cancel}, {"LapIb799SSE#libkernel",thread_testcancel},
     };
     for (size_t i=0;i<sizeof(table)/sizeof(*table);++i)
         if (!strcmp(name,table[i].nid)) return (uintptr_t)table[i].fn;

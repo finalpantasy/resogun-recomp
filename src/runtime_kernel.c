@@ -88,6 +88,7 @@ uint64_t runtime_process_time_counter(void) { return process_time_counter(); }
 uint64_t runtime_tsc_frequency(void) { return tsc_frequency(); }
 uint64_t runtime_read_tsc(void) { return read_tsc(); }
 static int sleep_ns(uint64_t ns) {
+    runtime_thread_testcancel();
     if (!ns) runtime_thread_count_yield(1);
 #ifdef _WIN32
     compat_sleep_ns(ns);
@@ -95,6 +96,7 @@ static int sleep_ns(uint64_t ns) {
     struct timespec t={.tv_sec=(time_t)(ns/1000000000),.tv_nsec=(long)(ns%1000000000)};
     while (nanosleep(&t,&t)) if (errno!=EINTR) return errno;
 #endif
+    runtime_thread_testcancel();
     return 0;
 }
 static ABI int32_t kernel_usleep(uint32_t usec) { sleep_ns((uint64_t)usec*1000); return 0; }

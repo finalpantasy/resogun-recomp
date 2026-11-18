@@ -101,6 +101,8 @@ uintptr_t runtime_thread_resolve(const char *name);
 void runtime_thread_report(void);
 /* Counts a guest sched_yield (zero_sleep 0) or a zero-length sleep (1) for the report. */
 void runtime_thread_count_yield(int zero_sleep);
+/* Exits the calling guest thread if scePthreadCancel marked it (a cancellation point). */
+void runtime_thread_testcancel(void);
 void runtime_set_main_tls(const void *data, uint64_t filesz, uint64_t memsz, uint64_t align);
 void runtime_thread_attach_main(void);
 /* The stack the calling thread runs guest code on, when it is not the one the host gave it (Linux:

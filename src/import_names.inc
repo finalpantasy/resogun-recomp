@@ -20,6 +20,8 @@
 {"18B2NS1y9UU#libSceRtc","sceRtcGetCurrentTick"},
 {"VOx8NGmHXTs#libkernel","sceKernelGetCpumode"},
 {"4DM06U2BNEY#libkernel","sceKernelCancelSema"},
+{"qBDmpCyGssE#libkernel","scePthreadCancel"},
+{"LapIb799SSE#libkernel","scePthreadTestcancel"},
 {"Nlev7Lg8k3A#libSceNet","sceNetInit"},
 {"gky0+oaNM4k#libSceNetCtl","sceNetCtlInit"},
 {"htyBOoWeS58#libSceHttp","sceHttpsSetSslCallback"},

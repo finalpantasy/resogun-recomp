@@ -16,6 +16,7 @@ static void set_zone(const char *zone) {
 int32_t *runtime_errno(void) { static int32_t value; return &value; }
 void runtime_report(void) {}
 void runtime_thread_count_yield(int zero_sleep) { (void)zero_sleep; }
+void runtime_thread_testcancel(void) {}
 uintptr_t runtime_lookup(const RuntimeExport *table, size_t count, const char *name) { (void)table; (void)count; (void)name; return 0; }
 
 int main(void) {
