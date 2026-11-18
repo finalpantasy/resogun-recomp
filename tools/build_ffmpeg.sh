@@ -68,8 +68,14 @@ asm=(); command -v nasm >/dev/null || asm=(--disable-x86asm)
 mkdir -p out/downloads
 archive=out/downloads/ffmpeg-$version.tar.xz
 if [[ ! -f $archive ]]; then
+    downloader=curl
+    if [[ $os == windows && -n ${SYSTEMROOT:-} ]]; then
+        system_curl=$(cygpath -u "$SYSTEMROOT")/System32/curl.exe
+        # System curl uses the Windows certificate store, even if MSYS2 lacks a CA bundle.
+        if [[ -x $system_curl ]]; then downloader=$system_curl; fi
+    fi
     # ffmpeg.org drops connections now and then.
-    curl -fsSL --retry 5 --retry-all-errors --retry-delay 10 -o "$archive.part" "https://ffmpeg.org/releases/ffmpeg-$version.tar.xz"
+    "$downloader" -fsSL --retry 5 --retry-all-errors --retry-delay 10 -o "$archive.part" "https://ffmpeg.org/releases/ffmpeg-$version.tar.xz"
     mv "$archive.part" "$archive"
 fi
 if ! echo "$sha256  $archive" | sha256sum -c --status; then

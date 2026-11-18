@@ -36,6 +36,7 @@ build uses the MP4 demuxer and the file protocol.
 The script unpacks the platform archive in `prebuilt/` into `out/ffmpeg`
 when its version and options match. Otherwise it downloads and verifies
 FFmpeg's source against its SHA-256 before building it into that folder.
+On Windows, the download uses the system curl and its certificate store when available.
 Install `nasm` to enable the faster x86 assembly paths. Set
 `RESOGUN_FFMPEG_PREBUILT=0` to build from source.
 
