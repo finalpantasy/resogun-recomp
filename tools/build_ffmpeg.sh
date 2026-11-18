@@ -35,8 +35,9 @@ case $(uname -s) in MINGW*|MSYS*) os=windows ;; *) os=linux ;; esac
 prebuilt=$(cd -- "$(dirname -- "$0")/.." && pwd)/prebuilt/ffmpeg-$os.tar.xz
 # --pack from Git Bash: the MSYS2 CLANG64 clang and nasm first on PATH, as build.sh does.
 msys2_root=${MSYS2_ROOT:-/c/msys64}
+command -v cygpath >/dev/null && msys2_root=$(cygpath -u "$msys2_root")
 if ((pack)) && [[ $os == windows && -d $msys2_root/clang64/bin ]]; then
-    export PATH="$msys2_root/clang64/bin:$msys2_root/usr/bin:$PATH"
+    export PATH="$msys2_root/clang64/bin:$msys2_root/usr/bin:$PATH" MSYSTEM=CLANG64
 fi
 
 # The prebuilt archive and FFmpeg's source are both .tar.xz.
@@ -91,9 +92,11 @@ prefix_abs=$(mkdir -p "$prefix" && cd "$prefix" && pwd)
 command -v cygpath >/dev/null && prefix_abs=$(cygpath -m "$prefix_abs")
 echo "FFmpeg $version: configuring the minimal build (log: $work/build.log)"
 (
-    cd "$work"
-    ./configure --prefix="$prefix_abs" --cc="${CC:-clang}" "${options[@]}" "${asm[@]}"
-    make -j"$(nproc 2>/dev/null || echo 4)"
+    cd "$work" || exit
+    # Git Bash and MSYS2 can mount /tmp at different locations.
+    if [[ $os == windows ]]; then export TMPDIR=.; fi
+    bash ./configure --prefix="$prefix_abs" --cc="${CC:-clang}" "${options[@]}" "${asm[@]}" &&
+    make -j"$(nproc 2>/dev/null || echo 4)" &&
     make install
 ) > "$work/build.log" 2>&1 || { tail -30 "$work/build.log" >&2; echo "FFmpeg build failed (log: $work/build.log)" >&2; exit 1; }
 rm -rf "$work"
