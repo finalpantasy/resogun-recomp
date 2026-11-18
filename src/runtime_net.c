@@ -31,6 +31,7 @@ static _Atomic int32_t http_next=0x10000;
 #define NOTICE_PATH "/nmg-us/replay-probe/gameapi_getinfolist"
 #define DAILY_SCORE_PATH "/nmg-us/replay-probe/gameapi_getscorelist"
 #define BOARD_LIST_PATH "/nmg-us/replay-probe/gameapi_getboardlist"
+#define NATIONAL_BOARD_PATH "/nmg-us/replay-probe/gameapi_getboardlistnational"
 #define PROPERTY_INFO_PATH "/nmg-us/replay-probe/gameapi_getgamepropertyinfo"
 #define TELEMETRY_PATH "/nmg-us/replay-probe/analytics/19d916d7-6a01-4371-9e6c-c91b2ff386bb/telemetry"
 #define LOGIN_PREFIX "/nmg-us/replay-probe/gameapi_login?account=5932163534510096385&n="
@@ -48,6 +49,8 @@ static const ReplayRoute replay_routes[]={
     {"https://127.0.0.1:8765" DAILY_SCORE_PATH, DAILY_SCORE_PATH, 166, 258, 52, 52, 4, NULL},
     {"https://127.0.0.1:8765" BOARD_LIST_PATH, BOARD_LIST_PATH, 138, 230, 40, 40, 4, NULL},
     {"https://127.0.0.1:8765" LOGIN_PREFIX, NULL, 194, 246, 24, 24, 4, NULL},
+    /* The national board list goes out over plain http (action 0x26 of the login run, slot 0x2f). */
+    {"http://127.0.0.1:8765" NATIONAL_BOARD_PATH, NATIONAL_BOARD_PATH, 66, 1378, 28, 0x8000, 4, NULL},
     {"https://127.0.0.1:8765" PROPERTY_INFO_PATH, PROPERTY_INFO_PATH, 118, 118, 24, 24, 4, NULL},
     {"http://127.0.0.1:8765" TELEMETRY_PATH, TELEMETRY_PATH, 1, 8192, 0, 0, 1, "application/json"},
 };

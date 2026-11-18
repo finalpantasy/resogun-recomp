@@ -615,14 +615,17 @@ static int SDLCALL peek_thread(void *spec_) {
         SDL_Delay(getenv("GOLF_PEEK_MS") ? (Uint32)atoi(getenv("GOLF_PEEK_MS")) : 2000);
         const char *p=spec;
         for (int n=0;n<8 && *p;++n) {
-            int deref=*p=='*'; if (deref) ++p;
+            int deref=0; while (*p=='*') { ++deref; ++p; }
             char *end; unsigned long long off=strtoull(p,&end,16), delta=0; unsigned long len=16;
             if (*end=='+') delta=strtoull(end+1,&end,16);
             if (*end==':') len=strtoul(end+1,&end,16);
             if (len>64) len=64;
             p=*end ? end+1 : end;
             unsigned char *at=peek_image+off;
-            if (deref) { memcpy(&at,at,8); if ((uintptr_t)at<0x10000) continue; at+=delta; }
+            int bad=0;
+            for (int d=0;d<deref && !bad;++d) { memcpy(&at,at,8); bad=(uintptr_t)at<0x10000; }
+            if (bad) continue;
+            if (deref) at+=delta;
             unsigned char now[64]; memcpy(now,at,len);
             if (!memcmp(now,last[n],len)) continue;
             memcpy(last[n],now,len);
