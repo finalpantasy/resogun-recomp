@@ -68,7 +68,7 @@ if [[ ${1:-} == --test ]]; then
         "$cc" -std=c11 -O2 -g -Wall -Wextra -Werror -pthread "${cflags[@]}" -I. -Isrc "$source" "$@" -o "out/$name-test$exe"
         "out/$name-test$exe"
     }
-    run_test services tests/test_services.c "${compat[@]}" src/runtime_golf.c
+    run_test services tests/test_services.c "${compat[@]}"
     run_test savedata tests/test_savedata.c "${compat[@]}"
     run_test content tests/test_content.c "${compat[@]}"
     run_test eventflag tests/test_eventflag.c
@@ -77,7 +77,7 @@ if [[ ${1:-} == --test ]]; then
     run_test wide tests/test_wide.c -lm
     run_test fiber tests/test_fiber.c
     run_test threadcalls tests/test_threadcalls.c "${compat[@]}"
-    run_test net tests/test_net.c "${compat[@]}" "${net[@]}" src/runtime_golf.c
+    run_test net tests/test_net.c "${compat[@]}" "${net[@]}"
     run_test kernel tests/test_kernel.c "${compat[@]}"
     run_test memory tests/test_memory.c "${compat[@]}" "${memory[@]}"
     run_test memory-read-backing tests/test_memory_read_backing.c "${compat[@]}" "${memory[@]}"
