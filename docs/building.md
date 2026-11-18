@@ -1,8 +1,6 @@
 # Building from source
 
-Everything builds on Windows 10/11 x64 with MSYS2's CLANG64 toolchain, and on Linux x86-64 with
-clang. The same steps run in CI (`.github/workflows/build.yml`), so a green run there is a working
-recipe.
+The build targets Windows 10/11 x64 with MSYS2 CLANG64 and Linux x86-64 with Clang.
 
 ## 1. Toolchain
 
@@ -32,7 +30,7 @@ git clone --recurse-submodules <repository URL>
 
 `build.sh` fetches the submodules itself if the clone was made without them. The runner links a
 small static FFmpeg (9.0.2; `tools/build_ffmpeg.sh`): only the H.264, AAC and PNG decoders, the MP4
-demuxer and the file protocol, which is all Resogun's movies and the save icons need. A build of it
+demuxer and the file protocol, for movies and save icons. A build of it
 for each platform is committed in `prebuilt/ffmpeg-windows.tar.xz` and `prebuilt/ffmpeg-linux.tar.xz`,
 and the first build unpacks the one for its platform into `out/ffmpeg`. If that archive was made
 with another version or options than the script names, FFmpeg's source is downloaded (checked
@@ -46,144 +44,70 @@ libraries need no newer glibc than the release.
 
 ## 3. Build
 
-From Git Bash (or the MSYS2 shell) at the repository root:
+Run from Git Bash, MSYS2, or a Linux shell.
 
 ```bash
 bash build.sh
 ```
 
-It writes `out/resogun.exe` (loader, runtime and GPU library in one exe) and `out/resogun-setup.exe`.
-Both are RelWithDebInfo builds and carry their debug info (about 120 MB of the game exe) for
-debuggers and `llvm-addr2line`. A failed build prints its last lines; the full log is
-`out/gpu-build.log`.
-
-Tests:
+The build writes `out/everybodys-golf.exe` on Windows and `out/everybodys-golf` on
+Linux. The unstripped binary contains debug symbols. Build failures are recorded
+in `out/gpu-build.log`. On Linux, the build uses a non-PIE executable so guest
+pointers can stay below 1 TiB. The Ubuntu 24.04 dependency recipe lives in
+`.github/scripts/ci-deps.sh`.
 
 ```bash
 bash build.sh --test
+cd tests && python -m unittest discover -p 'test_*.py'
 ```
 
-```bash
-cd tests && python -m unittest discover -p "test_*.py"
-```
+The test target runs the C runtime tests and GPU test binaries. Some Python
+tests require a fixture or a separate decoder and skip when it is unavailable.
+`build_windows.ps1 -Test` and `build_linux.sh --test` run both suites.
 
-`--test` builds and runs the runtime's C tests and every `*-test` target of `gpu/CMakeLists.txt`
-(the renderer's C++ tests and the rest of the runtime's), from the repository root; a failed one
-prints the end of its log, `out/<name>-test.log`. Tests that need the game dump, a Vulkan device or
-`iced-x86` skip themselves when those are missing.
+## 4. Prepare a dump
 
-### Convenience scripts
+In a packaged copy, or with the native build's toolchain DLLs on PATH, run the
+executable with `--game DIR --prepare-only`. The dump must be merged and
+decrypted and contain CUSA04687 update 1.17. The launcher validates the EBOOT
+hash, reads the SFO and shipped PRX modules, and writes the linked image, content
+profile and ISA table without entering guest code.
 
-For local work, `build_windows.ps1` (PowerShell) and `build_linux.sh` wrap the steps above:
+The launcher remembers the dump in `paths.ini`. The image cache lives in
+`game/` inside the portable root. It reuses a generation when the EBOOT, SFO, PRX
+inputs and preparation version match. `--reprepare` creates a fresh generation.
+Old generations can be removed while the program is closed. Keep the dump in
+place so the loader can mount it as `/app0`.
 
-```powershell
-.\build_windows.ps1 -Test -Run -Game <dump>
-```
+`--data-dir DIR` moves portable state together. The launcher also accepts
+`--config FILE`, `--save DIR`, and `--log FILE`. Relative paths on the command
+line are resolved from the calling directory. Relative paths in `paths.ini`
+are resolved from the portable root. Linux driver shader cache redirects point
+to the portable shader directory. The Windows runner redirects its AppData environment into the portable
+root. Graphics drivers may also maintain caches through Windows.
 
-```bash
-./build_linux.sh --test --run --game <dump>
-```
-
-Without options they build. `-Test`/`--test` also runs the Python tests, `-Run`/`--run` starts the
-game for `-Timeout`/`--timeout` seconds (20 by default; `RESOGUN_GAME_DIR` names the dump when
-`-Game`/`--game` is left out) and prints its first `STOP:` or `Fault:` line, with the full log in
-`out/boot.log`. `-Package`/`--package` writes the release (section 5), and `-Clean`/`--clean`
-removes `out/` first. On Windows the script finds Git Bash (or MSYS2's bash) itself; on Linux it
-picks `clang-18`-style compiler names when there is no plain `clang`.
-
-### Linux
-
-The same commands build `out/resogun` (linked without PIE: host pointers handed to the game must stay
-below 1 TiB) and `out/resogun-setup`, and run the same tests. On Ubuntu 24.04 (also in WSL),
-`.github/scripts/ci-deps.sh` installs the dependencies as root, building Vulkan-Headers, VMA and SDL3,
-which 24.04 lacks or ships too old. Then:
-
-```bash
-CC=clang-18 CXX=clang++-18 bash build.sh --test
-```
-
-In WSL the game runs on Mesa's software Vulkan (llvmpipe): slow, but enough for a boot check.
-
-## 4. Run from the source tree
-
-Point `run.py` at your decrypted dump (CUSA00038, version 1.10: `eboot.bin`, `sce_module`,
-`sce_sys`, `audio.pck`, `stream.dat`) with `--game DIR` or `RESOGUN_GAME_DIR`:
-
-```bash
-python run.py --game <dump> --timeout 20
-```
-
-`run.py` prepares `out/game/` from the dump when needed and starts the game with the MSYS2 DLLs on
-`PATH`. [development.md](development.md) covers its other commands.
+`python run.py prepare --game DIR --out DIR` forwards to the native preparer.
+For existing developer images, `--prepared DIR --game DIR` uses their
+`boot-linked.bin`, `content.bin`, and optional `isa-rewrite.bin`.
 
 ## 5. Package
 
-There are two kinds of package. Both hold what a player needs without this repo or MSYS2: the game
-and setup programs, the libraries they load (on Windows found by walking their imports in
-`C:\msys64\clang64\bin`), `prepare/` for the setup, a README and the license. Neither ever contains
-game files.
-
-On Windows the DLLs sit in `libs\`, not beside the exes. Windows only looks there because
-`resogun.exe`'s manifest depends on a private assembly named `libs`, and `libs\libs.manifest`
-(written by the packager) lists the DLLs. The build puts a copy of `res/libs.manifest`, which lists
-none, in `out\libs\`, so a development build still finds the MSYS2 DLLs on `PATH`. Without some
-`libs\libs.manifest` beside it, `resogun.exe` does not start ("side-by-side configuration is
-incorrect").
-
-| | Release (for players) | Debug (for chasing a bug on someone's PC) |
-|---|---|---|
-| Command | `python tools/package.py --python <embed.zip> --zip` | `python tools/package.py --python <embed.zip> --zip --debug --out dist-debug` |
-| Exes | debug info stripped (game exe ~7 MB) | as built, with debug info |
-| `diagnose/` | not included | glitch kit from `packaging/diagnose` |
-| Zip | `out/<release>.zip` | `out/<release>-debug.zip` |
-
-`<embed.zip>` is the python.org "Windows embeddable package (64-bit)", for example
-`https://www.python.org/ftp/python/3.15.1/python-3.15.1-embed-amd64.zip`; check its SHA-256 against
-the python.org release page. It becomes `prepare/python`, so players need no Python of their own.
-Without `--python` the setup uses the player's Python 3.10+.
-
-On Linux, `python3 tools/package.py --zip` writes `out/<release>-linux.tar.gz` (also `-symbols`, and
-`-debug` with `--debug`): the game, the setup, the libraries they need in `lib/` less the host's
-(glibc, libstdc++, Vulkan, X11/Wayland, audio) and `prepare/`; the setup runs the system's python3.
-`.github/scripts/smoke-test.sh <unpacked release>` checks it as root on a fresh distro (libraries,
-the setup on non-dumps, the start from `paths.ini`); the `linux-smoke` CI job runs it on Ubuntu
-24.04, Debian 13, Fedora 42 and Arch.
-
-The folder (`dist/` by default, `--out DIR` otherwise) is also a working install: run its setup once
-and it plays. Packaging into it again keeps what the setup and the diagnose kit wrote there
-(`game/`, `paths.ini`, `settings.ini`, captures, logs).
-
-### Symbols for release crashes
-
-A release `--zip` also writes `out/<release>-symbols.zip` with the unstripped programs of that build;
-it is not for players. A crash in a player's `resogun.log` reads like `resogun.exe+0x1234ab`; resolve
-it with the symbols of the same release (named in the player's `release.txt`), adding the image base
-0x140000000:
-
 ```bash
-llvm-addr2line -fCe resogun.exe 0x1401234ab
+python tools/package.py --zip
 ```
 
-### The debug kit
+The script stages the runner, native shared libraries, settings template, and
+license. The Windows zip and Linux tar.gz contain one executable and no game
+files. Use `--debug --out dist-debug` to keep debug information and include the
+Windows diagnostic scripts. Stripped archives have a separate symbols archive.
 
-`diagnose/start.bat` starts the game with the frame capture, the renderer optimization toggles and
-the cache reload armed (idle until used) and logs to `diagnose/resogun.log`. While a glitch is on
-screen the player runs `1-capture.bat`, `2-optimizations-off.bat` and `3-reload.bat`, then sends the
-`diagnose` folder. The debug package's README.txt says so.
+On Linux, `python3 tools/package.py --appimage` uses a locally installed
+`appimagetool` and writes both the tar.gz and the AppImage to `out/`. The AppImage
+takes a portable data directory as its first argument.
 
-## 6. CI and releases
-
-Pushing a tag `v*` runs `.github/workflows/build.yml` (so do pull requests and a manual run from the
-Actions tab; pushes to branches do not): on `windows-latest`, the build, both test suites and both
-packages (with the pinned embeddable Python); the `linux` and `linux-smoke` jobs do the same for Linux
-on `ubuntu-24.04`. The packages are the run's artifacts (Actions tab, kept 90 days). A tag run that
-passes also publishes the Windows zip and the Linux tarball as a GitHub release named after the tag.
-The release's text is the tag's section of `CHANGELOG.md` (`## v0.4` up to the next `## `), then
-the install instructions. Write the section first: a tag without one fails the `notes` job at once
-and does not publish. `python tools/release_notes.py v0.4` prints what the release will say.
-
-```bash
-python tools/release_notes.py v0.1.0   # the section is there
-git tag -a v0.1.0 -m "v0.1.0"
-git push origin v0.1.0
+```sh
+./everybodys-golf-pc-<version>-linux-x86_64.AppImage "/path/to/golf data" --game "/path/to/dump" --prepare-only
 ```
+
+Run `.github/scripts/smoke-test.sh DIR` in a fresh Linux container against an
+unpacked tarball to check linker dependencies and CLI behavior without a dump.

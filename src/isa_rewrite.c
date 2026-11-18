@@ -40,7 +40,7 @@ static void sha256_block(uint32_t h[8], const unsigned char *block) {
     for (int i = 0; i < 8; i++) h[i] += v[i];
 }
 
-static void sha256(const unsigned char *data, uint64_t size, uint8_t out[32]) {
+void isa_sha256(const unsigned char *data, uint64_t size, uint8_t out[32]) {
     uint32_t h[8] = {0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19};
     uint64_t done = 0;
     for (; size - done >= 64; done += 64) sha256_block(h, data + done);
@@ -134,7 +134,7 @@ IsaTable *isa_table_load(const char *path) {
 int isa_table_matches(const IsaTable *t, const unsigned char *image, uint64_t size) {
     if (size != t->image_size) return 1;
     uint8_t digest[32];
-    sha256(image, size, digest);
+    isa_sha256(image, size, digest);
     return memcmp(digest, t->sha256, sizeof digest) != 0;
 }
 

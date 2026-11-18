@@ -7,20 +7,10 @@ import run
 
 
 class RunIsaTests(unittest.TestCase):
-    def test_parse_cpu_features(self):
-        self.assertEqual(run.parse_cpu_features('CPU: missing MOVBE, BMI1, LZCNT\n'), ['MOVBE', 'BMI1', 'LZCNT'])
-        self.assertEqual(run.parse_cpu_features('CPU: complete\n'), [])
-
-    def test_rewrite_wanted_follows_cpu_by_default(self):
-        self.assertTrue(run.isa_rewrite_wanted(['MOVBE'], {}))
-        self.assertFalse(run.isa_rewrite_wanted([], {}))
-
-    def test_rewrite_forced(self):
-        self.assertTrue(run.isa_rewrite_wanted([], {'RESOGUN_ISA_REWRITE': '1'}))
-
-    def test_rewrite_disabled(self):
-        self.assertFalse(run.isa_rewrite_wanted(['MOVBE', 'BMI1'], {'RESOGUN_ISA_REWRITE': '0'}))
+    def test_rewrite_flag_reaches_native_launcher(self):
+        _, args = run.command_line(["--isa-rewrite-mode", "0"], {})
+        self.assertEqual(args, ["--isa-rewrite-mode", "0"])
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main()

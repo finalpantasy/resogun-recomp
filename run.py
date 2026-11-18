@@ -1,185 +1,57 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-or-later
-"""Resogun on PC: prepare the game image and start the game.
-
-    python run.py            prepare if needed, then start the game
-    python run.py check      prepare if needed, then list the PS4 imports the runtime lacks
-    python run.py prepare    rebuild the game image only
-
-Options: --game DIR (the decrypted dump; default RESOGUN_GAME_DIR), --timeout SECONDS (play only),
---out DIR (the game image, default out/game), --dlc DIR (one more folder of DLC next to the save's
-addcont, e.g. shadPS4's addcont; default RESOGUN_DLC_DIR). Other arguments go to resogun. Saves land in
-user/, shader caches in shaders/ next to the exe (out/shaders; RESOGUN_SHADER_DIR moves it), the GPU
-library's logs in gpu/ next to the exe (gpu_dir), options in
-user/settings.ini, or settings.ini here until that exists (see settings.example.ini).
-"""
-import argparse
-import collections
+"""Developer convenience wrapper for the native Everybody's Golf launcher."""
 import os
 from pathlib import Path
 import subprocess
 import sys
 
-WINDOWS = sys.platform == 'win32'
-EXE_SUFFIX = '.exe' if WINDOWS else ''
 PORT = Path(__file__).resolve().parent
-# The eboot and the modules the linker starts at boot (scripts/link.py, DEFAULT_MODULES);
-# the deferred ones are every other .prx in IMAGE_MODULE_DIRS.
-IMAGE_INPUTS = ('eboot.bin', 'sce_module/libc.prx', 'sce_module/libSceFios2.prx')
-IMAGE_MODULE_DIRS = ('sce_module',)
+WINDOWS = sys.platform == "win32"
 
 
-def fail(message):
-    print(message, file=sys.stderr)
-    sys.exit(1)
-
-
-def parse_cpu_features(output):
-    """Instruction sets `resogun --cpu-features` reports missing ([] when complete)."""
-    for line in output.splitlines():
-        if line.startswith('CPU: missing '):
-            return [name.strip() for name in line[len('CPU: missing '):].split(',') if name.strip()]
-    return []
-
-
-def isa_rewrite_wanted(missing, env):
-    """RESOGUN_ISA_REWRITE=1 forces the ISA rewrite table, 0 disables it; otherwise the CPU decides."""
-    policy = env.get('RESOGUN_ISA_REWRITE')
-    if policy in ('0', '1'):
-        return policy == '1'
-    return bool(missing)
-
-
-def gpu_dir(exe, env=os.environ):
-    """The GPU library's folder (its logs, screenshots and frame captures): gpu/ next to the exe, as an
-    installed copy's (src/launcher.c), whatever the save folder. RESOGUN_GPU_USER_DIR overrides it."""
-    if env.get('RESOGUN_GPU_USER_DIR'):
-        return Path(env['RESOGUN_GPU_USER_DIR'])
-    return Path(exe).parent / 'gpu'
-
-
-def run_script(name, *args, check=True):
-    command = [sys.executable, str(PORT / 'scripts' / name), *map(str, args)]
-    result = subprocess.run(command, stdin=subprocess.DEVNULL, env={**os.environ, 'PYTHONIOENCODING': 'utf-8'})
-    if check and result.returncode:
-        sys.exit(result.returncode)
-    return result.returncode
-
-
-def image_is_current(game, out):
-    linked = out / 'boot-linked.bin'
-    if not linked.is_file() or not (out / 'content.bin').is_file():
-        return False
-    built = linked.stat().st_mtime
-    sources = [game / name for name in IMAGE_INPUTS] + list((PORT / 'scripts').glob('*.py'))
-    sources += [path for folder in IMAGE_MODULE_DIRS for path in (game / folder).glob('*.prx')]
-    return all(not path.is_file() or path.stat().st_mtime < built for path in sources)
-
-
-def prepare(game, out, force=False, any_build=False):
-    if not force and image_is_current(game, out):
-        print(f'Game image is current: {out / "boot-linked.bin"}', flush=True)
-        return
-    out.mkdir(parents=True, exist_ok=True)
-    run_script('prepare.py', game, '--out', out, *(['--any-build'] if any_build else []))
-    run_script('link.py', game, '--out', out)
-
-
-def find_exe():
-    exe = Path(os.environ['RESOGUN_EXE']) if os.environ.get('RESOGUN_EXE') else PORT / 'out' / ('resogun' + EXE_SUFFIX)
-    if not exe.is_file():
-        fail(f'{exe} not found: build it with build.sh (MSYS2 CLANG64 shell on Windows).')
-    # Development builds use the MSYS2 CLANG64 DLLs (SDL3, zlib, ...); a release has them in libs/.
-    if WINDOWS and not (exe.parent / 'libs' / 'SDL3.dll').is_file():
-        # MSYS2_ROOT, else a toolchain kept beside the checkout (tools/msys2/msys64 of the parent
-        # project), else the default install.
-        roots = [Path(os.environ['MSYS2_ROOT'])] if os.environ.get('MSYS2_ROOT') else []
-        roots += [PORT.parent.parent / 'tools' / 'msys2' / 'msys64', Path(r'C:\msys64')]
-        clang64 = next((r / 'clang64' / 'bin' for r in roots if (r / 'clang64' / 'bin' / 'SDL3.dll').is_file()), None)
-        if clang64 is None:
-            fail('SDL3.dll not found: set MSYS2_ROOT to the MSYS2 install that built resogun.exe.')
-        os.environ['PATH'] = f'{clang64}{os.pathsep}{os.environ.get("PATH", "")}'
-    return exe
-
-
-def check(exe, out):
-    """--check-imports, summarized by library; the full list goes to out/missing-imports.txt."""
-    result = subprocess.run([str(exe), str(out / 'boot-linked.bin'), '--check-imports'], stdin=subprocess.DEVNULL,
-                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding='utf-8', errors='replace')
-    missing = [line[len('MISSING: '):] for line in result.stdout.splitlines() if line.startswith('MISSING: ')]
-    (out / 'missing-imports.txt').write_text(''.join(line + '\n' for line in missing), encoding='utf-8')
-    by_library = collections.defaultdict(list)
-    for line in missing:
-        key, _, name = line.partition(' (')
-        nid, _, library = key.partition('#')
-        by_library[library].append(nid if name.startswith('name not resolved') else name.rstrip(')'))
-    for library, names in sorted(by_library.items(), key=lambda kv: (-len(kv[1]), kv[0])):
-        shown = ', '.join(names[:6]) + (', ...' if len(names) > 6 else '')
-        print(f'{len(names):4} {library:28} {shown}')
-    print(f'{len(missing)} imports missing; full list: {out / "missing-imports.txt"}')
-    return 1 if missing else 0
-
-
-def play(exe, game, out, timeout, user, extra, dlc=None):
-    env = os.environ
-    features = subprocess.run([str(exe), '--cpu-features'], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, text=True)
-    if features.returncode == 20:
-        print(features.stdout, end='', flush=True)
-        return 20
-    isa_args = []
-    if isa_rewrite_wanted(parse_cpu_features(features.stdout), env):
-        if run_script('isa_rewrite.py', out / 'boot-linked.bin', '--out', out, check=False) == 0:
-            isa_args = ['--isa-rewrite', str(out / 'isa-rewrite.bin')]
-    # As the release's launcher: the save folder's settings.ini, else the one next to this script.
-    env.setdefault('RESOGUN_CONFIG', str(user / 'settings.ini'))
-    env.setdefault('RESOGUN_CONFIG_DEFAULT', str(PORT / 'settings.ini'))
-    command = [str(exe), str(out / 'boot-linked.bin'), '--content-profile', str(out / 'content.bin'),
-               '--app0', str(game), '--user', str(user), '--timeout', str(timeout), *isa_args,
-               *(['--dlc', str(dlc)] if dlc else []), *extra]
-    process = subprocess.Popen(command, stdin=subprocess.DEVNULL)
-    try:
-        return process.wait()
-    except KeyboardInterrupt:
-        process.terminate()
-        return 130
+def command_line(argv, env):
+    suffix = ".exe" if WINDOWS else ""
+    override = env.get("EG_EXE") or env.get("RESOGUN_EXE")
+    exe = Path(override) if override else PORT / "out" / ("everybodys-golf" + suffix)
+    args = list(argv)
+    mode = args.pop(0) if args and args[0] in {"play", "check", "prepare"} else "play"
+    if "--out" in args:
+        i = args.index("--out")
+        if i + 1 >= len(args):
+            raise ValueError("--out requires a directory")
+        directory = Path(args[i + 1])
+        args[i] = "--prepared" if mode != "prepare" and (directory / "boot-linked.bin").is_file() else "--data-dir"
+    if mode == "prepare":
+        args.extend(("--prepare-only", "--reprepare"))
+    elif mode == "check":
+        args.append("--check-imports")
+    if not any(flag in args for flag in ("--timeout", "--prepare-only", "--check-imports")) and env.get("RESOGUN_TIMEOUT"):
+        args.extend(("--timeout", env["RESOGUN_TIMEOUT"]))
+    return exe, args
 
 
 def main():
-    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument('command', nargs='?', choices=('play', 'check', 'prepare'), default='play')
-    p.add_argument('--game', type=Path, default=os.environ.get('RESOGUN_GAME_DIR'))
-    p.add_argument('--timeout', type=int, default=int(os.environ.get('RESOGUN_TIMEOUT', '0')))
-    p.add_argument('--user', type=Path, default=PORT / 'user', help='saves, settings and the log (default: user/)')
-    p.add_argument('--out', type=Path, default=PORT / 'out' / 'game', help='the game image (default: out/game)')
-    p.add_argument('--dlc', type=Path, default=os.environ.get('RESOGUN_DLC_DIR') or None,
-                   help="one more folder of DLC, next to the save's addcont (e.g. shadPS4's addcont)")
-    p.add_argument('--any-build', action='store_true',
-                   help='prepare an eboot.bin that is not a verified build (scripts/prepare.py VERIFIED_BUILDS)')
-    a, extra = p.parse_known_args()
-    if a.game is None:
-        fail('Pass the decrypted game dump with --game DIR or set RESOGUN_GAME_DIR.')
-    game = a.game.resolve()
-    if not (game / 'eboot.bin').is_file():
-        fail(f'No eboot.bin in {game} (pass --game or set RESOGUN_GAME_DIR).')
-    out = a.out.resolve()
-    prepare(game, out, force=a.command == 'prepare', any_build=a.any_build)
-    if a.command == 'prepare':
-        return 0
-    exe = find_exe()
-    # The GPU library's folder (logs, screenshots) reaches every run of the exe through the environment,
-    # the --cpu-features one too: gpu/ next to the exe, never the save folder, so test boots on a copy
-    # of the save do not write to ./user.
-    user = a.user.resolve()
-    user.mkdir(parents=True, exist_ok=True)
-    os.environ['RESOGUN_GPU_USER_DIR'] = str(gpu_dir(exe))
-    # Shader caches: shaders/ next to the exe, as an installed copy's (src/launcher.c).
-    os.environ.setdefault('RESOGUN_SHADER_DIR', str(exe.parent / 'shaders'))
-    # Development runs log every routine event; installed copies only faults, stops and errors.
-    os.environ.setdefault('RESOGUN_VERBOSE', '1')
-    if a.command == 'check':
-        return check(exe, out)
-    return play(exe, game, out, a.timeout, user, extra, a.dlc.resolve() if a.dlc else None)
+    env = dict(os.environ)
+    try:
+        exe, args = command_line(sys.argv[1:], env)
+    except ValueError as error:
+        print(error, file=sys.stderr)
+        return 1
+    if not exe.is_file():
+        print(f"{exe} not found. Build it with bash build.sh.", file=sys.stderr)
+        return 1
+    if WINDOWS and not (exe.parent / "libs" / "SDL3.dll").is_file():
+        roots = [Path(env["MSYS2_ROOT"])] if env.get("MSYS2_ROOT") else []
+        roots += [PORT.parent.parent / "tools/msys2/msys64", Path(r"C:\msys64")]
+        bins = (root / "clang64" / "bin" for root in roots)
+        clang64 = next((directory for directory in bins if (directory / "SDL3.dll").is_file()), None)
+        if clang64 is None:
+            print("SDL3.dll not found. Set MSYS2_ROOT to the MSYS2 install used to build the launcher.", file=sys.stderr)
+            return 1
+        env["PATH"] = f"{clang64}{os.pathsep}{env.get('PATH', '')}"
+    return subprocess.run([str(exe), *args], env=env, stdin=subprocess.DEVNULL).returncode
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     sys.exit(main())

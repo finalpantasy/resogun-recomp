@@ -724,8 +724,8 @@ int main(int argc, char **argv) {
         runtime_pad_describe();
         return 0;
     }
-    /* No boot file (a shortcut or a double-click): the set-up folders from paths.ini (src/launcher.c). */
-    if ((argc < 2 || !strncmp(argv[1], "--", 2)) && launch_from_paths_ini(&argc, &argv)) return 1;
+    int launch = launcher_start(&argc, &argv);
+    if (launch != LAUNCH_RUN) return launch == LAUNCH_DONE ? 0 : 1;
 #ifdef _WIN32
     /* The PS4 user range must stay free of host allocations (GPU driver, heaps), and the guest
      * TCB needs one of the 64 TEB TLS slots before DLLs (Vulkan drivers) take them. */
@@ -793,7 +793,7 @@ int main(int argc, char **argv) {
         runtime_content_configure(values);
     }
     if (app0) {
-        runtime_file_configure(app0, user_dir ? user_dir : "user");
+        runtime_file_configure(app0, user_dir ? user_dir : launcher_save_dir());
         if (user_dir && user_dir[0]) {
 #ifdef _WIN32
             _putenv_s("RESOGUN_USER_DIR", user_dir);
@@ -1004,7 +1004,7 @@ int main(int argc, char **argv) {
         return 20;
     }
     if (!cpu_only) {
-        char title[128]="Resogun", serial[16]="UNKNOWN", sfo[4096];
+        char title[128]="Everybody's Golf", serial[16]="UNKNOWN", sfo[4096];
         uint32_t attributes=0;
         snprintf(sfo,sizeof(sfo),"%s/sce_sys/param.sfo",app0 ? app0 : ".");
         sfo_value(sfo,"TITLE",title,sizeof(title),NULL);
@@ -1014,7 +1014,7 @@ int main(int argc, char **argv) {
         if (procparam) memcpy(&sdk,image+procparam+16,8); /* procparam: size, magic, count, sdk_version */
         char splash[4096];
         snprintf(splash,sizeof(splash),"%s/sce_sys/pic1.png",app0 ? app0 : ".");
-        ResogunGpuConfig gpu={title,serial,user_dir ? user_dir : "user",(uint32_t)sdk,attributes,1920,1080,
+        ResogunGpuConfig gpu={title,serial,user_dir ? user_dir : launcher_save_dir(),(uint32_t)sdk,attributes,1920,1080,
                                   app0 ? splash : NULL};
         gpu_enabled=1; /* page tracking starts while the rasterizer registers guest memory */
         if (resogun_gpu_init(&gpu)) fail("GPU initialization failed");

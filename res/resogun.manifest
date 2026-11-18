@@ -3,7 +3,7 @@
      long paths, per-monitor DPI awareness for the SDL window, and the DLLs in libs\ (a private
      assembly: libs\libs.manifest names them; res/libs.manifest has the details). -->
 <assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
-  <assemblyIdentity type="win32" name="resogun.resogun" version="1.0.5.1"/>
+  <assemblyIdentity type="win32" name="everybodys-golf.runner" version="1.0.5.1"/>
   <dependency>
     <dependentAssembly>
       <assemblyIdentity type="win32" name="libs" version="1.0.0.0" processorArchitecture="amd64"/>

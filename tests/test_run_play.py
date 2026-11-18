@@ -1,54 +1,29 @@
-from paths import ROOT
-import os
 from pathlib import Path
+from tempfile import TemporaryDirectory
+from paths import ROOT
 import sys
-import tempfile
 import unittest
-from unittest import mock
 
 sys.path.insert(0, str(ROOT))
 import run
 
 
 class RunPlayTests(unittest.TestCase):
-    def test_shared_cache_reaches_every_exe_run(self):
-        # The GPU library's folder is RESOGUN_GPU_USER_DIR (else gpu/ by the exe) from the first run of the exe (--cpu-features) on,
-        # never the save folder, so test boots on a copy of the save do not write to user/.
-        seen = []
-        features = mock.Mock(returncode=0, stdout='CPU: complete\n')
-        process = mock.Mock()
-        process.wait.return_value = 0
+    def test_forwards_launch_args(self):
+        exe, args = run.command_line(["play", "--game", "dump", "--user", "save"], {"EG_EXE": "explicit/runner.exe"})
+        self.assertEqual(exe, Path("explicit/runner.exe"))
+        self.assertEqual(args, ["--game", "dump", "--user", "save"])
 
-        def exe_run(command, **kwargs):
-            seen.append((os.environ.get('RESOGUN_GPU_USER_DIR'), os.environ.get('RESOGUN_SHADER_DIR')))
-            return features
+    def test_prepare_uses_portable_root(self):
+        _, args = run.command_line(["prepare", "--game", "dump", "--out", "test build"], {})
+        self.assertEqual(args, ["--game", "dump", "--data-dir", "test build", "--prepare-only", "--reprepare"])
 
-        with tempfile.TemporaryDirectory() as folder:
-            game = Path(folder) / 'game'
-            game.mkdir()
-            (game / 'eboot.bin').write_bytes(b'')
-            user = Path(folder) / 'user-copy'
-            cache = Path(folder) / 'cache'
-            argv = ['run.py', '--game', str(game), '--user', str(user), '--timeout', '20']
-            with mock.patch.dict(os.environ, {'RESOGUN_ISA_REWRITE': '0', 'RESOGUN_GPU_USER_DIR': str(cache)}), \
-                    mock.patch.object(sys, 'argv', argv), \
-                    mock.patch.object(run, 'prepare'), \
-                    mock.patch.object(run, 'find_exe', return_value=Path('resogun.exe')), \
-                    mock.patch.object(run.subprocess, 'run', side_effect=exe_run), \
-                    mock.patch.object(run.subprocess, 'Popen', return_value=process) as popen:
-                os.environ.pop('RESOGUN_SHADER_DIR', None)
-                self.assertEqual(run.main(), 0)
-                # Shader caches go to shaders/ next to the exe, as an installed copy's.
-                self.assertEqual(seen, [(str(cache), str(Path('shaders')))])
-                self.assertIn(str(user.resolve()), popen.call_args.args[0])
-            self.assertTrue(user.is_dir())
-
-    def test_gpu_dir_is_next_to_the_exe(self):
-        env = {'LOCALAPPDATA': r'C:\Users\a\AppData\Local', 'XDG_CACHE_HOME': '/home/a/.cache'}
-        exe = Path('release') / 'resogun.exe'
-        self.assertEqual(run.gpu_dir(exe, env), Path('release') / 'gpu')
-        self.assertEqual(run.gpu_dir(exe, {**env, 'RESOGUN_GPU_USER_DIR': 'elsewhere'}), Path('elsewhere'))
+    def test_check_can_use_existing_developer_image(self):
+        with TemporaryDirectory() as folder:
+            (Path(folder) / "boot-linked.bin").touch()
+            _, args = run.command_line(["check", "--game", "dump", "--out", folder], {})
+        self.assertEqual(args, ["--game", "dump", "--prepared", folder, "--check-imports"])
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main()

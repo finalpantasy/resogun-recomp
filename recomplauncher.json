@@ -1,21 +1,21 @@
 {
   "$schema": "https://recomplauncher.com/schema/recomplauncher.json",
   "format": 1,
-  "name": "Resogun (PS4) Recompiled",
-  "repo": "rcostanza/resogun-recomp",
+  "name": "Everybody's Golf (PS4) PC Port",
+  "repo": "finalpantasy/everybodys-golf-ps4-pc-port",
   "game": {
     "kind": "folder",
-    "label": "The folder of your decrypted dump of Resogun for PS4 (CUSA00038, update 1.10): eboot.bin, sce_module, sce_sys, audio.pck and stream.dat.",
-    "check": { "file": "stream.dat" }
+    "label": "The merged, decrypted Everybody's Golf dump for PS4 (CUSA04687, update 1.17).",
+    "check": { "file": "eboot.bin" }
   },
   "prepare": {
-    "program": ["resogun-setup.exe", "resogun-setup"],
-    "args": ["--game", "{game}", "--save", "{install}/save", "--copy-saves", "--progress"],
+    "program": ["everybodys-golf.exe", "everybodys-golf"],
+    "args": ["--game", "{game}", "--prepare-only"],
     "label": "The game, prepared from your dump",
     "timeout": 600
   },
   "start": {
-    "program": ["resogun.exe", "resogun"]
+    "program": ["everybodys-golf.exe", "everybodys-golf"]
   },
   "config": [
     {
@@ -30,7 +30,7 @@
   "saves": ["{install}/save/savedata", "{install}/save/trophies.dat", "{install}/save/settings.ini"],
   "folders": {
     "saves": [{ "path": "{install}/save" }],
-    "logs": [{ "path": "{install}/save/log" }]
+    "logs": [{ "path": "{install}/log" }]
   },
   "looks": { "graphics": "vulkan" },
   "settings": [
@@ -59,7 +59,7 @@
     },
     {
       "id": "aspect_ratio", "label": "Aspect ratio",
-      "help": "Ultrawide shows more of the level to the sides, 16:10 and 4:3 more above and below. Nothing is stretched; the menus stay 16:9.",
+      "help": "Select the requested output aspect ratio.",
       "choices": [
         { "label": "16:9", "set": { "aspect_ratio": "16:9" } },
         { "label": "16:10", "set": { "aspect_ratio": "16:10" } },
@@ -71,7 +71,7 @@
     },
     {
       "id": "frame_rate", "label": "Frame rate",
-      "help": "60 is the PS4's. The game speed follows the frames shown, so pick a rate your PC always holds: a late frame slows the game for that moment.",
+      "help": "Select the requested runtime frame rate.",
       "choices": [
         { "label": "30", "set": { "frame_rate": "30" } },
         { "label": "60", "set": { "frame_rate": "60" } },
@@ -140,7 +140,7 @@
     },
     {
       "id": "skip_intro", "label": "Intro logos",
-      "help": "Skip starts straight in the main menu, past the logos and the title screen.",
+      "help": "Set the runtime intro option.",
       "choices": [
         { "label": "Skip them", "set": { "skip_intro": "1" } },
         { "label": "Show them", "set": { "skip_intro": "0" } }
@@ -149,6 +149,6 @@
     }
   ],
   "actions": [
-    { "id": "saves", "label": "Saves", "help": "Your saves, trophies, settings and resogun.log.", "open": "saves" }
+    { "id": "saves", "label": "Saves", "help": "Your saves, trophies and settings.", "open": "saves" }
   ]
 }

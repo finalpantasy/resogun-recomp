@@ -1,38 +1,9 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-or-later
-"""Assembles the release folder (dist/) from the build, and optionally zips it.
+"""Package the single Everybody's Golf runner and its native dependencies.
 
-    python tools/package.py [--out dist] [--python EMBEDDABLE] [--zip] [--debug]
-
-On Linux the same folder holds resogun and resogun-setup (rpath $ORIGIN/lib), the
-shared libraries they need in lib/ (ldd, less the host's: glibc, libstdc++, Vulkan, the display
-and audio stacks, which must match its drivers), resogun.png for the desktop entry and
-prepare/ without Python: the setup runs the system's python3. --zip writes <release>-linux.tar.gz
-(and -symbols, -debug), which keeps the files' exec bits and symlinks. Needs ldd, patchelf and strip.
-
-The folder is what a player unpacks: they need neither this repo nor MSYS2. They run
-resogun-setup.exe, which prepares the game image from their own dump (prepare/run.py), and then
-start resogun.exe or the desktop shortcut it offers.
-
-    resogun.exe, resogun-setup.exe (debug info stripped)
-    libs/           the DLLs the game needs (from MSYS2 CLANG64) and libs.manifest, which names them:
-                    a private assembly, which resogun.exe's manifest depends on (res/libs.manifest)
-    release.txt     this release; the setup stamps the image it prepares with it (src/launcher.c)
-    recomplauncher.json  how RecompLauncher (recomplauncher.com) sets up, starts and configures it
-    README.txt, LICENSE.txt
-    prepare/        run.py, scripts/ and settings.example.ini, run by the setup;
-                    prepare/python/ holds Python for it when --python names the python.org
-                    "embeddable package" (folder or .zip); otherwise the player needs Python 3.10+.
-
---debug packages for chasing a bug on someone's PC instead: the exes keep their debug info and
-diagnose/ holds the glitch kit (packaging/diagnose: start.bat arms the frame capture,
-optimization toggles and reload trigger). Its zip is <release>-debug.zip. A plain --zip also writes
-<release>-symbols.zip with the unstripped exes, which resolve the exe+0x... offsets of a player's
-resogun.log (llvm-addr2line -fe resogun.exe 0x140000000+offset).
-
-What the setup adds later (game/, paths.ini, settings.ini) and what the kit writes (diagnose/
-captures, its log) is left alone, so dist/ also works as the developer's own install. Never ship
-game/: it is built from a player's own dump.
+Build with bash build.sh. --zip writes the Windows zip or Linux tar.gz.
+On Linux, --appimage also writes an AppImage using a locally installed appimagetool.
 """
 import argparse
 import os
@@ -43,12 +14,13 @@ import struct
 import subprocess
 import sys
 import tarfile
+import tempfile
 import time
 import zipfile
 
 PORT = Path(__file__).resolve().parent.parent
 LINUX = sys.platform.startswith('linux')
-EXES = ('resogun', 'resogun-setup') if LINUX else ('resogun.exe', 'resogun-setup.exe')
+EXES = ('everybodys-golf',) if LINUX else ('everybodys-golf.exe',)
 # Linux libraries the host provides: bundled, they break its GPU drivers, display connection or audio
 # (libstdc++ too: Mesa needs the one it was built with, at least as new as this build's).
 HOST_LIBS = re.compile(r'^(linux-vdso|ld-linux.*|libc|libm|libdl|librt|libpthread|libresolv|libutil|libnsl|libanl'
@@ -56,9 +28,7 @@ HOST_LIBS = re.compile(r'^(linux-vdso|ld-linux.*|libc|libm|libdl|librt|libpthrea
                        r'|libX11|libX11-xcb|libxcb.*|libXau|libXdmcp|libXext|libXfixes|libXrender|libXi|libXcursor'
                        r'|libXrandr|libwayland-.*|libasound|libudev|libpulse.*|libfontconfig|libfreetype'
                        r'|libnvidia-.*|libcuda|libz)\.so')
-ICON = PORT / 'res' / 'resogun.ico'
-# What prepare/run.py needs: the scripts and the template of settings.ini.
-PREPARE_FILES = ['run.py', 'settings.example.ini', *sorted(f'scripts/{p.name}' for p in (PORT / 'scripts').glob('*.py'))]
+APPIMAGE = PORT / 'packaging' / 'appimage'
 # The glitch kit that --debug ships in diagnose/.
 DIAGNOSE = PORT / 'packaging' / 'diagnose'
 # libs/libs.manifest in a release: res/libs.manifest's assembly, with the DLLs beside it.
@@ -68,70 +38,37 @@ LIBS_MANIFEST = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 {files}</assembly>
 """
 
-README = """Resogun on PC
+README = '''Everybody's Golf for PC
 Release {release}
 
-You need a decrypted dump of your own copy of the PS4 game (CUSA00038, version 1.10): the folder
-with eboot.bin, sce_module, sce_sys, audio.pck and stream.dat. No game files are included. Add-ons
-you own (ships and skins) need no files: a DLC folder with their sce_sys folders lists them.
+Use a merged, decrypted dump of CUSA04687 with update 1.17.
+The dump folder must contain eboot.bin, sce_module and sce_sys.
+Keep the dump available for the runner to mount as /app0.
 
-1. Run resogun-setup.exe. Pick the game folder and where your saves go, then press Install.
-   It prepares the game from your dump (a few seconds) and offers a desktop shortcut.
-2. Press Play Game, or later start resogun.exe or the shortcut.
+  {exe} --game "path to dump" --prepare-only
+  {exe}
 
-Run resogun-setup.exe again to change the game or save folder. After unpacking a newer release
-over this folder, just start the game: it prepares itself again from your dump the first time,
-keeping your folders and settings. The game was tested with the unmodified dump of CUSA00038
-with update 1.10; with any other, setup warns once that the files are untested and might cause bugs.
+Run --help for options. The first command remembers the dump, builds the
+linked image and exits. Later starts reuse the image when its inputs match.
+Use --reprepare to rebuild and --dlc DIR for extracted add-on folders.
 
-In the game: F10, or Select (Share/View) held for two seconds, opens the display settings (window,
-resolution, VSync, 60/90/120/144/180 FPS); F4, or Back on the title screen, asks to close the game.
+By default the executable's folder holds game/, save/, shaders/, gpu/, log/
+and paths.ini. Windows also directs AppData from the runner process into host/.
+--data-dir DIR moves that portable state together.
+--config FILE, --save DIR and --log FILE override individual paths.
+The Windows graphics driver may maintain its own shader cache in LocalAppData.
 
-settings.ini (made by the setup) holds the window, audio and control options; one in your save
-folder is read instead, and the display settings save there. If the game stops, the reason is in
-resogun.log, in the log folder of your save folder. Shader caches are kept in the shaders
-folder next to resogun-setup.exe.
+On Linux, give the AppImage one data directory before any options. For example:
+  ./EverybodyGolf.AppImage "path to data" --game "path to dump" --prepare-only
+The Linux tar.gz may be extracted and run directly.
 
-Needs Windows 10/11 x64, a CPU with AVX and a GPU with Vulkan 1.3.{python_note}
-Source and license (GPL-2.0-or-later): see LICENSE.txt.
-{debug_note}"""
-LINUX_README = """Resogun on PC (Linux)
-Release {release}
-
-You need a decrypted dump of your own copy of the PS4 game (CUSA00038, version 1.10): the folder
-with eboot.bin, sce_module, sce_sys, audio.pck and stream.dat. No game files are included. Add-ons
-you own (ships and skins) need no files: a DLC folder with their sce_sys folders lists them.
-
-1. Run resogun-setup (from a file manager, or ./resogun-setup in a terminal). Pick the
-   game folder and where your saves go. It prepares the game from your dump (a few seconds) and
-   offers an entry in your application menu (Steam's "Add a Non-Steam Game" lists it too).
-   From a terminal it also takes: ./resogun-setup --game <dump> [--save <folder>]
-2. Start the game from the menu entry, or run ./resogun.
-
-Run resogun-setup again to change the game or save folder. After unpacking a newer release
-over this folder, just start the game: it prepares itself again from your dump the first time,
-keeping your folders and settings. The game was tested with the unmodified dump of CUSA00038
-with update 1.10; with any other, setup warns once that the files are untested and might cause bugs.
-
-In the game: F10, or Select (Share/View) held for two seconds, opens the display settings (window,
-resolution, VSync, 60/90/120/144/180 FPS); F4, or Back on the title screen, asks to close the game.
-
-settings.ini (made by the setup) holds the window, audio and control options; one in your save
-folder is read instead, and the display settings save there. If the game stops, the reason is in
-resogun.log, in the log folder of your save folder. Shader caches are kept in the shaders
-folder next to resogun-setup.
-
-Needs Linux x86-64 with glibc 2.39 or newer (SteamOS 3.7, Ubuntu 24.04, Debian 13, Fedora 40 or
-newer), python3 3.10+ for the setup, a CPU with AVX and a GPU with a Vulkan 1.3 driver.
-Source and license (GPL-2.0-or-later): see LICENSE.txt.
-"""
-PYTHON_NOTE = '\nThe setup needs Python 3.10 or newer (python.org) to prepare the game.'
-DEBUG_NOTE = """
-This is a debugging build. To catch a rendering glitch, start the game with diagnose\\start.bat
-(its log goes to diagnose\\resogun.log). While the glitch shows, run 1-capture.bat, then
-2-optimizations-off.bat, then 3-reload.bat, noting after each whether the glitch changed. Restart
-the game afterwards, and send the diagnose folder (log and captures).
-"""
+Release prerequisites are an x86-64 host with AVX and Vulkan 1.3.
+See LICENSE.txt for the source license (GPL-2.0-or-later).
+{debug_note}'''
+DEBUG_NOTE = '''
+To collect local diagnostics, start the game with diagnose\\start.bat on Windows.
+The log and frame captures go into diagnose\\.
+'''
 
 
 def pe_imports(path):
@@ -231,24 +168,12 @@ def min_glibc(paths):
     return max(versions, key=lambda v: tuple(map(int, v.split('.'))), default=None)
 
 
-def ico_png(ico, size=256):
-    """The PNG frame of `size` pixels in a .ico (the desktop entry's icon)."""
-    data = ico.read_bytes()
-    for i in range(struct.unpack_from('<H', data, 4)[0]):
-        width, _, _, _, _, _, length, offset = struct.unpack_from('<BBBBHHII', data, 6 + 16 * i)
-        if (width or 256) == size and data[offset:offset + 8] == b'\x89PNG\r\n\x1a\n':
-            return data[offset:offset + length]
-    raise SystemExit(f'{ico}: no {size}px PNG frame')
-
-
-def release_name(product='resogun-pc'):
-    """<product>-<commit>-<date>, or -<commit>-dirty-<date>-<time> for uncommitted work:
-    what release.txt and the zip are named after. Two releases from one dirty tree differ by the
-    packaging time, so the launcher asks for the setup again after either is unpacked."""
+def release_name(product='everybodys-golf-pc'):
+    """Name artifacts after the source revision."""
     def git(*args):
         return subprocess.run(['git', *args], cwd=PORT, capture_output=True, text=True).stdout.strip()
     described = git('describe', '--tags', '--always', '--dirty') or 'unknown'
-    when = time.strftime('%Y-%m-%d-%H%M') if described.endswith('-dirty') else git('log', '-1', '--format=%cs')
+    when = git('log', '-1', '--format=%cs') or time.strftime('%Y-%m-%d')
     return f'{product}-{described}-{when}'
 
 
@@ -258,46 +183,48 @@ def copy(source, target):
 
 
 def strip(source, target, bin_dir, mode='--strip-all'):
-    """Copies an exe without its debug info (RelWithDebInfo DWARF is ~95% of resogun.exe).
+    """Copies an exe without its debug info (RelWithDebInfo DWARF is most of the build size).
     Crash logs give exe+offset, which the unstripped build resolves."""
     target.parent.mkdir(parents=True, exist_ok=True)
     tool = linux_tool('llvm-strip-18', 'llvm-strip', 'strip') if LINUX else str(bin_dir / 'llvm-strip.exe')
     subprocess.run([tool, mode, '-o', str(target), str(source)], check=True)
 
 
-def embeddable_python(source, target):
-    """Unpacks or copies the python.org embeddable package to target (python.exe at its root), the
-    setup's."""
-    shutil.rmtree(target, ignore_errors=True)
-    if source.suffix.lower() == '.zip':
-        with zipfile.ZipFile(source) as z:
-            z.extractall(target)
-    else:
-        shutil.copytree(source, target)
-    if not (target / 'python.exe').is_file():
-        raise SystemExit(f'{source}: no python.exe (expected the embeddable package from python.org)')
-    # Its ._pth file fixes sys.path, without the running script's folder: the setup's scripts import
-    # each other (from prepare import ...), so prepare/scripts goes on it.
-    for pth in target.glob('python*._pth'):
-        lines = pth.read_text().splitlines()
-        extra = [line for line in ('../scripts',) if line not in lines]
-        pth.write_bytes(('\r\n'.join([*extra, *lines]) + '\r\n').encode())
+def appimage(out, shipped, release, tarball):
+    if not tarball.is_file() or not tarball.stat().st_size:
+        raise SystemExit('The Linux tarball must exist before building its AppImage.')
+    builder = linux_tool('appimagetool')
+    image = PORT / 'out' / f'{release}-linux-x86_64.AppImage'
+    with tempfile.TemporaryDirectory(prefix='golf-appimage-', dir=PORT / 'out') as temp:
+        root = Path(temp) / 'Golf.AppDir'
+        for name in shipped:
+            copy(out / name, root / name)
+        for name in ('AppRun', 'everybodys-golf.desktop', 'everybodys-golf.svg'):
+            copy(APPIMAGE / name, root / name)
+        (root / 'AppRun').chmod(0o755)
+        (root / '.DirIcon').symlink_to('everybodys-golf.svg')
+        staged = Path(temp) / image.name
+        subprocess.run([builder, str(root), str(staged)], env={**os.environ, 'ARCH': 'x86_64'}, check=True)
+        staged.replace(image)
+    print(f'{image}: {image.stat().st_size / 2**20:.0f} MiB')
 
 
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument('--out', type=Path, help='the folder to fill (default dist)')
-    p.add_argument('--python', type=Path, help='Python to ship with the setup: the python.org embeddable package (folder or .zip), Windows')
+    p.add_argument('--appimage', action='store_true', help='also build the Linux AppImage and tarball')
     p.add_argument('--zip', action='store_true', help='also write out/<release>.zip (and <release>-symbols.zip)')
     p.add_argument('--debug', action='store_true', help='keep debug info in the exes and ship the diagnose/ kit')
     a = p.parse_args()
     bin_dir = Path(os.environ.get('MSYS2_ROOT', r'C:\msys64')) / 'clang64' / 'bin'
-    if LINUX and a.python:
-        raise SystemExit('--python is the Windows embeddable package; on Linux the setup runs the system python3.')
+    if a.appimage and (not LINUX or a.debug):
+        p.error('--appimage requires a Linux player build')
     for exe in EXES:
         if not (PORT / 'out' / exe).is_file():
             raise SystemExit(f'out/{exe} not found: build first (bash build.sh).')
     out = (a.out or PORT / 'dist').resolve()
+    if any((out / old).exists() for old in ('resogun.exe', 'resogun', 'resogun-setup.exe', 'resogun-setup', 'prepare')):
+        raise SystemExit(f'{out} contains a legacy release. Choose a fresh --out directory.')
     release = release_name()
     shipped = []
 
@@ -328,8 +255,6 @@ def main():
                 strip(lib, target, bin_dir, '--strip-unneeded')
             set_rpath(target, '$ORIGIN')
             shipped.append(f'lib/{lib.name}')
-        (out / 'resogun.png').write_bytes(ico_png(ICON))
-        shipped.append('resogun.png')
         dlls = libs
     else:
         # The kit's own files come and go with --debug; its captures and log stay.
@@ -352,28 +277,13 @@ def main():
         (out / 'libs' / 'libs.manifest').write_bytes(LIBS_MANIFEST.format(files=files).replace('\n', '\r\n').encode())
         shipped.append('libs/libs.manifest')
 
-    prepare = out / 'prepare'
-    python = prepare / 'python'
-    for item in prepare.iterdir() if prepare.is_dir() else ():
-        if item != python:
-            shutil.rmtree(item) if item.is_dir() else item.unlink()
-    for name in PREPARE_FILES:
-        ship(PORT / name, f'prepare/{name}')
-    if a.python:
-        embeddable_python(a.python, python)
-    if python.is_dir():
-        shipped += [str(f.relative_to(out)).replace('\\', '/') for f in sorted(python.rglob('*')) if f.is_file()]
-
     (out / 'release.txt').write_bytes(f'{release}\n'.encode())
-    if LINUX:
-        (out / 'README.txt').write_bytes(LINUX_README.format(release=release).encode())
-    else:
-        (out / 'README.txt').write_bytes(README.format(release=release, python_note='' if python.is_dir() else PYTHON_NOTE,
-                                                       debug_note=DEBUG_NOTE if a.debug else '')
-                                         .replace('\n', '\r\n').encode())
+    readme = README.format(release=release, exe=EXES[0], debug_note=DEBUG_NOTE if a.debug and not LINUX else '')
+    (out / 'README.txt').write_bytes(readme.encode())
+    ship(PORT / 'settings.example.ini', 'settings.example.ini')
     ship(PORT / 'LICENSE', 'LICENSE.txt')
     ship(PORT / 'gpu/third_party/fonts/orbitron/OFL.txt', 'Orbitron-OFL.txt')
-    # RecompLauncher's profile (setup, start and settings), next to the exes as it expects.
+    # RecompLauncher's profile is installed beside the executable.
     ship(PORT / 'recomplauncher.json', 'recomplauncher.json')
     shipped += ['release.txt', 'README.txt']
     size = sum((out / name).stat().st_size for name in shipped)
@@ -382,10 +292,9 @@ def main():
         print(f'{out}: {release}{" (debug)" if a.debug else ""}, {len(dlls)} libraries, {len(shipped)} files, '
               f'{size / 2**20:.0f} MiB, needs glibc {glibc or "?"}')
     else:
-        print(f'{out}: {release}{" (debug)" if a.debug else ""}, {len(dlls)} DLLs, {len(shipped)} files, {size / 2**20:.0f} MiB'
-              + ('' if python.is_dir() else ' (no Python: the player needs Python 3.10+)'))
+        print(f'{out}: {release}{" (debug)" if a.debug else ""}, {len(dlls)} DLLs, {len(shipped)} files, {size / 2**20:.0f} MiB')
 
-    if a.zip and LINUX:
+    if (a.zip or a.appimage) and LINUX:
         # tar keeps the exec bits a zip would lose.
         archive = PORT / 'out' / f'{release}-linux{"-debug" if a.debug else ""}.tar.gz'
         with tarfile.open(archive, 'w:gz', compresslevel=9) as t:
@@ -398,6 +307,8 @@ def main():
                 for exe in EXES:
                     t.add(PORT / 'out' / exe, exe)
             print(f'{symbols}: {symbols.stat().st_size / 2**20:.0f} MiB (not for players)')
+        if a.appimage:
+            appimage(out, shipped, release, archive)
     elif a.zip:
         archive = PORT / 'out' / f'{release}{"-debug" if a.debug else ""}.zip'
         with zipfile.ZipFile(archive, 'w', zipfile.ZIP_DEFLATED, compresslevel=9) as z:

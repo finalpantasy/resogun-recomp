@@ -43,4 +43,10 @@ void isa_rewrite_report(const IsaTable *t, FILE *out);
 /* "movbe", "lzcnt", "tzcnt", "andn", "bextr", "blsi", "blsmsk", "blsr", "vcvtph2ps", "vcvtps2ph"; "?" otherwise. */
 const char *isa_kind_name(uint8_t kind);
 
+/* Shared by the native image preparer and the runtime table reader. */
+void isa_sha256(const unsigned char *data, uint64_t size, uint8_t out[32]);
+typedef struct { uint64_t address, size, flags; } PrepareSegment;
+int prepare_isa_table(const char *path, const uint8_t *image, size_t size,
+                      const PrepareSegment *segments, size_t count);
+
 #endif

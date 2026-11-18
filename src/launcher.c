@@ -1,299 +1,171 @@
-/* Double-click start (Windows Explorer, a Linux file manager or menu entry, a shortcut). A release
- * folder (tools/package.py) holds this exe, its libraries, release.txt and resogun-setup; the
- * setup adds the prepared game image in game/, the shaders/ folder (the shader cache),
- * settings.ini and paths.ini:
- *     [paths]
- *     game=<the dump: eboot.bin, sce_module, sce_sys, audio.pck, stream.dat>
- *     save=<saves and the launch log: what run.py calls --user>
- *     cache=<optional: the GPU library's logs and screenshots; by default gpu/ here>
- *     dlc=<optional: one more folder of DLC, read next to save's addcont, e.g. shadPS4's addcont>
- * paths.ini lives only here: the per-user copy setups before v0.12 also wrote (user_paths_ini) is
- * moved here when this folder has none, and deleted otherwise (adopt_user_paths).
- * When neither names the folders, or a folder it names is gone, the setup is opened (and waited for)
- * instead of the game. When game/ was not prepared for this release (release.txt) or from the dump's
- * eboot.bin as it is now (game/source.txt), `resogun-setup --update` prepares it again first; the
- * game starts only when that succeeded (for a dump other than CUSA00038 update 1.10 it asks once
- * whether to go on with untested files).
- * Narrow strings are UTF-8 (Windows: the manifest's activeCodePage). */
+/* The executable configures its own portable state before the loader starts. */
 #include "launcher.h"
-
+#include "prepare.h"
+#include <SDL3/SDL.h>
+#include <errno.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <time.h>
 #ifdef _WIN32
 #include <windows.h>
-#include <sys/stat.h>
-#define PATH_CHARS (MAX_PATH * 4)
-#define SEP "\\"
-#define SETUP "resogun-setup.exe"
-#define strcasecmp _stricmp
+#include <shobjidl.h>
+#include <direct.h>
 #else
-#include <errno.h>
 #include <signal.h>
-#include <strings.h>
-#include <unistd.h>
 #include <sys/prctl.h>
-#include <sys/stat.h>
 #include <sys/wait.h>
-#include <SDL3/SDL.h>
-#define PATH_CHARS 4096
+#include <unistd.h>
+#endif
+
+#define TITLE "Everybody's Golf"
+#define PATH_CHARS GOLF_PATH
 #define SEP "/"
-#define SETUP "resogun-setup"
+#ifndef GOLF_LAUNCHER_VERSION
+#define GOLF_LAUNCHER_VERSION "development"
 #endif
 
-#define TITLE "Resogun"
-#define RUN_SETUP "Run " SETUP " (in the game's folder) to set the game up."
-#define SETUP_FAILED -1
+static char exe_dir[PATH_CHARS], data_dir[PATH_CHARS], save[PATH_CHARS], log_path[PATH_CHARS];
+static char game[PATH_CHARS], dlc[PATH_CHARS], boot[PATH_CHARS], profile[PATH_CHARS], isa[PATH_CHARS];
+static char absolute_boot[PATH_CHARS], explicit_profile[PATH_CHARS], explicit_isa[PATH_CHARS];
+static char *runtime_args[128];
+static int unattended, show_dialog;
 
-static char exe_dir[PATH_CHARS], game[PATH_CHARS], save[PATH_CHARS], cache[PATH_CHARS], dlc[PATH_CHARS];
-static char boot[PATH_CHARS], profile[PATH_CHARS], isa[PATH_CHARS], log_path[PATH_CHARS];
-static char *args[64];
-static int unattended; /* started from Explorer, a file manager or a shortcut: nobody reads the output */
-
-static void complain(const char *message) {
+static int complain(const char *message) {
     fprintf(stderr, "ERROR: %s\n", message);
-#ifdef _WIN32
-    if (unattended) MessageBoxA(NULL, message, TITLE, MB_OK | MB_ICONERROR);
-#else
-    if (unattended) SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, TITLE, message, NULL);
-#endif
+    if (show_dialog) SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, TITLE, message, NULL);
+    return LAUNCH_ERROR;
 }
 
-#ifdef _WIN32
-static int exists(const char *path) { return GetFileAttributesA(path) != INVALID_FILE_ATTRIBUTES; }
-static int make_dir(const char *path) { return CreateDirectoryA(path, NULL) || GetLastError() == ERROR_ALREADY_EXISTS; }
-static int is_absolute(const char *path) { return (path[0] && path[1] == ':') || path[0] == '\\' || path[0] == '/'; }
-#else
-static int exists(const char *path) { struct stat st; return !stat(path, &st); }
-static int make_dir(const char *path) { return !mkdir(path, 0755) || errno == EEXIST; }
-static int is_absolute(const char *path) { return path[0] == '/'; }
-#endif
-
-static char *trim(char *s) {
-    while (*s == ' ' || *s == '\t') ++s;
-    size_t n = strlen(s);
-    while (n && strchr(" \t\r\n", s[n - 1])) s[--n] = 0;
-    if (n >= 2 && s[0] == '"' && s[n - 1] == '"') { s[n - 1] = 0; ++s; }
-    return s;
-}
-
-/* A relative value is relative to the exe's folder. */
-static void set_path(char *out, const char *value) {
-    if (is_absolute(value)) snprintf(out, PATH_CHARS, "%s", value);
-    else snprintf(out, PATH_CHARS, "%s" SEP "%s", exe_dir, value);
-}
-
-/* The GPU library's folder (its logs, screenshots and frame captures): gpu/ next to this exe, as
- * run.py's (gpu_dir). Nothing is kept outside the game's folder. */
-static void default_gpu_dir(char *out) {
-    snprintf(out, PATH_CHARS, "%s" SEP "gpu", exe_dir);
-}
-
-/* The per-user copy of paths.ini setups before v0.12 also wrote: %APPDATA%\Resogun\paths.ini, or
- * $XDG_CONFIG_HOME/resogun/paths.ini (~/.config when unset). "" when neither is known. */
-static void user_paths_ini(char *out) {
-    out[0] = 0;
-#ifdef _WIN32
-    const char *appdata = getenv("APPDATA");
-    if (appdata && appdata[0]) snprintf(out, PATH_CHARS, "%s\\Resogun\\paths.ini", appdata);
-#else
-    const char *xdg = getenv("XDG_CONFIG_HOME"), *home = getenv("HOME");
-    if (xdg && xdg[0]) snprintf(out, PATH_CHARS, "%s/resogun/paths.ini", xdg);
-    else if (home && home[0]) snprintf(out, PATH_CHARS, "%s/.config/resogun/paths.ini", home);
-#endif
-}
-
-/* Copies a small file; 1 when it was written whole. */
-static int copy_file(const char *from, const char *to) {
-    FILE *in = fopen(from, "rb"), *out = in ? fopen(to, "wb") : NULL;
-    int ok = out != NULL;
-    if (out) {
-        char buffer[16384];
-        for (size_t n; (n = fread(buffer, 1, sizeof buffer, in));)
-            ok &= fwrite(buffer, 1, n, out) == n;
-        ok &= !ferror(in);
-        ok &= !fclose(out);
-        if (!ok) remove(to);
-    }
-    if (in) fclose(in);
-    return ok;
-}
-
-/* Nothing is kept outside the exe's folder: the old per-user paths.ini becomes `ini` when there is
- * none (the same folders as before), and is deleted either way once `ini` exists, with its folder
- * when that is empty (setup/setup.cpp adopt_user_paths). */
-static void adopt_user_paths(const char *ini) {
-    char user[PATH_CHARS];
-    user_paths_ini(user);
-    if (!user[0] || !exists(user)) return;
-    if (!exists(ini) && copy_file(user, ini)) printf("Launch: moved %s here\n", user);
-    if (!exists(ini)) return; /* this folder cannot be written: keep using nothing, change nothing */
-    remove(user);
-    *strrchr(user, SEP[0]) = 0;
-#ifdef _WIN32
-    RemoveDirectoryA(user); /* fails unless empty */
-#else
-    rmdir(user);
-#endif
-}
-
-/* game=, save=, cache= and dlc= of paths.ini; 1 when game and save are there. */
-static int read_paths(const char *ini) {
-    game[0] = save[0] = cache[0] = dlc[0] = 0;
-    FILE *f = fopen(ini, "rb");
-    if (!f) return 0;
-    char line[PATH_CHARS + 64];
-    while (fgets(line, sizeof line, f)) {
-        char *key = line;
-        if (!memcmp(key, "\xEF\xBB\xBF", 3)) key += 3;
-        char *eq = strchr(key, '=');
-        key = trim(key);
-        if (!eq || *key == ';' || *key == '#' || *key == '[') continue;
-        *eq = 0;
-        key = trim(key);
-        char *value = trim(eq + 1);
-        if (!value[0]) continue;
-        if (!strcasecmp(key, "game")) set_path(game, value);
-        else if (!strcasecmp(key, "save")) set_path(save, value);
-        else if (!strcasecmp(key, "cache")) set_path(cache, value);
-        else if (!strcasecmp(key, "dlc")) set_path(dlc, value);
-    }
-    fclose(f);
-    if (!cache[0]) default_gpu_dir(cache);
-    return game[0] && save[0];
-}
-
-/* game/source.txt's stamp of the dump's eboot.bin: "<size> <mtime>" (setup/setup.cpp source_stamp
- * writes the same); "" when there is none. */
-static void source_stamp(char *out, size_t size) {
-    char eboot[PATH_CHARS];
-    snprintf(eboot, sizeof eboot, "%s" SEP "eboot.bin", game);
-    out[0] = 0;
-#ifdef _WIN32
-    struct _stat64 st;
-    if (_stat64(eboot, &st)) return;
-#else
+static int exists(const char *path) {
     struct stat st;
-    if (stat(eboot, &st)) return;
-#endif
-    snprintf(out, size, "%lld %lld", (long long)st.st_size, (long long)st.st_mtime);
+    return !stat(path, &st);
 }
-
-/* Runs the setup next to this exe (with `arg`, or none) and waits for it: its exit code, or
- * SETUP_FAILED when it cannot be started. */
-static long run_setup(const char *arg) {
-    char path[PATH_CHARS];
-    snprintf(path, sizeof path, "%s" SEP SETUP, exe_dir);
-    if (!exists(path)) return SETUP_FAILED;
-    fflush(stdout);
-    fflush(stderr);
+static int is_directory(const char *path) {
+    struct stat st;
+    return !stat(path, &st) && S_ISDIR(st.st_mode);
+}
+static int is_absolute(const char *path) {
 #ifdef _WIN32
-    char line[PATH_CHARS + 64];
-    wchar_t wide[PATH_CHARS + 64];
-    snprintf(line, sizeof line, "\"%s\"%s%s", path, arg ? " " : "", arg ? arg : "");
-    if (!MultiByteToWideChar(CP_UTF8, 0, line, -1, wide, PATH_CHARS + 64)) return SETUP_FAILED;
-    STARTUPINFOW startup = {.cb = sizeof startup};
-    PROCESS_INFORMATION child;
-    if (!CreateProcessW(NULL, wide, NULL, NULL, FALSE, 0, NULL, NULL, &startup, &child)) return SETUP_FAILED;
-    AllowSetForegroundWindow(child.dwProcessId);
-    CloseHandle(child.hThread);
-    WaitForSingleObject(child.hProcess, INFINITE);
-    DWORD code = 1;
-    GetExitCodeProcess(child.hProcess, &code);
-    CloseHandle(child.hProcess);
-    return (long)code;
+    return (path[0] && path[1] == ':' && (path[2] == '/' || path[2] == '\\')) ||
+           (path[0] == '\\' && path[1] == '\\') || (path[0] == '/' && path[1] == '/');
 #else
-    pid_t pid = fork();
-    if (pid < 0) return SETUP_FAILED;
-    if (!pid) {
-        if (arg) execl(path, path, arg, (char *)NULL);
-        else execl(path, path, (char *)NULL);
-        _exit(127);
-    }
-    int status = 0;
-    while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
-    if (!WIFEXITED(status)) return 128 + (WIFSIGNALED(status) ? WTERMSIG(status) : 0);
-    return WEXITSTATUS(status) == 127 ? SETUP_FAILED : WEXITSTATUS(status);
+    return path[0] == '/';
 #endif
 }
-
-/* The game is not set up (or a folder it names is gone): opens the setup and waits for it; the
- * player starts the game from there (Play Game) or again afterwards. Always 1: this start ends. */
-static int open_setup(const char *why) {
-    char message[3 * PATH_CHARS];
-    fprintf(stderr, "Launch: %s; opening " SETUP "\n", why);
-    if (run_setup(NULL) == SETUP_FAILED) {
-        snprintf(message, sizeof message, "%s\n\n" RUN_SETUP, why);
-        complain(message);
-    }
+static int copy_path(char out[PATH_CHARS], const char *value) {
+    size_t length = strlen(value);
+    if (length >= PATH_CHARS || strpbrk(value, "\r\n")) return 0;
+    memmove(out, value, length + 1);
+#ifdef _WIN32
+    for (char *p = out; *p; ++p) if (*p == '\\') *p = '/';
+#endif
     return 1;
 }
-
-static void first_line(const char *path, char *out, size_t size);
-
-/* 1 when game/ holds an image prepared for this release from the dump's eboot.bin as it is now. */
-static int image_current(char *current, size_t size) {
-    char release[PATH_CHARS], prepared_for[256], source[256], stamp[256];
-    snprintf(release, sizeof release, "%s" SEP "game" SEP "release.txt", exe_dir);
-    first_line(release, prepared_for, sizeof prepared_for);
-    snprintf(release, sizeof release, "%s" SEP "release.txt", exe_dir);
-    first_line(release, current, size);
-    snprintf(release, sizeof release, "%s" SEP "game" SEP "source.txt", exe_dir);
-    first_line(release, source, sizeof source);
-    source_stamp(stamp, sizeof stamp);
-    return exists(boot) && exists(profile) && prepared_for[0] && !strcmp(prepared_for, current) && stamp[0] &&
-           !strcmp(source, stamp);
+static int join_path(char out[PATH_CHARS], const char *dir, const char *leaf) {
+    char buffer[PATH_CHARS];
+    int n = snprintf(buffer, sizeof buffer, "%s%s%s", dir, dir[0] && dir[strlen(dir) - 1] != '/' ? "/" : "", leaf);
+    return n >= 0 && n < PATH_CHARS && copy_path(out, buffer);
 }
-
-/* The first line of a small text file, or "" when it is missing. */
-static void first_line(const char *path, char *out, size_t size) {
-    out[0] = 0;
-    FILE *f = fopen(path, "rb");
-    if (!f) return;
-    if (!fgets(out, (int)size, f)) out[0] = 0;
-    fclose(f);
-    char *text = trim(out);
-    memmove(out, text, strlen(text) + 1);
+static int rooted(char out[PATH_CHARS], const char *dir, const char *value) {
+    return is_absolute(value) ? copy_path(out, value) : join_path(out, dir, value);
 }
-
-/* Creates the folder and its missing parents. */
+static int from_cwd(char out[PATH_CHARS], const char *value) {
+    if (!value || !*value) return 0;
+#ifdef _WIN32
+    char buffer[PATH_CHARS];
+    DWORD n = GetFullPathNameA(value, sizeof buffer, buffer, NULL);
+    return n && n < sizeof buffer && copy_path(out, buffer);
+#else
+    if (is_absolute(value)) return copy_path(out, value);
+    char cwd[PATH_CHARS];
+    return getcwd(cwd, sizeof cwd) && join_path(out, cwd, value);
+#endif
+}
+static int new_directory(const char *path) {
+#ifdef _WIN32
+    return _mkdir(path) == 0;
+#else
+    return mkdir(path, 0755) == 0;
+#endif
+}
 static int make_dirs(const char *path) {
+    if (is_directory(path)) return 1;
     char part[PATH_CHARS];
-    snprintf(part, sizeof part, "%s", path);
-    for (char *p = part + 1; *p; ++p) {
-        if (*p != '\\' && *p != '/') continue;
-        if (p[-1] == ':') continue;
-        char c = *p;
+    if (!is_absolute(path) || !copy_path(part, path)) return 0;
+    char *start = part + 1;
+#ifdef _WIN32
+    if (part[0] == '/' && part[1] == '/') {
+        start = strchr(part + 2, '/');
+        if (start) start = strchr(start + 1, '/');
+        if (!start) return is_directory(path);
+        ++start;
+    } else start = part + 3;
+#endif
+    for (char *p = start; *p; ++p) {
+        if (*p != '/' || p == start || p[-1] == '/') continue;
         *p = 0;
-        make_dir(part);
-        *p = c;
+        int ok = new_directory(part) || is_directory(part);
+        *p = '/';
+        if (!ok) return 0;
     }
-    return make_dir(part);
+    return new_directory(part) || is_directory(part);
 }
-
-/* The folder of this exe (UTF-8, no trailing separator); 0 when it cannot be found. */
+static void remove_dir(const char *path) {
+#ifdef _WIN32
+    _rmdir(path);
+#else
+    rmdir(path);
+#endif
+}
 static int find_exe_dir(void) {
 #ifdef _WIN32
     wchar_t wide[PATH_CHARS];
+    char utf8[PATH_CHARS];
     DWORD n = GetModuleFileNameW(NULL, wide, PATH_CHARS);
-    if (!n || n == PATH_CHARS || !WideCharToMultiByte(CP_UTF8, 0, wide, -1, exe_dir, sizeof exe_dir, NULL, NULL)) return 0;
+    if (!n || n >= PATH_CHARS ||
+        !WideCharToMultiByte(CP_UTF8, 0, wide, -1, utf8, sizeof utf8, NULL, NULL) ||
+        !copy_path(exe_dir, utf8)) return 0;
 #else
     ssize_t n = readlink("/proc/self/exe", exe_dir, sizeof exe_dir - 1);
     if (n <= 0 || n == (ssize_t)sizeof exe_dir - 1) return 0;
     exe_dir[n] = 0;
 #endif
-    *strrchr(exe_dir, SEP[0]) = 0;
+    char *last = strrchr(exe_dir, '/');
+    if (!last) return 0;
+    if (last == exe_dir || (last == exe_dir + 2 && exe_dir[1] == ':')) ++last;
+    *last = 0;
     return 1;
 }
-
-static void set_env(const char *name, const char *value) {
-    if (getenv(name)) return;
+static int set_env(const char *name, const char *value) {
 #ifdef _WIN32
-    _putenv_s(name, value);
+    return !_putenv_s(name, value);
 #else
-    setenv(name, value, 0);
+    return !setenv(name, value, 1);
 #endif
+}
+
+const char *launcher_save_dir(void) { return save; }
+
+typedef struct { char chosen[PATH_CHARS]; SDL_AtomicInt done; } FolderChoice;
+static void SDLCALL folder_selected(void *data, const char *const *files, int filter) {
+    (void)filter;
+    FolderChoice *choice = data;
+    if (files && files[0]) copy_path(choice->chosen, files[0]);
+    SDL_SetAtomicInt(&choice->done, 1);
+}
+static int pick_folder(char out[PATH_CHARS]) {
+    if (!SDL_InitSubSystem(SDL_INIT_VIDEO)) return 0;
+    FolderChoice choice = {0};
+    SDL_ShowOpenFolderDialog(folder_selected, &choice, NULL, NULL, false);
+    while (!SDL_GetAtomicInt(&choice.done)) {
+        SDL_PumpEvents();
+        SDL_Delay(20);
+    }
+    SDL_QuitSubSystem(SDL_INIT_VIDEO);
+    return choice.chosen[0] && from_cwd(out, choice.chosen);
 }
 
 /* The crash watch (RESOGUN_CRASH_WATCH, on unless 0): an unattended start runs the game as a
@@ -395,17 +267,17 @@ static int watch_game(unsigned long *code) {
     JOBOBJECT_ASSOCIATE_COMPLETION_PORT link = {.CompletionKey = job, .CompletionPort = port};
     if (!SetInformationJobObject(job, JobObjectExtendedLimitInformation, &limits, sizeof limits) ||
         !SetInformationJobObject(job, JobObjectAssociateCompletionPortInformation, &link, sizeof link)) return 0;
-    _putenv_s("RESOGUN_CRASH_WATCH", "0");
+    _putenv_s("EG_LAUNCH_WATCH_CHILD", "1");
     STARTUPINFOW startup = {.cb = sizeof startup};
     PROCESS_INFORMATION child;
     wchar_t *line = _wcsdup(GetCommandLineW());
     if (!line || !CreateProcessW(NULL, line, NULL, NULL, FALSE, CREATE_SUSPENDED, NULL, NULL, &startup, &child)) {
-        _putenv_s("RESOGUN_CRASH_WATCH", "");
+        _putenv_s("EG_LAUNCH_WATCH_CHILD", "");
         return 0;
     }
     if (!AssignProcessToJobObject(job, child.hProcess)) {
         TerminateProcess(child.hProcess, 0);
-        _putenv_s("RESOGUN_CRASH_WATCH", "");
+        _putenv_s("EG_LAUNCH_WATCH_CHILD", "");
         return 0;
     }
     AllowSetForegroundWindow(child.dwProcessId);
@@ -429,9 +301,9 @@ static int watch_game(unsigned long *code) {
     return 1;
 #else
     /* The child returns to run the game and ends with this process (a restart execs in place). */
-    setenv("RESOGUN_CRASH_WATCH", "0", 1);
+    setenv("EG_LAUNCH_WATCH_CHILD", "1", 1);
     pid_t pid = fork();
-    if (pid < 0) unsetenv("RESOGUN_CRASH_WATCH");
+    if (pid < 0) unsetenv("EG_LAUNCH_WATCH_CHILD");
     if (pid <= 0) {
         if (!pid) prctl(PR_SET_PDEATHSIG, SIGTERM);
         return 0;
@@ -452,123 +324,637 @@ static int quiet_exit(unsigned long code) {
 #endif
 }
 
-int launch_from_paths_ini(int *argc, char ***argv) {
-    int console = 0;
-    for (int i = 1; i < *argc; ++i) console |= !strcmp((*argv)[i], "--console");
-#ifdef _WIN32
-    /* The exe is a GUI program (SDL's -mwindows): started from Explorer it has no console and no
-     * standard handles; run.py and shells that redirect give it theirs. */
-    HANDLE out = GetStdHandle(STD_OUTPUT_HANDLE);
-    unattended = (!out || out == INVALID_HANDLE_VALUE) && !GetConsoleWindow();
-    if (console && AllocConsole() && freopen("CONOUT$", "w", stdout) && freopen("CONOUT$", "w", stderr)) {
-        setvbuf(stdout, NULL, _IONBF, 0);
-        setvbuf(stderr, NULL, _IONBF, 0);
-    }
-#else
-    /* A file manager, menu entry or Steam gives no terminal; --console keeps the output where it is. */
-    unattended = !isatty(STDOUT_FILENO) && !isatty(STDERR_FILENO);
-#endif
-    if (!find_exe_dir()) {
-        complain("Cannot find the folder of resogun.");
-        return 1;
-    }
 
-    char ini[PATH_CHARS], message[3 * PATH_CHARS];
-    snprintf(ini, sizeof ini, "%s" SEP "paths.ini", exe_dir);
-    adopt_user_paths(ini);
-    if (!read_paths(ini)) return open_setup("The game is not set up yet.");
-    /* RESOGUN_SAVE_DIR overrides save= (a relative one is relative to the exe's folder). */
-    const char *save_override = getenv("RESOGUN_SAVE_DIR");
-    if (save_override && save_override[0]) set_path(save, save_override);
-    /* RESOGUN_DLC_DIR overrides dlc= the same way. */
-    const char *dlc_override = getenv("RESOGUN_DLC_DIR");
-    if (dlc_override && dlc_override[0]) set_path(dlc, dlc_override);
-    snprintf(boot, sizeof boot, "%s" SEP "game" SEP "boot-linked.bin", exe_dir);
-    snprintf(profile, sizeof profile, "%s" SEP "game" SEP "content.bin", exe_dir);
-    snprintf(isa, sizeof isa, "%s" SEP "game" SEP "isa-rewrite.bin", exe_dir);
-    /* The folders paths.ini names must be there; else the setup is opened to choose them again. */
-    char eboot[PATH_CHARS];
-    snprintf(eboot, sizeof eboot, "%s" SEP "eboot.bin", game);
-    if (!exists(eboot)) {
-        snprintf(message, sizeof message, "The game folder is gone or has no eboot.bin: %s", game);
-        return open_setup(message);
+typedef struct { const char *flag, *suffix; int path; } Setting;
+static const Setting settings[] = {
+    {"--amd-paths-off", "AMD_PATHS_OFF", 0},
+    {"--aspect-ratio", "ASPECT_RATIO", 0},
+    {"--async-fences", "ASYNC_FENCES", 0},
+    {"--audio-channels", "AUDIO_CHANNELS", 0},
+    {"--audio-dump", "AUDIO_DUMP", 1},
+    {"--audio-stats", "AUDIO_STATS", 0},
+    {"--audio", "AUDIO", 0},
+    {"--background-warmup", "BACKGROUND_WARMUP", 0},
+    {"--buffer-stats", "BUFFER_STATS", 0},
+    {"--capture-dir", "CAPTURE_DIR", 1},
+    {"--capture-trigger", "CAPTURE_TRIGGER", 1},
+    {"--config-default", "CONFIG_DEFAULT", 1},
+    {"--config", "CONFIG", 1},
+    {"--copy-gpu-buffers", "COPY_GPU_BUFFERS", 0},
+    {"--copy-merge-kb", "COPY_MERGE_KB", 0},
+    {"--copy-threads", "COPY_THREADS", 0},
+    {"--cpu-check", "CPU_CHECK", 0},
+    {"--crash-watch", "CRASH_WATCH", 0},
+    {"--deferred-readback", "DEFERRED_READBACK", 0},
+    {"--diag-dir", "DIAG_DIR", 1},
+    {"--diag-images", "DIAG_IMAGES", 0},
+    {"--direct-memory-access", "DIRECT_MEMORY_ACCESS", 0},
+    {"--disk-shaders", "DISK_SHADERS", 0},
+    {"--display-mode", "DISPLAY_MODE", 0},
+    {"--dmem-mb", "DMEM_MB", 0},
+    {"--draw-pipe", "DRAW_PIPE", 0},
+    {"--dump-dir", "DUMP_DIR", 1},
+    {"--dump-shaders", "DUMP_SHADERS", 0},
+    {"--fail-guest-memory", "FAIL_GUEST_MEMORY", 0},
+    {"--fault-window", "FAULT_WINDOW", 0},
+    {"--file-trace", "FILE_TRACE", 0},
+    {"--frame-dump-trigger", "FRAME_DUMP_TRIGGER", 1},
+    {"--frame-rate", "FRAME_RATE", 0},
+    {"--frame-stats", "FRAME_STATS", 0},
+    {"--full-barriers", "FULL_BARRIERS", 0},
+    {"--gc-budget-mb", "GC_BUDGET_MB", 0},
+    {"--gpu-id", "GPU_ID", 0},
+    {"--gpu-log", "GPU_LOG", 0},
+    {"--gpu-profile", "GPU_PROFILE", 0},
+    {"--gpu-dir", "GPU_USER_DIR", 1},
+    {"--guest-commit-on-map", "GUEST_COMMIT_ON_MAP", 0},
+    {"--hang-dump", "HANG_DUMP", 0},
+    {"--hdr", "HDR", 0},
+    {"--hot-pages", "HOT_PAGES", 0},
+    {"--ime-text", "IME_TEXT", 0},
+    {"--internal-height", "INTERNAL_HEIGHT", 0},
+    {"--internal-width", "INTERNAL_WIDTH", 0},
+    {"--interp-int-fix", "INTERP_INT_FIX", 0},
+    {"--isa-rewrite-mode", "ISA_REWRITE", 0},
+    {"--language", "LANGUAGE", 0},
+    {"--low-handles", "LOW_HANDLES", 0},
+    {"--monitor", "MONITOR", 0},
+    {"--no-msaa", "NO_MSAA", 0},
+    {"--null-gpu", "NULL_GPU", 0},
+    {"--resolution", "OUTPUT_RESOLUTION", 0},
+    {"--pad-file", "PAD_FILE", 1},
+    {"--pad-record", "PAD_RECORD", 1},
+    {"--pad-replay", "PAD_REPLAY", 1},
+    {"--parallel-warmup", "PARALLEL_WARMUP", 0},
+    {"--partial-height-views", "PARTIAL_HEIGHT_VIEWS", 0},
+    {"--perf-diag", "PERF_DIAG", 0},
+    {"--pipe-spin-us", "PIPE_SPIN_US", 0},
+    {"--pipe-verify", "PIPE_VERIFY", 0},
+    {"--pipeline-binaries", "PIPELINE_BINARIES", 0},
+    {"--pipeline-binary-isolated", "PIPELINE_BINARY_ISOLATED", 0},
+    {"--pipeline-cache", "PIPELINE_CACHE", 0},
+    {"--pipeline-capture-only", "PIPELINE_CAPTURE_ONLY", 0},
+    {"--prep-workers", "PREP_WORKERS", 0},
+    {"--present-thread", "PRESENT_THREAD", 0},
+    {"--readback-linear", "READBACK_LINEAR", 0},
+    {"--readbacks", "READBACKS", 0},
+    {"--reload-trigger", "RELOAD_TRIGGER", 1},
+    {"--render-resolution", "RENDER_RESOLUTION", 0},
+    {"--rwlock-front", "RWLOCK_FRONT", 0},
+    {"--save-trace", "SAVE_TRACE", 0},
+    {"--sema-front", "SEMA_FRONT", 0},
+    {"--shader-dir", "SHADER_DIR", 1},
+    {"--shader-notes", "SHADER_NOTES", 0},
+    {"--shader-prefetch", "SHADER_PREFETCH", 0},
+    {"--sharpening", "SHARPENING", 0},
+    {"--skip-intro", "SKIP_INTRO", 0},
+    {"--slow-waits", "SLOW_WAITS", 0},
+    {"--square-pass", "SQUARE_PASS", 0},
+    {"--staging-keep-mb", "STAGING_KEEP_MB", 0},
+    {"--stale-readback", "STALE_READBACK", 0},
+    {"--stall-ms", "STALL_MS", 0},
+    {"--stream-memory", "STREAM_MEMORY", 0},
+    {"--strict-handles", "STRICT_HANDLES", 0},
+    {"--target-sizes", "TARGET_SIZES", 0},
+    {"--tearing", "TEARING", 0},
+    {"--test-refuse-dmem", "TEST_REFUSE_DMEM", 0},
+    {"--texture-helper", "TEXTURE_HELPER", 0},
+    {"--thread-front", "THREAD_FRONT", 0},
+    {"--throw-trace", "THROW_TRACE", 0},
+    {"--title-back-exits", "TITLE_BACK_EXITS", 0},
+    {"--toggle-file", "TOGGLE_FILE", 1},
+    {"--uffd", "UFFD", 0},
+    {"--ui-language", "UI_LANGUAGE", 0},
+    {"--vblank-hz", "VBLANK_HZ", 0},
+    {"--vblank-timer", "VBLANK_TIMER", 0},
+    {"--verbose", "VERBOSE", 0},
+    {"--vk-markers", "VK_MARKERS", 0},
+    {"--vk-record-thread", "VK_RECORD_THREAD", 0},
+    {"--vk-validation-sync", "VK_VALIDATION_SYNC", 0},
+    {"--vk-validation", "VK_VALIDATION", 0},
+    {"--vsync", "VSYNC", 0},
+    {"--wave-stats", "WAVE_STATS", 0},
+    {"--window-icon", "WINDOW_ICON", 1},
+    {"--window", "WINDOW", 0},
+    {"--work-retired", "WORK_RETIRED", 0},
+};
+
+typedef struct {
+    const char *game, *dlc, *data, *save, *log, *prepared, *shortcut;
+    const char *boot, *profile, *isa, *timeout;
+    int prepare_only, reprepare, any_build, console, no_dlc;
+    int forward_count, mount_count;
+    char *forward[106], mount[24][PATH_CHARS + 128];
+} Options;
+
+static const char *env_option(const char *suffix) {
+    char name[128];
+    snprintf(name, sizeof name, "EG_%s", suffix);
+    const char *value = getenv(name);
+    if (value && *value) return value;
+    snprintf(name, sizeof name, "RESOGUN_%s", suffix);
+    value = getenv(name);
+    return value && *value ? value : NULL;
+}
+
+static int env_set(const char *suffix, const char *value) {
+    char name[128];
+    snprintf(name, sizeof name, "RESOGUN_%s", suffix);
+    return set_env(name, value);
+}
+
+static void usage(void) {
+    printf(TITLE " %s\n"
+           "  everybodys-golf [OPTIONS]\n"
+           "  everybodys-golf --game DIR --prepare-only\n"
+           "  everybodys-golf BOOT --app0 DIR --content-profile FILE [LOADER OPTIONS]\n\n"
+           "  --game DIR           Merged, decrypted PS4 dump (CUSA04687 update 1.17)\n"
+           "  --data-dir DIR       Portable state root (default: executable directory)\n"
+           "  --dlc DIR            Extra directory of extracted add-on folders\n"
+           "  --no-dlc             Ignore the extra add-on directory\n"
+           "  --save DIR           Save location (default: DATA/save)\n"
+           "  --config FILE        Settings file (default: SAVE/settings.ini)\n"
+           "  --log FILE           Append launcher and runtime output here\n"
+           "  --prepare-only      Prepare or validate the cached image and exit\n"
+           "  --reprepare         Regenerate the cached image\n"
+           "  --prepared DIR      Use an existing preparation directory explicitly\n"
+           "  --any-build         Permit an unpinned EBOOT and SFO\n"
+           "  --fullscreen | --windowed | --borderless\n"
+           "  --resolution WxH    Window size, for example 1920x1080\n"
+           "  --monitor N         Output monitor index\n"
+           "  --skip-intro | --play-intro\n"
+           "  --timeout SECONDS   Runtime watchdog (default: 0, disabled)\n"
+           "  --console           Keep console output when started graphically\n"
+           "  --no-crash-watch    Disable the crash watcher\n"
+           "  --shortcut DIR      Write a launcher shortcut to the specified directory and exit\n"
+           "  --help | -h | --version\n\n"
+           "  Loader options: --cpu-only --strict-imports --check-imports --app0 DIR\n"
+           "                  --user DIR --content-profile FILE --isa-rewrite FILE\n"
+           "                  --mount GUEST=HOST --guest-arg ARG\n"
+           "  Standalone diagnostics: --cpu-features --gamepad --vulkan-only\n\n"
+           "Runtime settings (CLI overrides EG_*, legacy RESOGUN_* and settings.ini)\n", GOLF_LAUNCHER_VERSION);
+    for (size_t i = 0; i < sizeof settings / sizeof *settings; ++i)
+        printf("  %-28s %-5s EG_%s\n", settings[i].flag, settings[i].path ? "PATH" : "VALUE", settings[i].suffix);
+}
+
+static int option_error(const char *option, const char *why) {
+    fprintf(stderr, "ERROR: %s: %s. See --help.\n", option, why);
+    return LAUNCH_ERROR;
+}
+
+static int number(const char *value, unsigned long maximum) {
+    if (!*value || strspn(value, "0123456789") != strlen(value)) return 0;
+    errno = 0;
+    return strtoul(value, NULL, 10) <= maximum && !errno;
+}
+
+static int forward(Options *o, char *argument) {
+    if (o->forward_count >= (int)(sizeof o->forward / sizeof *o->forward) - 1) return 0;
+    o->forward[o->forward_count++] = argument;
+    return 1;
+}
+
+/* Writable path settings are converted to absolute paths before any runtime code reads them. */
+static int import_env(char *out, const char *root, const char *fallback, const char *value) {
+    return value && *value ? rooted(out, root, value) : join_path(out, root, fallback);
+}
+
+static int parse(Options *o, int argc, char **argv) {
+    for (size_t i = 0; i < sizeof settings / sizeof *settings; ++i) {
+        const char *suffix = settings[i].suffix, *value = env_option(suffix);
+        if (value && !env_set(suffix, value)) return option_error(settings[i].flag, "invalid environment value");
     }
-    if (dlc[0] && !exists(dlc)) {
-        snprintf(message, sizeof message, "The DLC folder is gone: %s", dlc);
-        return open_setup(message);
-    }
-    if (!make_dirs(save)) {
-        snprintf(message, sizeof message, "Cannot create the save folder: %s", save);
-        return open_setup(message);
-    }
-    /* The image is built by this release's scripts for this exe from the dump's eboot.bin: after a
-     * new release is unpacked over an old one (or the dump changed), the setup prepares it again, and
-     * only then does the game start. The setup tells the player why when it cannot. */
-    char current[256];
-    if (!image_current(current, sizeof current)) {
-        printf("Launch: game/ is not prepared for %s from this dump; running " SETUP " --update\n", current);
-        long code = run_setup("--update");
-        if (code == SETUP_FAILED) {
-            complain("This version of the game is not set up yet.\n\n" RUN_SETUP);
-            return 1;
+    int start = 1;
+    if (argc > 1 && argv[1][0] != '-') { o->boot = argv[1]; ++start; }
+    for (int i = start; i < argc; ++i) {
+        char *flag = argv[i];
+        if (!strcmp(flag, "--help") || !strcmp(flag, "-h")) { usage(); return LAUNCH_DONE; }
+        if (!strcmp(flag, "--version")) { printf(TITLE " %s\n", GOLF_LAUNCHER_VERSION); return LAUNCH_DONE; }
+        if (!strcmp(flag, "--console")) { o->console = 1; continue; }
+        if (!strcmp(flag, "--prepare-only")) { o->prepare_only = 1; continue; }
+        if (!strcmp(flag, "--reprepare")) { o->reprepare = 1; continue; }
+        if (!strcmp(flag, "--any-build")) { o->any_build = 1; continue; }
+        if (!strcmp(flag, "--no-dlc")) { o->dlc = NULL; o->no_dlc = 1; continue; }
+        if (!strcmp(flag, "--no-crash-watch")) { if (!env_set("CRASH_WATCH", "0")) return LAUNCH_ERROR; continue; }
+        if (!strcmp(flag, "--fullscreen") || !strcmp(flag, "--windowed") || !strcmp(flag, "--borderless")) {
+            if (!env_set("DISPLAY_MODE", flag + 2)) return LAUNCH_ERROR;
+            continue;
         }
-        if (code || !image_current(current, sizeof current)) return 1;
+        if (!strcmp(flag, "--play-intro") || (!strcmp(flag, "--skip-intro") &&
+            (i + 1 == argc || (strcmp(argv[i + 1], "0") && strcmp(argv[i + 1], "1"))))) {
+            if (!env_set("SKIP_INTRO", !strcmp(flag, "--play-intro") ? "0" : "1")) return LAUNCH_ERROR;
+            continue;
+        }
+        if (!strcmp(flag, "--verbose") && (i + 1 == argc ||
+            (strcmp(argv[i + 1], "0") && strcmp(argv[i + 1], "1")))) {
+            if (!env_set("VERBOSE", "1")) return LAUNCH_ERROR;
+            continue;
+        }
+        if (!strcmp(flag, "--cpu-only") || !strcmp(flag, "--strict-imports") || !strcmp(flag, "--check-imports")) {
+            if (!forward(o, flag)) return option_error(flag, "too many loader options");
+            continue;
+        }
+        if (!strcmp(flag, "--mount") || !strcmp(flag, "--guest-arg")) {
+            if (++i >= argc) return option_error(flag, "missing argument");
+            char *value = argv[i];
+            if (!strcmp(flag, "--mount")) {
+                const char *eq = strchr(value, '=');
+                char host[PATH_CHARS];
+                if (o->mount_count == 24 || !eq || eq - value < 1 || eq - value >= 128 || !from_cwd(host, eq + 1))
+                    return option_error(flag, "expected GUEST=HOST (at most 24 mounts)");
+                char *spec = o->mount[o->mount_count++];
+                snprintf(spec, PATH_CHARS + 128, "%.*s=%s", (int)(eq - value), value, host);
+                value = spec;
+            }
+            if (!forward(o, flag) || !forward(o, value)) return option_error(flag, "too many loader options");
+            continue;
+        }
+        const char **target = NULL;
+        if (!strcmp(flag, "--game") || !strcmp(flag, "--game-dir") || !strcmp(flag, "--app0")) target = &o->game;
+        else if (!strcmp(flag, "--save") || !strcmp(flag, "--save-dir") ||
+                 !strcmp(flag, "--user-dir") || !strcmp(flag, "--user")) target = &o->save;
+        else if (!strcmp(flag, "--dlc") || !strcmp(flag, "--dlc-dir")) { target = &o->dlc; o->no_dlc = 0; }
+        else if (!strcmp(flag, "--data-dir")) target = &o->data;
+        else if (!strcmp(flag, "--prepared")) target = &o->prepared;
+        else if (!strcmp(flag, "--shortcut")) target = &o->shortcut;
+        else if (!strcmp(flag, "--content-profile")) target = &o->profile;
+        else if (!strcmp(flag, "--isa-rewrite")) target = &o->isa;
+        else if (!strcmp(flag, "--timeout")) target = &o->timeout;
+        else if (!strcmp(flag, "--log")) target = &o->log;
+        if (target) {
+            if (++i >= argc || !argv[i][0] || !strncmp(argv[i], "--", 2)) return option_error(flag, "missing argument");
+            *target = argv[i];
+            if (target == &o->timeout && !number(*target, UINT_MAX)) return option_error(flag, "expected whole seconds");
+            continue;
+        }
+        size_t n = 0;
+        while (n < sizeof settings / sizeof *settings && strcmp(flag, settings[n].flag)) ++n;
+        if (n == sizeof settings / sizeof *settings) return option_error(flag, "unknown option");
+        if (++i >= argc || !argv[i][0] || !strncmp(argv[i], "--", 2)) return option_error(flag, "missing argument");
+        const char *value = argv[i];
+        char absolute[PATH_CHARS];
+        if (settings[n].path) {
+            if (!from_cwd(absolute, value)) return option_error(flag, "invalid path");
+            value = absolute;
+        }
+        if (!env_set(settings[n].suffix, value)) return option_error(flag, "invalid value");
+    }
+    return LAUNCH_RUN;
+}
+
+typedef struct { char game[PATH_CHARS], dlc[PATH_CHARS], image[64], key[GOLF_SOURCE_KEY]; } Saved;
+
+static void read_paths(const char *ini, Saved *saved) {
+    FILE *f = fopen(ini, "rb");
+    if (!f) return;
+    char line[PATH_CHARS + 16];
+    while (fgets(line, sizeof line, f)) {
+        line[strcspn(line, "\r\n")] = 0;
+        const char *start = !strncmp(line, "\xef\xbb\xbf", 3) ? line + 3 : line;
+        if (!strncmp(start, "game=", 5)) copy_path(saved->game, start + 5);
+        else if (!strncmp(start, "dlc=", 4)) copy_path(saved->dlc, start + 4);
+        else if (!strncmp(start, "image=image-", 12) && strlen(start + 6) < sizeof saved->image &&
+                 start[12] && strspn(start + 12, "0123456789-") == strlen(start + 12))
+            strcpy(saved->image, start + 6);
+        else if (!strncmp(start, "key=", 4) && strlen(start + 4) == GOLF_SOURCE_KEY - 1)
+            strcpy(saved->key, start + 4);
+    }
+    fclose(f);
+}
+
+static const char *relative_to_root(const char *path) {
+    size_t n = strlen(data_dir);
+    if (!strncmp(path, data_dir, n)) {
+        if (n && data_dir[n - 1] == '/') return path + n;
+        if (path[n] == '/') return path + n + 1;
+    }
+    return path;
+}
+static unsigned long process_id(void) {
+#ifdef _WIN32
+    return (unsigned long)GetCurrentProcessId();
+#else
+    return (unsigned long)getpid();
+#endif
+}
+static int write_paths(const char *ini, const char *image_name, const char *key) {
+    char tmp[PATH_CHARS];
+    int n = snprintf(tmp, sizeof tmp, "%s.%lu.tmp", ini, process_id());
+    if (n < 0 || n >= PATH_CHARS) return 0;
+    FILE *f = fopen(tmp, "wb");
+    if (!f) return 0;
+    int ok = fprintf(f, "[paths]\ngame=%s\ndlc=%s\nimage=%s\nkey=%s\n",
+                     relative_to_root(game), relative_to_root(dlc), image_name, key) >= 0;
+    if (fclose(f)) ok = 0;
+#ifdef _WIN32
+    if (ok) ok = MoveFileExA(tmp, ini, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0;
+#else
+    if (ok) ok = rename(tmp, ini) == 0;
+#endif
+    if (!ok) remove(tmp);
+    return ok;
+}
+
+static int magic(const char *path, const char *expected, size_t length, long minimum) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return 0;
+    char header[8];
+    int ok = fread(header, 1, sizeof header, f) == sizeof header &&
+             !memcmp(header, expected, length) && !fseek(f, 0, SEEK_END) && ftell(f) >= minimum;
+    fclose(f);
+    return ok;
+}
+static int image_paths(const char *dir, int need_isa) {
+    return join_path(boot, dir, "boot-linked.bin") && magic(boot, "RGIMAGE7", 8, 128) &&
+           join_path(profile, dir, "content.bin") && magic(profile, "RGCONT01", 8, 28) &&
+           join_path(isa, dir, "isa-rewrite.bin") && (!need_isa || magic(isa, "RGISA1", 6, 64));
+}
+static void discard_image(const char *dir) {
+    const char *files[] = {"boot-linked.bin", "content.bin", "isa-rewrite.bin"};
+    char path[PATH_CHARS];
+    for (size_t i = 0; i < sizeof files / sizeof *files; ++i)
+        if (join_path(path, dir, files[i])) remove(path);
+    remove_dir(dir);
+}
+
+static int prepare_launch(const Options *o, const Saved *saved, const char *ini) {
+    if (o->prepared) {
+        char path[PATH_CHARS];
+        if (!from_cwd(path, o->prepared) || !image_paths(path, 0)) return complain("Invalid --prepared directory");
+        printf("Using prepared image: %s\n", path);
+        return LAUNCH_RUN;
+    }
+    char key[GOLF_SOURCE_KEY], folder[PATH_CHARS], image[PATH_CHARS], name[64];
+    if (prepare_source_key(game, key, o->any_build)) return complain("Unable to read the decrypted game dump");
+    if (!join_path(folder, data_dir, "game") || !make_dirs(folder)) return complain("Cannot create the image cache");
+    if (!o->reprepare && !strcmp(saved->key, key) && saved->image[0] &&
+        join_path(image, folder, saved->image) && image_paths(image, 1)) {
+        if ((o->game || o->dlc || o->no_dlc) && !write_paths(ini, saved->image, key))
+            return complain("Cannot save paths.ini");
+        printf("Using prepared image: %s\n", image);
+        return LAUNCH_RUN;
     }
 
-    if (unattended && !console) {
+    /* Keep each successful generation immutable. Another launcher may already be reading it. */
+    int created = 0;
+    for (unsigned i = 0; i < 100; ++i) {
+        snprintf(name, sizeof name, "image-%lu-%u", process_id(), i);
+        if (!join_path(image, folder, name)) return complain("Image cache path is too long");
+        if (new_directory(image)) { created = 1; break; }
+        if (!exists(image)) break;
+    }
+    if (!created) return complain("Cannot create a preparation directory");
+    if (prepare_image(game, image, key, o->any_build) || !image_paths(image, 1)) {
+        discard_image(image);
+        return complain("Could not prepare the game image");
+    }
+    if (!write_paths(ini, name, key)) {
+        discard_image(image);
+        return complain("Cannot save paths.ini");
+    }
+    printf("Prepared image: %s\n", image);
+    return LAUNCH_RUN;
+}
+
+static int setup_paths(const Options *o, int have_console) {
+    char config[PATH_CHARS], defaults[PATH_CHARS], gpu[PATH_CHARS], shader[PATH_CHARS];
+    const char *fallback = getenv("RESOGUN_CONFIG_DEFAULT");
+    if (!fallback || !*fallback) {
+        if (!join_path(defaults, data_dir, "settings.ini")) return LAUNCH_ERROR;
+        if (exists(defaults)) fallback = defaults;
+    }
+    const char *save_override = env_option("SAVE_DIR");
+    if (!save_override || !*save_override) save_override = env_option("USER_DIR");
+    const char *value = o->save ? o->save : save_override;
+    if (!(o->save ? from_cwd(save, value) : import_env(save, data_dir, "save", value)) || !make_dirs(save) ||
+        !import_env(config, save, "settings.ini", getenv("RESOGUN_CONFIG")) ||
+        !import_env(defaults, exe_dir, "settings.example.ini", fallback) ||
+        !import_env(gpu, data_dir, "gpu", getenv("RESOGUN_GPU_USER_DIR")) || !make_dirs(gpu) ||
+        !import_env(shader, data_dir, "shaders", getenv("RESOGUN_SHADER_DIR")) || !make_dirs(shader))
+        return complain("Cannot configure portable save, config or cache paths");
+    if (!env_set("CONFIG", config) || !env_set("CONFIG_DEFAULT", defaults) ||
+        !env_set("GPU_USER_DIR", gpu) || !env_set("SHADER_DIR", shader) ||
+        !env_set("GPU_ADOPT_SHARED", "0") || !env_set("USER_DIR", save))
+        return complain("Cannot set the portable runtime environment");
+
+    for (size_t i = 0; i < sizeof settings / sizeof *settings; ++i) {
+        if (!settings[i].path) continue;
+        const char *setting = settings[i].suffix;
+        char name[128], path[PATH_CHARS];
+        snprintf(name, sizeof name, "RESOGUN_%s", setting);
+        const char *path_value = getenv(name);
+        if (path_value && *path_value &&
+            (!rooted(path, data_dir, path_value) || !env_set(setting, path)))
+            return complain("Invalid environment path");
+    }
+#ifndef _WIN32
+    /* Keep library fallbacks and driver caches inside the portable root. */
+    char host_cache[PATH_CHARS], host_config[PATH_CHARS], host_data[PATH_CHARS];
+    if (!join_path(host_cache, data_dir, "cache") || !set_env("XDG_CACHE_HOME", host_cache) ||
+        !join_path(host_config, data_dir, "config") || !set_env("XDG_CONFIG_HOME", host_config) ||
+        !join_path(host_data, data_dir, "gpu") || !set_env("XDG_DATA_HOME", host_data) ||
+        !set_env("MESA_SHADER_CACHE_DIR", shader) || !set_env("__GL_SHADER_DISK_CACHE_PATH", shader) ||
+        !set_env("__GL_SHADER_DISK_CACHE_SKIP_CLEANUP", "1")) return complain("Cannot set driver cache paths");
+#endif
+
+    if (!o->log && unattended && !have_console) {
         char log_dir[PATH_CHARS];
-        snprintf(log_dir, sizeof log_dir, "%s" SEP "log", save);
-        snprintf(log_path, sizeof log_path, "%s" SEP "resogun.log", log_dir);
+        if (!join_path(log_dir, data_dir, "log") ||
+            !join_path(log_path, log_dir, "everybodys-golf.log")) return complain("Log path is too long");
+        if (!make_dirs(log_dir)) return complain("Cannot create the log directory");
         const char *watch = getenv("RESOGUN_CRASH_WATCH");
         unsigned long code = 0;
-        if ((!watch || strcmp(watch, "0")) && watch_game(&code)) {
+        if (unattended && !have_console && !o->boot && !o->prepare_only && !getenv("EG_LAUNCH_WATCH_CHILD") &&
+            (!watch || strcmp(watch, "0")) && watch_game(&code)) {
             if (!quiet_exit(code)) report_crash(log_dir, code);
             exit((int)code);
         }
-        FILE *log = make_dirs(log_dir) ? fopen(log_path, "w") : NULL;
-        if (log) {
-            fclose(log);
-            /* Append mode for both, so their lines interleave instead of overwriting each other. */
-            if (freopen(log_path, "a", stdout) && freopen(log_path, "a", stderr)) {
-                setvbuf(stdout, NULL, _IONBF, 0);
-                setvbuf(stderr, NULL, _IONBF, 0);
-            }
+        FILE *log = fopen(log_path, "w");
+        if (!log || fclose(log)) return complain("Cannot open the runtime log");
+        if (!freopen(log_path, "a", stdout) || !freopen(log_path, "a", stderr)) return complain("Cannot redirect the runtime log");
+        setvbuf(stdout, NULL, _IONBF, 0);
+        setvbuf(stderr, NULL, _IONBF, 0);
+    }
+    return LAUNCH_RUN;
+}
+
+static int explicit_log(const char *value) {
+    char dir[PATH_CHARS];
+    if (!from_cwd(log_path, value) || !copy_path(dir, log_path)) return complain("Invalid log path");
+    char *end = strrchr(dir, '/');
+    if (!end) return complain("Invalid log directory");
+    if (end == dir || (end == dir + 2 && dir[1] == ':')) ++end;
+    *end = 0;
+    if (!make_dirs(dir)) return complain("Cannot create the log directory");
+    FILE *test = fopen(log_path, "a");
+    if (!test || fclose(test)) return complain("Cannot open the runtime log");
+    if (!freopen(log_path, "a", stdout) || !freopen(log_path, "a", stderr))
+        return complain("Cannot redirect the runtime log");
+    setvbuf(stdout, NULL, _IONBF, 0);
+    setvbuf(stderr, NULL, _IONBF, 0);
+    return LAUNCH_RUN;
+}
+
+static int shortcut(const char *destination);
+static int has_console(int requested) {
+#ifdef _WIN32
+    HANDLE out = GetStdHandle(STD_OUTPUT_HANDLE);
+    unattended = (!out || out == INVALID_HANDLE_VALUE) && !GetConsoleWindow();
+    if (unattended && (requested ? AllocConsole() : AttachConsole(ATTACH_PARENT_PROCESS))) {
+        if (freopen("CONOUT$", "w", stdout) && freopen("CONOUT$", "w", stderr)) {
+            setvbuf(stdout, NULL, _IONBF, 0);
+            setvbuf(stderr, NULL, _IONBF, 0);
+            unattended = 0;
         }
     }
-
-    /* settings.ini: the save folder's, so the options move with the saves (the in-game pages write
-     * there); until it has one, the one the setup wrote next to the exe is read. */
-    char config[PATH_CHARS], config_default[PATH_CHARS];
-    snprintf(config, sizeof config, "%s" SEP "settings.ini", save);
-    snprintf(config_default, sizeof config_default, "%s" SEP "settings.ini", exe_dir);
-    set_env("RESOGUN_CONFIG", config);
-    set_env("RESOGUN_CONFIG_DEFAULT", config_default);
-    /* Before anything asks the GPU library for its folders (shadps4 common/path_util.cpp). */
-    set_env("RESOGUN_GPU_USER_DIR", cache);
-    /* Releases before v0.12 kept it in one folder per PC (%LOCALAPPDATA%\Resogun, ~/.cache/resogun):
-     * the GPU library moves its screenshots and caches here once (path_util.cpp MoveOldSharedFolder). */
-    set_env("RESOGUN_GPU_ADOPT_SHARED", "1");
-    /* The shader cache: shaders/ next to this exe (the GPU library moves an older one in). */
-    char shaders[PATH_CHARS];
-    snprintf(shaders, sizeof shaders, "%s" SEP "shaders", exe_dir);
-    make_dirs(shaders);
-    set_env("RESOGUN_SHADER_DIR", shaders);
-
-    int count = 0;
-    args[count++] = (*argv)[0];
-    args[count++] = boot;
-    args[count++] = "--content-profile"; args[count++] = profile;
-    args[count++] = "--app0"; args[count++] = game;
-    args[count++] = "--user"; args[count++] = save;
-    if (dlc[0]) { args[count++] = "--dlc"; args[count++] = dlc; }
-    args[count++] = "--timeout"; args[count++] = "0";
-    if (exists(isa)) { args[count++] = "--isa-rewrite"; args[count++] = isa; }
-    for (int i = 1; i < *argc && count < (int)(sizeof args / sizeof *args) - 1; ++i)
-        if (strcmp((*argv)[i], "--console")) args[count++] = (*argv)[i];
-    args[count] = NULL;
-    printf("Launch: %s (%s)\nLaunch: game %s\nLaunch: save %s\nLaunch: cache %s\n", ini, current, game, save, cache);
-    if (dlc[0]) printf("Launch: dlc %s\n", dlc);
-    *argc = count;
-    *argv = args;
-    return 0;
+#else
+    unattended = !isatty(STDOUT_FILENO) && !isatty(STDERR_FILENO);
+#endif
+    return requested;
 }
+
+int launcher_start(int *argc, char ***argv) {
+    static Options o;
+    int console = 0;
+    for (int i = 1; i < *argc; ++i) console |= !strcmp((*argv)[i], "--console");
+    console = has_console(console);
+    show_dialog = unattended && *argc == 1;
+    int status = parse(&o, *argc, *argv);
+    if (status != LAUNCH_RUN) return status;
+    if ((o.boot && (o.reprepare || o.prepare_only || o.prepared)) || (o.prepared && o.reprepare))
+        return option_error("image", "choose a prepared image or native preparation");
+
+    if (!find_exe_dir()) return complain("Cannot locate the executable directory");
+    const char *data = o.data ? o.data : env_option("DATA_DIR");
+    if (!(data ? from_cwd(data_dir, data) : copy_path(data_dir, exe_dir)))
+        return option_error("--data-dir", "invalid path");
+#ifdef _WIN32
+    /* Libraries that honor AppData can use a process-local portable location. */
+    char local[PATH_CHARS], roaming[PATH_CHARS];
+    if (!join_path(local, data_dir, "host/local") || !join_path(roaming, data_dir, "host/roaming") ||
+        !set_env("LOCALAPPDATA", local) || !set_env("APPDATA", roaming))
+        return complain("Cannot configure portable Windows cache paths");
+#endif
+    if (o.log && explicit_log(o.log) != LAUNCH_RUN) return LAUNCH_ERROR;
+    if (o.shortcut) return shortcut(o.shortcut);
+
+    char ini[PATH_CHARS];
+    if (!join_path(ini, data_dir, "paths.ini")) return complain("Portable path is too long");
+    Saved saved = {0};
+    if (!o.boot) read_paths(ini, &saved);
+    const char *dump = env_option("GAME_DIR");
+    if (o.game) {
+        if (!from_cwd(game, o.game)) return option_error("--game", "invalid path");
+    } else if (dump || saved.game[0]) {
+        if (!rooted(game, data_dir, dump ? dump : saved.game)) return complain("Invalid game directory");
+    } else if (!o.boot) {
+        char eboot[PATH_CHARS];
+        if (!join_path(game, data_dir, "dump") || !join_path(eboot, game, "eboot.bin")) return LAUNCH_ERROR;
+        if (!exists(eboot) && !(*argc == 1 && unattended && pick_folder(game)))
+            return complain("Select a merged, decrypted game dump with --game DIR");
+    }
+
+    if (game[0] && !is_directory(game)) {
+        char *leaf = strrchr(game, '/');
+        if (!leaf || strcmp(leaf + 1, "eboot.bin") || !exists(game)) return complain("Game directory is missing");
+        if (leaf == game || (leaf == game + 2 && game[1] == ':')) ++leaf;
+        *leaf = 0;
+    }
+    const char *dlc_env = env_option("DLC_DIR");
+    if (!o.no_dlc && (o.dlc || dlc_env || saved.dlc[0])) {
+        if (!(o.dlc ? from_cwd(dlc, o.dlc) : rooted(dlc, data_dir, dlc_env ? dlc_env : saved.dlc)) ||
+            !is_directory(dlc)) return complain("DLC directory is missing or invalid");
+    }
+
+    if (o.boot) {
+        if (!from_cwd(absolute_boot, o.boot)) return option_error("boot", "invalid path");
+        if (o.profile && !from_cwd(explicit_profile, o.profile)) return option_error("--content-profile", "invalid path");
+        if (o.isa && !from_cwd(explicit_isa, o.isa)) return option_error("--isa-rewrite", "invalid path");
+    } else {
+        int prepared = prepare_launch(&o, &saved, ini);
+        if (prepared != LAUNCH_RUN) return prepared;
+        if (o.prepare_only) return LAUNCH_DONE;
+        if (o.profile && !from_cwd(explicit_profile, o.profile)) return option_error("--content-profile", "invalid path");
+        if (o.isa && !from_cwd(explicit_isa, o.isa)) return option_error("--isa-rewrite", "invalid path");
+    }
+
+    status = setup_paths(&o, console);
+    if (status != LAUNCH_RUN) return status;
+    int count = 0;
+    runtime_args[count++] = (*argv)[0];
+    runtime_args[count++] = o.boot ? absolute_boot : boot;
+    const char *content = explicit_profile[0] ? explicit_profile : profile;
+    const char *table = explicit_isa[0] ? explicit_isa : exists(isa) ? isa : "";
+    const char *names[] = {"--content-profile", "--app0", "--user", "--dlc", "--timeout", "--isa-rewrite"};
+    const char *values[] = {content, game, save, dlc, o.timeout ? o.timeout : (o.boot ? "10" : "0"), table};
+    for (size_t i = 0; i < sizeof names / sizeof *names; ++i) {
+        if (!values[i][0]) continue;
+        runtime_args[count++] = (char *)names[i];
+        runtime_args[count++] = (char *)values[i];
+    }
+    for (int i = 0; i < o.forward_count; ++i) runtime_args[count++] = o.forward[i];
+    runtime_args[count] = NULL;
+    *argv = runtime_args;
+    *argc = count;
+    return LAUNCH_RUN;
+}
+
+#ifdef _WIN32
+static int shortcut(const char *destination) {
+    char folder[PATH_CHARS], filename[PATH_CHARS];
+    wchar_t target[PATH_CHARS], path[PATH_CHARS], root[PATH_CHARS], args[PATH_CHARS + 32];
+    DWORD n = GetModuleFileNameW(NULL, target, PATH_CHARS);
+    if (!n || n >= PATH_CHARS || !from_cwd(folder, destination) || !make_dirs(folder) ||
+        !join_path(filename, folder, TITLE ".lnk") ||
+        !MultiByteToWideChar(CP_UTF8, 0, filename, -1, path, PATH_CHARS) ||
+        !MultiByteToWideChar(CP_UTF8, 0, data_dir, -1, root, PATH_CHARS))
+        return complain("Cannot set shortcut paths");
+    swprintf(args, PATH_CHARS + 32, L"--data-dir \"%ls\"", root);
+    HRESULT started = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
+    if (FAILED(started)) return complain("Cannot initialize Windows shortcuts");
+    IShellLinkW *link = NULL;
+    IPersistFile *file = NULL;
+    HRESULT result = CoCreateInstance(&CLSID_ShellLink, NULL, CLSCTX_INPROC_SERVER, &IID_IShellLinkW, (void **)&link);
+    if (SUCCEEDED(result)) result = link->lpVtbl->SetPath(link, target);
+    if (SUCCEEDED(result)) result = link->lpVtbl->SetArguments(link, args);
+    if (SUCCEEDED(result)) result = link->lpVtbl->QueryInterface(link, &IID_IPersistFile, (void **)&file);
+    if (SUCCEEDED(result)) result = file->lpVtbl->Save(file, path, TRUE);
+    if (file) file->lpVtbl->Release(file);
+    if (link) link->lpVtbl->Release(link);
+    CoUninitialize();
+    if (FAILED(result)) return complain("Cannot write the shortcut");
+    printf("Shortcut: %s\n", filename);
+    return LAUNCH_DONE;
+}
+#else
+static void desktop_arg(FILE *f, const char *arg) {
+    fputc('"', f);
+    for (; *arg; ++arg) {
+        if (*arg == '%') fputc('%', f);
+        if (*arg == '\\') fputs("\\\\\\", f);
+        if (*arg == '"' || *arg == '$' || *arg == 0x60) fputs("\\\\", f);
+        fputc(*arg, f);
+    }
+    fputc('"', f);
+}
+static int shortcut(const char *destination) {
+    char folder[PATH_CHARS], file[PATH_CHARS], target[PATH_CHARS];
+    ssize_t n = readlink("/proc/self/exe", target, sizeof target - 1);
+    if (n <= 0 || n == (ssize_t)sizeof target - 1 || !from_cwd(folder, destination) || !make_dirs(folder) ||
+        !join_path(file, folder, "everybodys-golf.desktop")) return complain("Cannot set shortcut paths");
+    target[n] = 0;
+    if (strpbrk(target, "\r\n")) return complain("Invalid executable path");
+    FILE *f = fopen(file, "wb");
+    if (!f) return complain("Cannot create the shortcut");
+    fputs("[Desktop Entry]\nType=Application\nName=" TITLE "\nCategories=Game;\nExec=", f);
+    desktop_arg(f, target);
+    fputs(" --data-dir ", f);
+    desktop_arg(f, data_dir);
+    fputs("\nTerminal=false\n", f);
+    int ok = !ferror(f);
+    if (fclose(f)) ok = 0;
+    if (!ok || chmod(file, 0755)) return complain("Cannot write the shortcut");
+    printf("Shortcut: %s\n", file);
+    return LAUNCH_DONE;
+}
+#endif

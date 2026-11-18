@@ -7,14 +7,13 @@ a boot check and the package.
 Needs MSYS2 with the CLANG64 packages (docs/building.md), Python 3.10 or newer, and Git for Windows
 or MSYS2 for bash. Options combine:
 
-  .\build_windows.ps1                      build out\resogun.exe and out\resogun-setup.exe
+  .\build_windows.ps1                      build out\everybodys-golf.exe
   .\build_windows.ps1 -Test                also run every C/C++ test and the Python tests
   .\build_windows.ps1 -Run [-Game DIR] [-Timeout N]
                                            also start the game (RESOGUN_GAME_DIR, or DIR) for N
                                            seconds (default 20) and print its first STOP:/Fault: line
-  .\build_windows.ps1 -Package [-PythonEmbed ZIP]
-                                           also write the release zip (tools\package.py --zip), with
-                                           python.org's embeddable Python when ZIP is given
+  .\build_windows.ps1 -Package
+                                           also write the release zip (tools\package.py --zip)
   .\build_windows.ps1 -Clean               remove out\ first (a full rebuild)
 #>
 param(
@@ -23,7 +22,6 @@ param(
     [string]$Game = $env:RESOGUN_GAME_DIR,
     [int]$Timeout = 20,
     [switch]$Package,
-    [string]$PythonEmbed,
     [switch]$Clean
 )
 $ErrorActionPreference = 'Stop'
@@ -73,7 +71,6 @@ if ($Run) {
 
 if ($Package) {
     $packageArgs = @('tools\package.py', '--zip')
-    if ($PythonEmbed) { $packageArgs += @('--python', $PythonEmbed) }
     Invoke-Checked 'tools\package.py' { & $python.Source @packageArgs }
 }
 

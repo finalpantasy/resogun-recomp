@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Everybody's Golf
+Exec=everybodys-golf
+Icon=everybodys-golf
+Categories=Game;SportsGame;
+Terminal=false

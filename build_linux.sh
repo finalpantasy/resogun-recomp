@@ -1,24 +1,26 @@
 #!/usr/bin/env bash
 # Local build and test on Linux: build.sh plus the Python tests, a boot check and the package.
 #
-#   ./build_linux.sh                  build out/resogun and out/resogun-setup
+#   ./build_linux.sh                  build out/everybodys-golf
 #   ./build_linux.sh --test           also run every C/C++ test and the Python tests
 #   ./build_linux.sh --run [--game DIR] [--timeout N]
 #                                     also start the game (RESOGUN_GAME_DIR, or DIR) for N seconds
 #                                     (default 20) and print its first STOP:/Fault: line
 #   ./build_linux.sh --package        also write the release tarballs (tools/package.py --zip)
+#   ./build_linux.sh --appimage       also write the AppImage and Linux tarball
 #   ./build_linux.sh --clean          remove out/ first (a full rebuild)
 #
 # Options combine. Dependencies: docs/building.md (.github/scripts/ci-deps.sh on Ubuntu 24.04).
 set -euo pipefail
 cd -- "$(dirname -- "$0")"
 
-test=0 run=0 package=0 clean=0 timeout=20 game=${RESOGUN_GAME_DIR:-}
+test=0 run=0 package=0 appimage=0 clean=0 timeout=20 game=${RESOGUN_GAME_DIR:-}
 while (($#)); do
     case $1 in
     --test) test=1 ;;
     --run) run=1 ;;
     --package) package=1 ;;
+    --appimage) appimage=1 ;;
     --clean) clean=1 ;;
     --game) game=${2:?--game needs a folder}; shift ;;
     --timeout) timeout=${2:?--timeout needs seconds}; shift ;;
@@ -50,6 +52,8 @@ if ((run)); then
     grep -m1 -E '^(STOP|Fault):' out/boot.log || echo 'No STOP: or Fault: line.'
     echo "Exit code $status; the full log is out/boot.log."
 fi
-if ((package)); then
+if ((appimage)); then
+    python3 tools/package.py --appimage
+elif ((package)); then
     python3 tools/package.py --zip
 fi

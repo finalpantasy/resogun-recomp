@@ -1,0 +1,15 @@
+# Loaded by build.sh after project() in the shared GPU build.
+function(golf_launcher_target)
+    set(launcher_src "${CMAKE_SOURCE_DIR}/../src")
+    target_sources(resogun PRIVATE "${launcher_src}/prepare.c" "${launcher_src}/prepare_isa.c")
+    set_target_properties(resogun PROPERTIES OUTPUT_NAME everybodys-golf)
+    if(TARGET resogun-setup)
+        set_target_properties(resogun-setup PROPERTIES EXCLUDE_FROM_ALL TRUE)
+    endif()
+    target_compile_definitions(resogun PRIVATE "GOLF_LAUNCHER_VERSION=\"${GOLF_LAUNCHER_VERSION}\"")
+    if(WIN32)
+        target_link_libraries(resogun PRIVATE ole32 uuid)
+    endif()
+endfunction()
+
+cmake_language(DEFER CALL golf_launcher_target)

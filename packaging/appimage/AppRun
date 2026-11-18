@@ -1,0 +1,21 @@
+#!/bin/sh
+set -eu
+
+appdir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+case ${1-} in
+    --help|-h|--version) exec "$appdir/everybodys-golf" "$@" ;;
+    ''|--*)
+        printf '%s\n' 'Usage: EverybodyGolf.AppImage DATA-DIRECTORY [OPTIONS]' >&2
+        exit 2 ;;
+esac
+
+data=$1
+shift
+case $data in /*) ;; *) data=$PWD/$data ;; esac
+for arg do
+    if [ "$arg" = --data-dir ]; then
+        printf '%s\n' 'Pass the data directory as the first AppImage argument.' >&2
+        exit 2
+    fi
+done
+exec "$appdir/everybodys-golf" --data-dir "$data" "$@"
