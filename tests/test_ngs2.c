@@ -120,6 +120,22 @@ int main(void) {
     for (int i=0;i<3;++i) render(); /* 560 samples: over within three grains */
     assert(flags()==0);
 
+    /* A stereo voice's levels are output-major (levels[out*2+in], as the game sends them):
+       identity sends the left input left and the right input right. */
+    uint32_t stereo_setup[10]={0x28,0x10000000,0x12,2,48000,0,0,0,0,0};
+    assert(ngs2_voice_control(voice,stereo_setup)==0);
+    static int16_t stereo[2*300];
+    for (int i=0;i<300;++i) { stereo[2*i]=16384; stereo[2*i+1]=-8192; }
+    uint32_t stereo_block[8]={0,sizeof stereo,0,0,0,0,0,0};
+    struct { uint32_t head[2]; const void *data; uint32_t flags, count; const void *blocks; } stereo_blocks={{0x20,0x10000001},stereo,0,1,stereo_block};
+    float stereo_levels[16]={1.0f,0,0,1.0f};
+    struct { uint32_t head[2]; uint32_t matrix, count; const float *levels; } stereo_matrix={{0x18,1},0,16,stereo_levels};
+    assert(ngs2_voice_control(voice,&stereo_matrix)==0 && ngs2_voice_control(voice,&stereo_blocks)==0);
+    event(0);
+    render();
+    assert(fabsf(out[0]-0.5f*MASTER_LEVEL)<1e-4f && fabsf(out[1]+0.25f*MASTER_LEVEL)<1e-4f && out[3]==0.0f);
+    event(1);
+
     assert(ngs2_rack_destroy(rack,NULL)==0);
     assert(ngs2_system_destroy(system_handle,NULL)==0);
     puts("ngs2: ok");

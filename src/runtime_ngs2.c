@@ -484,9 +484,22 @@ static ABI int32_t ngs2_voice_control(uint64_t voice,const void *params) {
             /* Matrix levels {matrixId, numLevels, aLevel}: 8 output gains per input channel. */
             uint32_t matrix, count; const float *levels;
             memcpy(&matrix,p+8,4); memcpy(&count,p+12,4); memcpy(&levels,p+16,8);
-            if (!matrix && levels && count>=MAX_CHANNELS) {
+            if (getenv("GOLF_NGS2_MATRIX_TRACE") && levels && count<=64) {
+                static int traced;
+                if (traced++<24) {
+                    printf("Runtime: Ngs2 matrix %u on a %u ch voice, %u levels:",matrix,v->channels,count);
+                    for (uint32_t i=0;i<count;++i) printf(" %.3g",levels[i]);
+                    printf("%c",10);
+                }
+            }
+            /* The game sends 8 outputs times n inputs, output-major: levels[out*n+in] (the
+               transposition at 0x109def9-0x109e499). Reading it input-major sent a stereo
+               voice's right gains to the left output and left the right ear silent. */
+            if (!matrix && levels && count>=MAX_CHANNELS && count%MAX_CHANNELS==0) {
+                uint32_t n=count/MAX_CHANNELS;
                 memset(v->matrix,0,sizeof v->matrix);
-                memcpy(v->matrix,levels,sizeof(float)*(count<2*MAX_CHANNELS ? MAX_CHANNELS : 2*MAX_CHANNELS));
+                for (uint32_t in=0;in<n && in<2;++in)
+                    for (int o=0;o<MAX_CHANNELS;++o) v->matrix[in][o]=levels[(size_t)o*n+in];
                 v->has_matrix=1;
             }
         } else if (id==2 && size>=0x10) {
