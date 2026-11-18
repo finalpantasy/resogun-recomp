@@ -789,7 +789,9 @@ static int prepare_launch(const Options *o, const Saved *saved, const char *ini)
     char key[GOLF_SOURCE_KEY], folder[PATH_CHARS], image[PATH_CHARS], name[64];
     if (prepare_source_key(game, key, o->any_build)) return complain("Unable to read the decrypted game dump");
     if (!join_path(folder, data_dir, "game") || !make_dirs(folder)) return complain("Cannot create the image cache");
-    if (!o->reprepare && !strcmp(saved->key, key) && saved->image[0] &&
+    /* A watched child repeats the command line after the parent has prepared the image. */
+    const int reprepare = o->reprepare && (o->prepare_only || !getenv("EG_LAUNCH_WATCH_CHILD"));
+    if (!reprepare && !strcmp(saved->key, key) && saved->image[0] &&
         join_path(image, folder, saved->image) && image_paths(image, 1)) {
         int legacy_paths = (has_parent_step(saved->game) || has_parent_step(saved->dlc)) &&
                            !env_option("GAME_DIR") && !env_option("DLC_DIR");
