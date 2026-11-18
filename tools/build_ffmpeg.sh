@@ -3,7 +3,7 @@
 # configured differently): only what Resogun uses. Its movies (video/title.mp4, menu.mp4) are MP4
 # with H.264 video; AvPlayer also accepts AAC audio; save icons and the start-up picture are PNG.
 # AvPlayer opens the movie's host path (the file protocol) or reads through the game's own I/O
-# callbacks; no network protocol is built. The release then carries no FFmpeg DLLs or their codec
+# callbacks; no network protocol is built. Everybody's Golf plays ATRAC9 sound banks through Ngs2. The release then carries no FFmpeg DLLs or their codec
 # libraries.
 #
 # A build of each platform is committed in prebuilt/ffmpeg-<os>.tar.xz with the version and options
@@ -25,7 +25,7 @@ options=(
     --disable-everything --disable-autodetect --disable-programs --disable-doc --disable-network
     --disable-avdevice --disable-avfilter --disable-debug
     --enable-static --disable-shared --enable-zlib
-    --enable-decoder=h264,aac,png --enable-parser=h264,aac,png --enable-demuxer=mov --enable-protocol=file
+    --enable-decoder=h264,aac,png,atrac9 --enable-parser=h264,aac,png --enable-demuxer=mov --enable-protocol=file
     --enable-swscale --enable-swresample
 )
 key="$version ${options[*]}"

@@ -31,20 +31,25 @@ static _Atomic int32_t http_next=0x10000;
 #define NOTICE_PATH "/nmg-us/replay-probe/gameapi_getinfolist"
 #define DAILY_SCORE_PATH "/nmg-us/replay-probe/gameapi_getscorelist"
 #define BOARD_LIST_PATH "/nmg-us/replay-probe/gameapi_getboardlist"
+#define PROPERTY_INFO_PATH "/nmg-us/replay-probe/gameapi_getgamepropertyinfo"
+#define TELEMETRY_PATH "/nmg-us/replay-probe/analytics/19d916d7-6a01-4371-9e6c-c91b2ff386bb/telemetry"
 #define LOGIN_PREFIX "/nmg-us/replay-probe/gameapi_login?account=5932163534510096385&n="
 enum { DISCOVERY_HEADER_MAX=4096 };
 typedef struct {
     const char *url, *path;
     unsigned request_min, request_max, response_min, response_max, response_alignment;
+    const char *content_type; /* NULL uses the title multipart format. */
 } ReplayRoute;
 static const ReplayRoute replay_routes[]={
-    {"https://ssps4.scej-network.jp:443" DISCOVERY_PATH, DISCOVERY_PATH, 0, 0, 8, 0xa2800, 8},
-    {"https://127.0.0.1:8765" SERVER_TIME_PATH, SERVER_TIME_PATH, 102, 102, 28, 28, 4},
-    {"https://127.0.0.1:8765" EULA_PATH, EULA_PATH, 110, 110, 64, 60+0x8000, 4},
-    {"https://127.0.0.1:8765" NOTICE_PATH, NOTICE_PATH, 394, 1394, 36, 36, 4},
-    {"https://127.0.0.1:8765" DAILY_SCORE_PATH, DAILY_SCORE_PATH, 166, 258, 52, 52, 4},
-    {"https://127.0.0.1:8765" BOARD_LIST_PATH, BOARD_LIST_PATH, 138, 230, 40, 40, 4},
-    {"https://127.0.0.1:8765" LOGIN_PREFIX, NULL, 194, 246, 24, 24, 4},
+    {"https://ssps4.scej-network.jp:443" DISCOVERY_PATH, DISCOVERY_PATH, 0, 0, 8, 0xa2800, 8, NULL},
+    {"https://127.0.0.1:8765" SERVER_TIME_PATH, SERVER_TIME_PATH, 102, 102, 28, 28, 4, NULL},
+    {"https://127.0.0.1:8765" EULA_PATH, EULA_PATH, 110, 110, 64, 60+0x8000, 4, NULL},
+    {"https://127.0.0.1:8765" NOTICE_PATH, NOTICE_PATH, 394, 1394, 36, 36, 4, NULL},
+    {"https://127.0.0.1:8765" DAILY_SCORE_PATH, DAILY_SCORE_PATH, 166, 258, 52, 52, 4, NULL},
+    {"https://127.0.0.1:8765" BOARD_LIST_PATH, BOARD_LIST_PATH, 138, 230, 40, 40, 4, NULL},
+    {"https://127.0.0.1:8765" LOGIN_PREFIX, NULL, 194, 246, 24, 24, 4, NULL},
+    {"https://127.0.0.1:8765" PROPERTY_INFO_PATH, PROPERTY_INFO_PATH, 118, 118, 24, 24, 4, NULL},
+    {"http://127.0.0.1:8765" TELEMETRY_PATH, TELEMETRY_PATH, 1, 8192, 0, 0, 1, "application/json"},
 };
 static pthread_mutex_t discovery_lock=PTHREAD_MUTEX_INITIALIZER;
 static struct {
@@ -114,9 +119,8 @@ static int discovery_exchange(const void *data,int size) {
 
     char request[384], headers[96]="";
     if (size) {
-        int n=snprintf(headers,sizeof headers,
-                       "Content-Type: multipart/form-data; boundary=xYzZY\r\n"
-                       "Content-Length: %d\r\n",size);
+        const char *type=route->content_type ? route->content_type : "multipart/form-data; boundary=xYzZY";
+        int n=snprintf(headers,sizeof headers,"Content-Type: %s\r\nContent-Length: %d\r\n",type,size);
         if (n<0 || (size_t)n>=sizeof headers) goto done;
     }
     const char *method=size ? "POST" : "GET";
@@ -299,7 +303,8 @@ static ABI int32_t http_request_url(int32_t conn,int32_t method,const char *url,
     for (size_t i=0;i<sizeof replay_routes/sizeof *replay_routes;++i) {
         const ReplayRoute *route=&replay_routes[i];
         if (method==(route->request_min!=0) && length>=route->request_min &&
-            length<=route->request_max && !((length-route->request_min)%4) && replay_url_matches(route,url)) {
+            length<=route->request_max && (route->content_type || !((length-route->request_min)%4)) &&
+            replay_url_matches(route,url)) {
             replay=route;
             break;
         }
