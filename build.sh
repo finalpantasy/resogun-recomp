@@ -77,7 +77,7 @@ if [[ ${1:-} == --test ]]; then
     run_test wide tests/test_wide.c -lm
     run_test fiber tests/test_fiber.c
     run_test threadcalls tests/test_threadcalls.c "${compat[@]}"
-    run_test net tests/test_net.c "${compat[@]}" "${net[@]}"
+    run_test net tests/test_net.c "${compat[@]}" "${net[@]}" src/runtime_golf.c
     run_test kernel tests/test_kernel.c "${compat[@]}"
     run_test memory tests/test_memory.c "${compat[@]}" "${memory[@]}"
     run_test memory-read-backing tests/test_memory_read_backing.c "${compat[@]}" "${memory[@]}"
