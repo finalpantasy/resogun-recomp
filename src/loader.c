@@ -196,9 +196,59 @@ static void isa_context_regs(CONTEXT *c, IsaRegs *regs, int to_context) {
     if (to_context) c->EFlags=(DWORD)regs->rflags; else regs->rflags=c->EFlags;
 }
 __thread int runtime_fault_trace;
+/* GOLF_BREAK="off,off" (hex guest offsets, up to 8; diagnostics): an int3 at each function entry prints the thread,
+ * rdi, rsi, rdx, the u32 at rsi+0x18 and the caller (first 40 hits per site), then steps the original instruction
+ * once and re-arms. Threads that pass while a site is disarmed are not logged. */
+static struct { uintptr_t at; unsigned char orig; int hits; } break_sites[8];
+static int break_count;
+static __thread uintptr_t break_rearm;
+static void break_write(uintptr_t at,unsigned char value) {
+    WriteProcessMemory(GetCurrentProcess(),(void *)at,&value,1,NULL);
+    FlushInstructionCache(GetCurrentProcess(),(void *)at,1);
+}
+static void break_install(const char *spec) {
+    while (*spec && break_count<8) {
+        char *end; unsigned long long off=strtoull(spec,&end,16);
+        if (end==spec) break;
+        break_sites[break_count].at=(uintptr_t)image+off;
+        break_sites[break_count].orig=image[off];
+        break_write(break_sites[break_count++].at,0xcc);
+        spec=*end ? end+1 : end;
+    }
+}
+static int break_trap(EXCEPTION_POINTERS *info) {
+    CONTEXT *c=info->ContextRecord;
+    if (info->ExceptionRecord->ExceptionCode==EXCEPTION_SINGLE_STEP && break_rearm) {
+        break_write(break_rearm,0xcc);
+        break_rearm=0;
+        c->EFlags&=~0x100u;
+        return 1;
+    }
+    if (info->ExceptionRecord->ExceptionCode!=EXCEPTION_BREAKPOINT) return 0;
+    for (int i=0;i<break_count;++i) {
+        if (break_sites[i].at!=(uintptr_t)info->ExceptionRecord->ExceptionAddress) continue;
+        if (break_sites[i].hits++<40) {
+            uint64_t caller=0; uint32_t field=0;
+            memcpy(&caller,(void *)(uintptr_t)c->Rsp,8);
+            if (c->Rsi>=0x10000 && c->Rsi<(1ull<<40)) memcpy(&field,(void *)(uintptr_t)(c->Rsi+0x18),4);
+            printf("Runtime: break %llx tid %lu rdi %llx rsi %llx rdx %llx [rsi+18] %x caller %llx\n",
+                   (unsigned long long)(break_sites[i].at-(uintptr_t)image),GetCurrentThreadId(),
+                   (unsigned long long)c->Rdi,(unsigned long long)c->Rsi,(unsigned long long)c->Rdx,field,
+                   (unsigned long long)(caller-(uintptr_t)image));
+            fflush(stdout);
+        }
+        break_write(break_sites[i].at,break_sites[i].orig);
+        c->Rip=break_sites[i].at;
+        c->EFlags|=0x100u;
+        break_rearm=break_sites[i].at;
+        return 1;
+    }
+    return 0;
+}
 static LONG CALLBACK vectored_fault(EXCEPTION_POINTERS *info) {
     const EXCEPTION_RECORD *record=info->ExceptionRecord;
     DWORD code=record->ExceptionCode;
+    if (break_count && break_trap(info)) return EXCEPTION_CONTINUE_EXECUTION;
     if (code==EXCEPTION_BREAKPOINT && isa_table) {
         /* An int3 ISA site: emulated here; any other breakpoint goes on to the report below. */
         IsaRegs regs;
@@ -970,6 +1020,9 @@ int main(int argc, char **argv) {
         start_hang_watch();
         if (resogun_render_4k()) runtime_kernel_set_neo_mode(1);
     }
+#ifdef _WIN32
+    if (getenv("GOLF_BREAK")) break_install(getenv("GOLF_BREAK"));
+#endif
     unsigned char *traps = allocate(round_page((import_count + 1) * 32));
     unsigned char *data_traps = allocate((import_count + 1) * page_size);
     protect(data_traps, (import_count + 1) * page_size, 0);
