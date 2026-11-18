@@ -634,12 +634,15 @@ static void read_paths(const char *ini, Saved *saved) {
 }
 
 static const char *relative_to_root(const char *path) {
+    if (!*path) return path;
     size_t n = strlen(data_dir);
-    if (!strncmp(path, data_dir, n)) {
-        if (n && data_dir[n - 1] == '/') return path + n;
-        if (path[n] == '/') return path + n + 1;
-    }
-    return path;
+    while (n && data_dir[n - 1] == '/') --n;
+    if (strncmp(path, data_dir, n)) return path;
+
+    const char *relative = path + n;
+    if (*relative && *relative != '/') return path;
+    while (*relative == '/') ++relative;
+    return *relative ? relative : ".";
 }
 static unsigned long process_id(void) {
 #ifdef _WIN32
