@@ -35,11 +35,11 @@ static void test_reads(void) {
     String s; string_ctor(&s);
     assert(!strcmp(text_of(value_key(&root,"onlineStatus"),&s),"online"));
     assert(string_equals(&s,"online") && string_size(&s)==6 && *string_at(&s,1)=='n' && !*string_at(&s,6));
-    assert(value_get_int(value_key(&root,"n"))==-42);
+    assert(*value_get_int(value_key(&root,"n"))==-42);
     assert(value_key(&root,"big")->type==T_UINT);
-    assert(value_get_bool(value_key(&root,"ok")));
+    assert(*value_get_bool(value_key(&root,"ok")));
     const Value *list=value_key(&root,"list");
-    assert(value_count(list)==4 && value_get_int(value_index(list,0))==1);
+    assert(value_count(list)==4 && *value_get_int(value_index(list,0))==1);
     assert(!strcmp(string_c_str(value_get_string(value_index(list,2))),"x\xc3\xa9\xf0\x9f\x98\x80"));
     assert(!value_valid(value_index(list,3)) && !value_valid(value_index(list,9)));
     assert(!strcmp(text_of(list,&s),"[1,2.5,\"x\xc3\xa9\xf0\x9f\x98\x80\",null]"));
@@ -61,9 +61,12 @@ static void test_null_access(void) {
     assert(!parse(&root,"{\"a\":{\"b\":7}}"));
     assert(value_key(&root,"missing")==&defaults[5]);
     assert(value_key(value_key(&root,"a"),"nope")==&defaults[5]); /* children inherit the callback */
-    assert(value_get_int(value_key(value_key(&root,"a"),"b"))==7);
+    assert(*value_get_int(value_key(value_key(&root,"a"),"b"))==7);
     assert(!strcmp(string_c_str(value_get_string(value_key(&root,"a"))),"invalid string"));
-    assert(!value_get_bool(value_key(&root,"missing")));
+    assert(!*value_get_bool(value_key(&root,"missing")));
+    /* A size that covers the zeroed rest of the buffer: the document ends at the NUL. */
+    static const char padded[16]="{\"a\":1}";
+    assert(!parser_parse(&root,padded,sizeof padded) && *value_get_int(value_key(&root,"a"))==1);
     value_dtor(&root);
     for (int i=0;i<6;++i) value_dtor(&defaults[i]);
 }

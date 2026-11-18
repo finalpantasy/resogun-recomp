@@ -116,12 +116,15 @@ static ABI void value_set_string(Value *v, const String *s) {
 /* Value::setNullAccessCallBack(callback, context) */
 static ABI void value_set_null_access(Value *v, NullCallback callback, void *context) { v->null_access=callback; v->context=context; }
 
-/* Getters: the payload, numbers converted between the integer kinds, else the callback's. */
-static ABI bool value_get_bool(const Value *v) { return v->type==T_BOOL ? v->b : missing(v,T_BOOL)->b; }
-static ABI int64_t value_get_int(const Value *v) {
-    if (v->type==T_INT || v->type==T_UINT) return v->i;
+/* Getters: the payload, numbers converted between the integer kinds, else the callback's.
+ * const bool &getBoolean() and const int64_t &getInteger() return references: the caller reads
+ * through the pointer (Everybody's Golf: `movl (%rax),%ebx` after getInteger). */
+static ABI const bool *value_get_bool(const Value *v) { return v->type==T_BOOL ? &v->b : &missing(v,T_BOOL)->b; }
+static ABI const int64_t *value_get_int(const Value *v) {
+    static const int64_t zero;
+    if (v->type==T_INT || v->type==T_UINT) return &v->i;
     const Value *r=missing(v,T_INT);
-    return r->type==T_INT || r->type==T_UINT ? r->i : 0;
+    return r->type==T_INT || r->type==T_UINT ? &r->i : &zero;
 }
 static ABI const String *value_get_string(const Value *v) {
     if (v->type==T_STRING) return &v->s;
@@ -365,7 +368,9 @@ static ABI int32_t parser_parse(Value *value, const char *text, size_t size) {
     Parse s={text,text ? text+size : NULL,callback,context,0};
     int ok=text && parse_value(&s,value);
     skip_space(&s);
-    if (ok && s.p==s.end) return 0;
+    /* The size may be the buffer's, not the text's: Everybody's Golf passes its whole zeroed
+     * 512 KiB response buffer. The document ends at the first NUL. */
+    if (ok && (s.p==s.end || !*s.p)) return 0;
     release(value);
     value->null_access=callback; value->context=context;
     if (runtime_verbose()) printf("Runtime: Json parse failed at byte %zu of %zu\n",text ? (size_t)(s.p-text) : 0,size);
@@ -507,8 +512,9 @@ static ABI void array_push_back(Array **self, const Value *value) {
     copy_value(&items[a->count++],value);
 }
 
-/* Initializer(), ~Initializer(), initialize(const InitParameter*): nothing to set up, 0. */
-static ABI void initializer_ctor(uint64_t *self) { *self=0; }
+/* Initializer(), ~Initializer(), initialize(const InitParameter*): nothing to set up, 0. The
+ * class is empty (Everybody's Golf allocates 1 byte for it), so the constructor writes nothing. */
+static ABI void initializer_ctor(uint64_t *self) { (void)self; }
 static ABI void initializer_dtor(uint64_t *self) { (void)self; }
 static ABI int32_t initializer_initialize(uint64_t *self, const void *param) { (void)self; (void)param; return 0; }
 /* int Initializer::terminate(): 0. */

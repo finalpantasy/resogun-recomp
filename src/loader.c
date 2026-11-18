@@ -604,6 +604,35 @@ static int cpu_supported(char *missing, size_t size) {
     return 1;
 }
 
+/* GOLF_PEEK="offset:bytes,*offset+delta:bytes" (hex; * follows the pointer stored there): a debug thread prints those guest image ranges every
+ * two seconds when they change. */
+static unsigned char *peek_image;
+static int SDLCALL peek_thread(void *spec_) {
+    const char *spec=spec_;
+    static unsigned char last[8][64];
+    SDL_Delay(8000); /* the image is not mapped in full at once */
+    for (;;) {
+        SDL_Delay(getenv("GOLF_PEEK_MS") ? (Uint32)atoi(getenv("GOLF_PEEK_MS")) : 2000);
+        const char *p=spec;
+        for (int n=0;n<8 && *p;++n) {
+            int deref=*p=='*'; if (deref) ++p;
+            char *end; unsigned long long off=strtoull(p,&end,16), delta=0; unsigned long len=16;
+            if (*end=='+') delta=strtoull(end+1,&end,16);
+            if (*end==':') len=strtoul(end+1,&end,16);
+            if (len>64) len=64;
+            p=*end ? end+1 : end;
+            unsigned char *at=peek_image+off;
+            if (deref) { memcpy(&at,at,8); if ((uintptr_t)at<0x10000) continue; at+=delta; }
+            unsigned char now[64]; memcpy(now,at,len);
+            if (!memcmp(now,last[n],len)) continue;
+            memcpy(last[n],now,len);
+            printf("Runtime: peek %llx:",off);
+            for (unsigned long i=0;i<len;++i) printf("%s%02x",i%4 ? "" : " ",now[i]);
+            printf("\n");
+        }
+    }
+    return 0;
+}
 int main(int argc, char **argv) {
     setvbuf(stdout, NULL, _IONBF, 0);
 #ifndef _WIN32
@@ -897,6 +926,7 @@ int main(int argc, char **argv) {
     size_t stub_area = isa_table ? round_page(isa_stub_area_size(isa_table)) : 0;
     image = allocate(round_page(size) + stub_area);
     printf("Runtime: guest image at %p (guest offsets are relative to it)\n", (void *)image);
+    if (getenv("GOLF_PEEK")) { peek_image=image; SDL_DetachThread(SDL_CreateThread(peek_thread,"peek",getenv("GOLF_PEEK"))); }
     unsigned char *stubs = image + round_page(size);
     if (fread(image, 1, size, f) != size || fgetc(f) != EOF) fail("incorrect memory image size");
     fclose(f);

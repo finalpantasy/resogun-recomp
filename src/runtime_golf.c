@@ -78,11 +78,13 @@ static Request *find(int64_t id) {
 }
 /* sceNpWebApiCreateContextA(libCtx, user): the user's context. */
 static ABI int32_t webapi_context(int32_t lib,int32_t user) {
+    if (lib>=0x8000 || user==USER_INVALID) printf("Runtime: NpWebApi context refused (library %d, user %#x)%c",lib,(unsigned)user,10);
     if (lib>=0x8000) return WEBAPI_INVALID_LIB_CONTEXT_ID;
     if (user==USER_INVALID) return WEBAPI_INVALID_ARGUMENT;
     pthread_mutex_lock(&lock);
     const int32_t id=next_context++;
     pthread_mutex_unlock(&lock);
+    printf("Runtime: NpWebApi context %d created (library %d, user %#x)%c",id,lib,(unsigned)user,10);
     return id;
 }
 /* sceNpWebApiCreateRequest(userCtx, apiGroup, path, method, contentParameter, requestId). */
@@ -96,6 +98,7 @@ static ABI int32_t webapi_create(int32_t ctx,const char *group,const char *path,
     r->id=next_request++; r->method=method;
     snprintf(r->group,sizeof(r->group),"%s",group); snprintf(r->path,sizeof(r->path),"%s",path);
     if (id) *id=r->id;
+    printf("Runtime: NpWebApi request %lld created: %s %s %s%c",(long long)r->id,methods[method],r->group,r->path,10);
     pthread_mutex_unlock(&lock);
     return 0;
 }
@@ -246,6 +249,7 @@ static ABI int32_t local_auth_create(const uint64_t *param) {
     int32_t result=AUTH_INVALID_ID;
     if (!auth_id && auth_next<INT32_MAX) result=auth_id=auth_next++;
     pthread_mutex_unlock(&auth_lock);
+    printf("Runtime: NpAuth request created: %#x%c",(unsigned)result,10);
     return result;
 }
 
@@ -263,6 +267,7 @@ static ABI int32_t local_auth_code(int32_t id,const LocalAuthCodeParam *param,ch
         result=0;
     }
     pthread_mutex_unlock(&auth_lock);
+    printf("Runtime: NpAuth authorization code for client %s, scope %s: %#x%c",param->client_id,param->scope,(unsigned)result,10);
     return result;
 }
 

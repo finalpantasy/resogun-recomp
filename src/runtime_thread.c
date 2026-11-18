@@ -54,6 +54,7 @@ typedef struct GuestThread {
     ThreadAttr attr;
     char name[32];
     int detached, finished, joined, host_owned;
+    int released; /* set once scePthreadCreate is about to return to the creator */
     int tid;
     void *stack_low; uint64_t stack_size; /* the host stack, recorded by attach() on the thread */
 #ifdef _WIN32
@@ -360,6 +361,17 @@ static void *host_start(void *p) {
     attach(t);
     set_host_name(t->name);
     set_host_priority(t->name,t->attr.prio);
+    /* On a PS4 the creating thread is back in its own code well before a new thread reaches its
+     * entry. Game code relies on that: Everybody's Golf sets its NpWebApi state to "filter thread
+     * running" after scePthreadCreate returns, and a thread that had already finished and stored
+     * its result there left the request queue stuck. Wait until scePthreadCreate is returning,
+     * then give the creator a head start. */
+    while (!__atomic_load_n(&t->released,__ATOMIC_ACQUIRE)) sched_yield();
+#ifdef _WIN32
+    Sleep(1);
+#else
+    usleep(300);
+#endif
     if (!exit_setjmp(t)) t->result=t->entry(t->argument);
     if (runtime_guest_thread_dtors) runtime_guest_thread_dtors();
     runtime_thread_keys_cleanup();
@@ -402,6 +414,7 @@ static int32_t create(GuestThread **out,ThreadAttr **attr_slot,GuestEntry entry,
     if (t->detached) pthread_detach(t->host);
     pthread_mutex_lock(&lock); ++created; pthread_mutex_unlock(&lock);
     if (runtime_verbose()) printf("Runtime: guest thread '%s' created (stack=%llu, prio=%d)\n",t->name,(unsigned long long)stack,t->attr.prio);
+    __atomic_store_n(&t->released,1,__ATOMIC_RELEASE);
     return 0;
 }
 static ABI int32_t thread_create(GuestThread **out,ThreadAttr **attr,GuestEntry entry,void *argument,const char *name) {

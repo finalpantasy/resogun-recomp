@@ -170,8 +170,46 @@ static ABI int32_t net_sock_info(int32_t s,void *info,int32_t n,int32_t flags) {
 /* sceNetCtlInit(void) (NID gky0+oaNM4k; Golf calls it with no arguments after sceNetPoolCreate and
  * only tests the result for < 0): nothing to set up for the offline state reported below. */
 static ABI int32_t netctl_init(void) { return 0; }
-static ABI int32_t netctl_state(int32_t *state) { if (!state) return NET_CTL_INVALID_ADDR; *state=0; return 0; }
-static ABI int32_t netctl_info(int code,void *info) { (void)code; (void)info; return NET_CTL_NOT_CONNECTED; }
+/* GOLF_DISCOVERY_PORT (the local title server) makes the console look wired to a network: the game
+ * asks sceNetCtlGetState before it sends anything. Without it the cable is out, as before. */
+static int netctl_connected(void) {
+    static int connected=-1;
+    if (connected<0) { const char *port=getenv("GOLF_DISCOVERY_PORT"); connected=port && *port; }
+    return connected;
+}
+/* sceNetCtlGetState(out state): 3 is "IP obtained", 0 disconnected. */
+static ABI int32_t netctl_state(int32_t *state) {
+    static int reported;
+    if (!state) return NET_CTL_INVALID_ADDR;
+    *state=netctl_connected() ? 3 : 0;
+    if (!reported++) printf("Runtime: sceNetCtlGetState: %d%c",*state,10);
+    return 0;
+}
+/* sceNetCtlGetInfo(code, out SceNetCtlInfo): a wired loopback connection when connected: device 0
+ * (wired), a local MAC, MTU 1500, link up, static IP 127.0.0.1/255.0.0.0, no proxy. */
+static ABI int32_t netctl_info(int code,void *info) {
+    static unsigned reported;
+    if (!info) return NET_CTL_INVALID_ADDR;
+    if (!netctl_connected()) return NET_CTL_NOT_CONNECTED;
+    if (code>=0 && code<32 && !(reported>>code&1)) { reported|=1u<<code; printf("Runtime: sceNetCtlGetInfo code %d%c",code,10); }
+    static const uint8_t mac[6]={0x02,0,0,0,0,1};
+    uint32_t number=0;
+    switch (code) {
+    case 2: memcpy(info,mac,6); return 0;
+    case 3: number=1500; break;
+    case 4: number=1; break;
+    case 1: case 7: case 11: case 19: break;
+    case 8: case 9: case 10: *(uint8_t *)info=0; return 0;
+    case 5: memset(info,0,6); return 0;
+    case 6: case 12: case 13: case 20: *(char *)info=0; return 0;
+    case 14: case 16: case 17: case 18: memcpy(info,"127.0.0.1",10); return 0;
+    case 15: memcpy(info,"255.0.0.0",10); return 0;
+    case 21: { uint16_t port=0; memcpy(info,&port,2); return 0; }
+    default: return NET_CTL_INVALID_ADDR;
+    }
+    memcpy(info,&number,4);
+    return 0;
+}
 static ABI int32_t netctl_register(void *cb,void *arg,int32_t *cid) { (void)cb; (void)arg; if (!cid) return NET_CTL_INVALID_ADDR; *cid=new_id(); return 0; }
 static ABI int32_t netctl_check(void) { return 0; }
 static ABI int32_t netctl_unregister(int cid) { (void)cid; return 0; }
@@ -180,8 +218,22 @@ static ABI int32_t netctl_nat(uint32_t *info) {
     info[1]=0; info[2]=3; info[3]=0; /* stun failed, NAT type 3, no mapped address */
     return 0;
 }
-static ABI int32_t lib_init_id(void) { return new_id(); }
-static ABI int32_t ok_void(void) { return 0; }
+/* GOLF_NP_TRACE=1: each distinct guest call site of the shared network and NP answers, once
+ * (the address is absolute: subtract the "guest image at" address of the log). */
+static void trace_caller(const char *what,void *site) {
+    static int enabled=-1;
+    static void *seen[96]; static _Atomic int count;
+    if (enabled<0) { const char *v=getenv("GOLF_NP_TRACE"); enabled=v && *v=='1'; }
+    if (!enabled) return;
+    int n=count;
+    for (int i=0;i<n && i<96;++i) if (seen[i]==site) return;
+    if (n>=96) return;
+    seen[n]=site; count=n+1;
+    printf("Runtime: NP trace: %s from %p%c",what,site,10);
+}
+#define TRACE_CALLER(what) trace_caller(what,__builtin_return_address(0))
+static ABI int32_t lib_init_id(void) { TRACE_CALLER("library init"); return new_id(); }
+static ABI int32_t ok_void(void) { TRACE_CALLER("accepted call"); return 0; }
 /* Objects are created so setup code proceeds; any transfer fails as unplugged. */
 static ABI int32_t http_object(void) { return new_id(); }
 
@@ -191,9 +243,9 @@ static ABI int32_t np_state(int32_t user,int32_t *state) {
     (void)user; *state=1; /* SIGNED_OUT */
     return 0;
 }
-static ABI int32_t np_signed_out(void) { return NP_SIGNED_OUT; }
+static ABI int32_t np_signed_out(void) { TRACE_CALLER("signed-out answer"); return NP_SIGNED_OUT; }
 static ABI int32_t np_register(void *cb,void *arg) { (void)cb; (void)arg; return new_id(); }
-static ABI int32_t np_request(const void *param) { (void)param; return new_id(); }
+static ABI int32_t np_request(const void *param) { (void)param; TRACE_CALLER("request object"); return new_id(); }
 /* NpManager requests (shadPS4 np_manager.cpp): ids 0x20000001 up, at most 32 live. A call that
  * takes a request completes it at once with the signed-out result; a synchronous request returns
  * that result, an asynchronous one returns 0 and reports it through sceNpPollAsync/sceNpWaitAsync.
@@ -256,6 +308,7 @@ static ABI int32_t np_abort_request(int32_t id) {
 }
 /* sceNpPollAsync and sceNpWaitAsync: nothing is in flight, so both report the stored result. */
 static ABI int32_t np_poll_request(int32_t id,int32_t *result) {
+    TRACE_CALLER("sceNpPollAsync");
     if (!result) return NP_INVALID_ARGUMENT;
     pthread_mutex_lock(&lock);
     int i=np_index(id);
@@ -286,6 +339,7 @@ static ABI int32_t np_check_plus(int32_t id,const NpPlusParameter *param,uint8_t
 
 /* sceNpCheckNpAvailabilityA(request, user), sceNpGetParentalControlInfoA(request, user, age, info). */
 static ABI int32_t np_availability(int32_t id,int32_t user) {
+    TRACE_CALLER("NP availability");
     return user==-1 ? NP_INVALID_ARGUMENT : np_complete(id,runtime_golf_local_account() ? 0 : NP_SIGNED_OUT,NULL);
 }
 static ABI int32_t np_parental(int32_t id,int32_t user,int8_t *age,void *info) {
