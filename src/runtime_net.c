@@ -27,11 +27,15 @@ static _Atomic int32_t http_next=0x10000;
 /* Only these guest URLs can replay over the literal loopback socket. */
 #define DISCOVERY_PATH "/nmg-us/ss.info"
 #define SERVER_TIME_PATH "/nmg-us/replay-probe/gameapi_getservertime"
+#define FINISH_BOARD_PATH "/nmg-us/replay-probe/gameapi_getfinishboardlist"
+#define SIGN_BOARD_PATH "/nmg-us/replay-probe/gameapi_getsignboardlist"
 #define EULA_PATH "/nmg-us/replay-probe/gameapi_geteula"
 #define NOTICE_PATH "/nmg-us/replay-probe/gameapi_getinfolist"
 #define DAILY_SCORE_PATH "/nmg-us/replay-probe/gameapi_getscorelist"
+#define RIVAL_LIST_PATH "/nmg-us/replay-probe/gameapi_getrivallist"
 #define BOARD_LIST_PATH "/nmg-us/replay-probe/gameapi_getboardlist"
 #define NATIONAL_BOARD_PATH "/nmg-us/replay-probe/gameapi_getboardlistnational"
+#define CHARACTER_COUNT_PATH "/nmg-us/replay-probe/gameapi_getcountcharactordownload"
 #define PROPERTY_INFO_PATH "/nmg-us/replay-probe/gameapi_getgamepropertyinfo"
 #define TELEMETRY_PATH "/nmg-us/replay-probe/analytics/19d916d7-6a01-4371-9e6c-c91b2ff386bb/telemetry"
 #define SESSION_QUERY "?account=5932163534510096385&n="
@@ -42,6 +46,7 @@ static _Atomic int32_t http_next=0x10000;
 #define SCORE_BOARD_PATH DAILY_SCORE_PATH "?account="
 #define OWN_SCORE_PATH "/nmg-us/replay-probe/gameapi_getmyscore"
 #define USER_STATUS_PATH "/nmg-us/replay-probe/gameapi_getuserstatus"
+#define CHARACTER_ASSIGNMENT_PATH "/nmg-us/replay-probe/gameapi_assignmentcharactordownload"
 #define REGIST_PREFIX "/nmg-us/replay-probe/gameapi_registscore"
 enum { DISCOVERY_HEADER_MAX=4096 };
 typedef struct {
@@ -53,9 +58,14 @@ static const ReplayRoute replay_routes[]={
     {"https://ssps4.scej-network.jp:443" DISCOVERY_PATH, DISCOVERY_PATH, 0, 0, 8, 0xa2800, 8, NULL},
     {"https://127.0.0.1:8765" SERVER_TIME_PATH, SERVER_TIME_PATH, 102, 102, 28, 28, 4, NULL},
     {"https://127.0.0.1:8765" EULA_PATH, EULA_PATH, 110, 110, 64, 60+0x8000, 4, NULL},
+    {"https://127.0.0.1:8765" FINISH_BOARD_PATH, FINISH_BOARD_PATH, 134, 226, 60, 60, 4, NULL},
+    {"https://127.0.0.1:8765" SIGN_BOARD_PATH, SIGN_BOARD_PATH, 370, 1370, 36, 36, 4, NULL},
     {"https://127.0.0.1:8765" NOTICE_PATH, NOTICE_PATH, 394, 1394, 36, 36, 4, NULL},
+    {"https://127.0.0.1:8765" RIVAL_LIST_PATH, RIVAL_LIST_PATH, 438, 1574, 36, 36, 4, NULL},
     {"https://127.0.0.1:8765" DAILY_SCORE_PATH, DAILY_SCORE_PATH, 166, 258, 52, 52, 4, NULL},
     {"https://127.0.0.1:8765" BOARD_LIST_PATH, BOARD_LIST_PATH, 138, 230, 40, 40, 4, NULL},
+    /* Event schedule board: up to 18 rows (per-hole groups plus the Daily group). */
+    {"https://127.0.0.1:8765" BOARD_LIST_PATH, BOARD_LIST_PATH, 394, 1418, 40, 1696, 4, NULL},
     /* Login completion is 24 bytes; with a score session it adds 0x2032 and the 0x0086..0x0088
      * user-status records (180 bytes). */
     {"https://127.0.0.1:8765" LOGIN_PREFIX, NULL, 194, 246, 24, 180, 4, NULL},
@@ -65,6 +75,8 @@ static const ReplayRoute replay_routes[]={
     {"https://127.0.0.1:8765" SCORE_BOARD_PATH "5932163534510096385&n=", NULL, 418, 1450, 16, 0xa2800, 4, NULL},
     {"https://127.0.0.1:8765" OWN_SCORE_PATH, OWN_SCORE_PATH, 402, 1434, 16, 0xa2800, 4, NULL},
     {"https://127.0.0.1:8765" USER_STATUS_PATH, USER_STATUS_PATH, 526, 1526, 16, 0x1000, 4, NULL},
+    /* Character assignment (slot 0x3d); the lower bound is kept loose until the request size is logged. */
+    {"https://127.0.0.1:8765" CHARACTER_ASSIGNMENT_PATH, CHARACTER_ASSIGNMENT_PATH, 66, 1370, 28, 28, 4, NULL},
     /* Score registration (slots 0x1a, 0x1c, 0x1e; builders 0xb63a30, 0xb63d93, 0xb646ea). */
     {"https://127.0.0.1:8765" REGIST_PREFIX SESSION_QUERY, NULL, 610, 5298, 16, 0x1000, 4, NULL},
     {"https://127.0.0.1:8765" REGIST_PREFIX "daily" SESSION_QUERY, NULL, 606, 5286, 16, 0x1000, 4, NULL},
@@ -73,6 +85,8 @@ static const ReplayRoute replay_routes[]={
      * it (eboot 0xec97d0), so the discovery fixture must list this key as https. */
     {"https://127.0.0.1:8765" NATIONAL_BOARD_PATH, NATIONAL_BOARD_PATH, 378, 1378, 28, 0x8000, 4, NULL},
     {"https://127.0.0.1:8765" PROPERTY_INFO_PATH, PROPERTY_INFO_PATH, 118, 118, 24, 24, 4, NULL},
+    {"https://127.0.0.1:8765" CHARACTER_COUNT_PATH "?account=", CHARACTER_COUNT_PATH "?account=", 394, 1394, 44, 44, 4, NULL},
+    {"https://127.0.0.1:8765" CHARACTER_COUNT_PATH SESSION_QUERY, NULL, 394, 1394, 44, 44, 4, NULL},
     {"http://127.0.0.1:8765" TELEMETRY_PATH, TELEMETRY_PATH, 1, 8192, 0, 0, 1, "application/json"},
 };
 static pthread_mutex_t discovery_lock=PTHREAD_MUTEX_INITIALIZER;
