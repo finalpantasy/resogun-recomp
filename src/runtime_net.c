@@ -34,7 +34,15 @@ static _Atomic int32_t http_next=0x10000;
 #define NATIONAL_BOARD_PATH "/nmg-us/replay-probe/gameapi_getboardlistnational"
 #define PROPERTY_INFO_PATH "/nmg-us/replay-probe/gameapi_getgamepropertyinfo"
 #define TELEMETRY_PATH "/nmg-us/replay-probe/analytics/19d916d7-6a01-4371-9e6c-c91b2ff386bb/telemetry"
-#define LOGIN_PREFIX "/nmg-us/replay-probe/gameapi_login?account=5932163534510096385&n="
+#define SESSION_QUERY "?account=5932163534510096385&n="
+#define LOGIN_PREFIX "/nmg-us/replay-probe/gameapi_login" SESSION_QUERY
+/* Score boards, own score, user status and score registration (server --empty-own-score and
+ * --score-registration). The game formats "%s%llu&n=%d&s=1" (eboot 0xb5d300), so the discovery
+ * fixture ends these base URLs in "?account=". */
+#define SCORE_BOARD_PATH DAILY_SCORE_PATH "?account="
+#define OWN_SCORE_PATH "/nmg-us/replay-probe/gameapi_getmyscore"
+#define USER_STATUS_PATH "/nmg-us/replay-probe/gameapi_getuserstatus"
+#define REGIST_PREFIX "/nmg-us/replay-probe/gameapi_registscore"
 enum { DISCOVERY_HEADER_MAX=4096 };
 typedef struct {
     const char *url, *path;
@@ -48,7 +56,19 @@ static const ReplayRoute replay_routes[]={
     {"https://127.0.0.1:8765" NOTICE_PATH, NOTICE_PATH, 394, 1394, 36, 36, 4, NULL},
     {"https://127.0.0.1:8765" DAILY_SCORE_PATH, DAILY_SCORE_PATH, 166, 258, 52, 52, 4, NULL},
     {"https://127.0.0.1:8765" BOARD_LIST_PATH, BOARD_LIST_PATH, 138, 230, 40, 40, 4, NULL},
-    {"https://127.0.0.1:8765" LOGIN_PREFIX, NULL, 194, 246, 24, 24, 4, NULL},
+    /* Login completion is 24 bytes; with a score session it adds 0x2032 and the 0x0086..0x0088
+     * user-status records (180 bytes). */
+    {"https://127.0.0.1:8765" LOGIN_PREFIX, NULL, 194, 246, 24, 180, 4, NULL},
+    /* Daily board with the score-board fixture: the bare "?account=" base, 166..258 bytes. */
+    {"https://127.0.0.1:8765" SCORE_BOARD_PATH, SCORE_BOARD_PATH, 166, 258, 16, 0xa2800, 4, NULL},
+    /* Session boards (slots 0x19, 0x1b, 0x1d): OneHole_, Daily_, LongDriveContest_ groups. */
+    {"https://127.0.0.1:8765" SCORE_BOARD_PATH "5932163534510096385&n=", NULL, 418, 1450, 16, 0xa2800, 4, NULL},
+    {"https://127.0.0.1:8765" OWN_SCORE_PATH, OWN_SCORE_PATH, 402, 1434, 16, 0xa2800, 4, NULL},
+    {"https://127.0.0.1:8765" USER_STATUS_PATH, USER_STATUS_PATH, 526, 1526, 16, 0x1000, 4, NULL},
+    /* Score registration (slots 0x1a, 0x1c, 0x1e; builders 0xb63a30, 0xb63d93, 0xb646ea). */
+    {"https://127.0.0.1:8765" REGIST_PREFIX SESSION_QUERY, NULL, 610, 5298, 16, 0x1000, 4, NULL},
+    {"https://127.0.0.1:8765" REGIST_PREFIX "daily" SESSION_QUERY, NULL, 606, 5286, 16, 0x1000, 4, NULL},
+    {"https://127.0.0.1:8765" REGIST_PREFIX "longdrivecontest" SESSION_QUERY, NULL, 582, 4514, 16, 0x1000, 4, NULL},
     /* Action 0x26 of the login run (slot 0x2f). Over plain http the game encrypts the payload and drops
      * it (eboot 0xec97d0), so the discovery fixture must list this key as https. */
     {"https://127.0.0.1:8765" NATIONAL_BOARD_PATH, NATIONAL_BOARD_PATH, 378, 1378, 28, 0x8000, 4, NULL},
@@ -62,7 +82,7 @@ typedef struct {
     const ReplayRoute *route;
     int status, read, sending;
     size_t length, request_size, uploaded;
-    char login_path[sizeof LOGIN_PREFIX+sizeof "-2147483648&s=1"];
+    char login_path[sizeof REGIST_PREFIX "longdrivecontest" SESSION_QUERY+sizeof "-2147483648&s=1"]; /* any session route */
     unsigned char *body, *upload;
 } ReplayRequest;
 static ReplayRequest replay_requests[sizeof replay_routes/sizeof *replay_routes];
