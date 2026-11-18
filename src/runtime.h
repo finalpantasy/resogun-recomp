@@ -14,6 +14,8 @@ typedef resogun_jmp_buf sigjmp_buf;
 #endif
 /* Recovery point for speculative guest memory reads on this thread (loader.c fault handler). */
 extern __thread sigjmp_buf *runtime_fault_recover;
+/* Debug: access faults on a thread that sets this are logged (first 40). */
+extern __thread int runtime_fault_trace;
 /* Restarts the game (in-game settings menu, render resolution change). */
 void runtime_restart(void);
 /* RESOGUN_SLOW_WAITS=<ms>: log guest blocking calls (locks, waits, reads) longer than that.

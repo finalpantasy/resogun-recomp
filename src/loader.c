@@ -195,6 +195,7 @@ static void isa_context_regs(CONTEXT *c, IsaRegs *regs, int to_context) {
     for (int i=0;i<16;++i) { if (to_context) *g[i]=regs->gpr[i]; else regs->gpr[i]=*g[i]; }
     if (to_context) c->EFlags=(DWORD)regs->rflags; else regs->rflags=c->EFlags;
 }
+__thread int runtime_fault_trace;
 static LONG CALLBACK vectored_fault(EXCEPTION_POINTERS *info) {
     const EXCEPTION_RECORD *record=info->ExceptionRecord;
     DWORD code=record->ExceptionCode;
@@ -211,6 +212,12 @@ static LONG CALLBACK vectored_fault(EXCEPTION_POINTERS *info) {
     }
     if (code==EXCEPTION_ACCESS_VIOLATION && record->NumberParameters>=2) {
         /* GPU page tracking (write-protected guest pages) is resolved first. */
+        static int fault_logged;
+        if (runtime_fault_trace && fault_logged<40) {
+            ++fault_logged;
+            fprintf(stderr,"FaultLog: tid %lu rip %p addr %p write %llu\n",GetCurrentThreadId(),(void *)(uintptr_t)info->ContextRecord->Rip,
+                    (void *)record->ExceptionInformation[1],(unsigned long long)record->ExceptionInformation[0]);
+        }
         if (gpu_enabled && resogun_gpu_handle_fault(info,(void *)record->ExceptionInformation[1])) return EXCEPTION_CONTINUE_EXECUTION;
         if (runtime_fault_recover) {
             /* A speculative guest memory read (GPU draw preparation) faulted: the thread resumes

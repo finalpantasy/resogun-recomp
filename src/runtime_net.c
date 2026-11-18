@@ -49,8 +49,9 @@ static const ReplayRoute replay_routes[]={
     {"https://127.0.0.1:8765" DAILY_SCORE_PATH, DAILY_SCORE_PATH, 166, 258, 52, 52, 4, NULL},
     {"https://127.0.0.1:8765" BOARD_LIST_PATH, BOARD_LIST_PATH, 138, 230, 40, 40, 4, NULL},
     {"https://127.0.0.1:8765" LOGIN_PREFIX, NULL, 194, 246, 24, 24, 4, NULL},
-    /* The national board list goes out over plain http (action 0x26 of the login run, slot 0x2f). */
-    {"http://127.0.0.1:8765" NATIONAL_BOARD_PATH, NATIONAL_BOARD_PATH, 66, 1378, 28, 0x8000, 4, NULL},
+    /* Action 0x26 of the login run (slot 0x2f). Over plain http the game encrypts the payload and drops
+     * it (eboot 0xec97d0), so the discovery fixture must list this key as https. */
+    {"https://127.0.0.1:8765" NATIONAL_BOARD_PATH, NATIONAL_BOARD_PATH, 378, 1378, 28, 0x8000, 4, NULL},
     {"https://127.0.0.1:8765" PROPERTY_INFO_PATH, PROPERTY_INFO_PATH, 118, 118, 24, 24, 4, NULL},
     {"http://127.0.0.1:8765" TELEMETRY_PATH, TELEMETRY_PATH, 1, 8192, 0, 0, 1, "application/json"},
 };

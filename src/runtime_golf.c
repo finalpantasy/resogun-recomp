@@ -350,6 +350,7 @@ static int32_t m2_signaling_ctx;
 static void *m2_thread(void *unused) {
     (void)unused;
     runtime_thread_attach_host("NpMatching2");
+    runtime_fault_trace=getenv("RESOGUN_FAULT_LOG")!=NULL;
     for (;;) {
         pthread_mutex_lock(&m2_lock);
         while (!m2_count) pthread_cond_wait(&m2_wake,&m2_lock);
@@ -357,7 +358,9 @@ static void *m2_thread(void *unused) {
         m2_head=(m2_head+1)%32; --m2_count;
         const M2ContextCb context_cb=m2_context_cb; void *context_arg=m2_context_arg;
         pthread_mutex_unlock(&m2_lock);
-        struct timespec nap={0,30*1000*1000}; nanosleep(&nap,NULL);
+        /* The start function stores "starting" (4) at obj+0x48 after ContextStart returns and some
+         * setup (C: eboot 0xa7e5c9); the started event must come after it, as a server round trip would. */
+        struct timespec nap={0,(e.cb ? 30 : 500)*1000*1000}; nanosleep(&nap,NULL);
         if (e.cb) {
             printf("Runtime: NpMatching2 request %u answered: event 0x%x, error 0x%x\n",(unsigned)e.req,(unsigned)e.event,(unsigned)e.error);
             e.cb(e.ctx,e.req,e.event,e.error,e.data,e.arg);
@@ -388,8 +391,8 @@ static ABI int32_t m2_create_context_a(const uint8_t *param,uint16_t *ctx) {
     puts("Runtime: NpMatching2 context 1 created (local)");
     return 0;
 }
-static ABI int32_t m2_register_context_cb(uint16_t ctx,M2ContextCb cb,void *arg) {
-    (void)ctx;
+/* RegisterContextCallback(callback, arg): one callback for all contexts, no context id. */
+static ABI int32_t m2_register_context_cb(M2ContextCb cb,void *arg) {
     pthread_mutex_lock(&m2_lock);
     m2_context_cb=cb; m2_context_arg=arg;
     pthread_mutex_unlock(&m2_lock);
