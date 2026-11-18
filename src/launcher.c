@@ -143,7 +143,7 @@ static int set_env(const char *name, const char *value) {
 #ifdef _WIN32
     return !_putenv_s(name, value);
 #else
-    return !setenv(name, value, 1);
+    return *value ? !setenv(name, value, 1) : !unsetenv(name);
 #endif
 }
 
@@ -356,6 +356,7 @@ static const Setting settings[] = {
     {"--dump-dir", "DUMP_DIR", 1},
     {"--dump-shaders", "DUMP_SHADERS", 0},
     {"--fail-guest-memory", "FAIL_GUEST_MEMORY", 0},
+    {"--fault-log", "FAULT_LOG", 0},
     {"--fault-peek", "FAULT_PEEK", 0},
     {"--fault-window", "FAULT_WINDOW", 0},
     {"--file-trace-match", "FILE_TRACE_MATCH", 0},
@@ -650,6 +651,10 @@ static int parse(Options *o, int argc, char **argv) {
         if (settings[n].path) {
             if (!from_cwd(absolute, value)) return option_error(flag, "invalid path");
             value = absolute;
+        }
+        if (!strcmp(settings[n].suffix, "FAULT_LOG")) {
+            if (strcmp(value, "0") && strcmp(value, "1")) return option_error(flag, "expected 0 or 1");
+            if (value[0] == '0') value = "";
         }
         if (!env_set(settings[n].suffix, value)) return option_error(flag, "invalid value");
     }
