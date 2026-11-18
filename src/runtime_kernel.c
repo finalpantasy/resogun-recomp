@@ -2,6 +2,7 @@
  * pthread once/keys, signal bookkeeping and a narrow sysctl. Guest values
  * use FreeBSD numbering; host errno values never reach the guest directly. */
 #define _GNU_SOURCE
+#define _CRT_RAND_S
 #include "runtime.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -346,10 +347,23 @@ void runtime_thread_keys_cleanup(void) {
     }
 }
 
+/* sceKernelUuidCreate(uuid) (NID Xjoosiw+XPI; Golf reaches it once the title server answers): fills
+ * the 16-byte UUID and returns 0. A random version 4 UUID stands in for the console's time-based one. */
+static ABI int32_t uuid_create(uint8_t *uuid) {
+    if (!uuid) return ERR(EINVAL);
+#ifdef _WIN32
+    for (int i=0;i<16;i+=4) { unsigned v; if (rand_s(&v)) return ERR(EIO); memcpy(uuid+i,&v,4); }
+#else
+    if (getrandom(uuid,16,0)!=16) return ERR(EIO);
+#endif
+    uuid[7]=(uint8_t)((uuid[7]&0x0f)|0x40); uuid[8]=(uint8_t)((uuid[8]&0x3f)|0x80);
+    return 0;
+}
+
 static const RuntimeExport exports[]={
     {"sceKernelClockGettime",kernel_clock_gettime}, {"clock_gettime",posix_clock_gettime},
 
-    {"sceKernelGetProcessTime",process_time},
+    {"sceKernelGetProcessTime",process_time}, {"sceKernelUuidCreate",uuid_create},
 
     {"sceKernelReadTsc",read_tsc}, {"sceKernelGetTscFrequency",tsc_frequency},
     {"sceKernelUsleep",kernel_usleep}, {"usleep",posix_usleep},

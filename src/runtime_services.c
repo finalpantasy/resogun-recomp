@@ -182,7 +182,6 @@ static ABI int32_t netctl_nat(uint32_t *info) {
 }
 static ABI int32_t lib_init_id(void) { return new_id(); }
 static ABI int32_t ok_void(void) { return 0; }
-static ABI int32_t http_fail(void) { return HTTP_NETWORK; }
 /* Objects are created so setup code proceeds; any transfer fails as unplugged. */
 static ABI int32_t http_object(void) { return new_id(); }
 
@@ -221,13 +220,18 @@ static int np_index(int32_t id) {
     int i=id-0x20000001;
     return i>=0 && i<32 && np_requests[i].state!=NP_FREE ? i : -1;
 }
-static int32_t np_complete(int32_t id,int32_t result) {
+static int32_t np_complete(int32_t id,int32_t result,uint8_t *authorized) {
     pthread_mutex_lock(&lock);
     int i=id ? np_index(id) : -1;
     int32_t r=!id ? NP_INVALID_ARGUMENT : i<0 ? NP_REQUEST_NOT_FOUND : 0;
     if (!r && np_requests[i].state==NP_COMPLETE) r=np_requests[i].result=NP_INVALID_ARGUMENT;
     else if (!r && np_requests[i].state==NP_ABORT) r=np_requests[i].result=NP_ABORTED;
-    else if (!r) { np_requests[i].state=NP_COMPLETE; np_requests[i].result=result; r=np_requests[i].async ? 0 : result; }
+    else if (!r) {
+        if (authorized) *authorized=result==0;
+        np_requests[i].state=NP_COMPLETE;
+        np_requests[i].result=result;
+        r=np_requests[i].async ? 0 : result;
+    }
     pthread_mutex_unlock(&lock);
     return r;
 }
@@ -260,15 +264,35 @@ static ABI int32_t np_poll_request(int32_t id,int32_t *result) {
     pthread_mutex_unlock(&lock);
     return r;
 }
+/* The local login probe is opt-in. Its only supported feature is Golf's mask 1. */
+typedef struct {
+    uint64_t size;
+    int32_t user, padding;
+    uint64_t features;
+    uint8_t reserved[32];
+} NpPlusParameter;
+_Static_assert(sizeof(NpPlusParameter)==56,"sceNpCheckPlus parameter layout");
+
+static ABI int32_t np_check_plus(int32_t id,const NpPlusParameter *param,uint8_t *authorized) {
+    const char *mode=getenv("GOLF_LOCAL_AUTH");
+    if (!runtime_golf_local_account() || !mode || strcmp(mode,"1")) return NP_SIGNED_OUT;
+    if (!id || !param || !authorized) return NP_INVALID_ARGUMENT;
+    if (param->size!=sizeof(*param)) return NP_INVALID_SIZE;
+    static const uint8_t zero[32]={0};
+    if (param->user!=USER_ID || param->features!=1 || memcmp(param->reserved,zero,sizeof zero))
+        return NP_INVALID_ARGUMENT;
+    return np_complete(id,0,authorized);
+}
+
 /* sceNpCheckNpAvailabilityA(request, user), sceNpGetParentalControlInfoA(request, user, age, info). */
 static ABI int32_t np_availability(int32_t id,int32_t user) {
-    return user==-1 ? NP_INVALID_ARGUMENT : np_complete(id,runtime_golf_local_account() ? 0 : NP_SIGNED_OUT);
+    return user==-1 ? NP_INVALID_ARGUMENT : np_complete(id,runtime_golf_local_account() ? 0 : NP_SIGNED_OUT,NULL);
 }
 static ABI int32_t np_parental(int32_t id,int32_t user,int8_t *age,void *info) {
     if (!age || !info || user==-1) return NP_INVALID_ARGUMENT;
-    if (!runtime_golf_local_account()) return np_complete(id,NP_SIGNED_OUT);
+    if (!runtime_golf_local_account()) return np_complete(id,NP_SIGNED_OUT,NULL);
     *age=18; memset(info,0,3); /* an adult account: no chat, content or UGC restriction */
-    return np_complete(id,0);
+    return np_complete(id,0,NULL);
 }
 /* sceNpGetAccountIdA(user, account): the user's PSN account, kept by the console while PSN is out
  * of reach (sceNpGetState stays signed out). sceNpGetUserIdByAccountId: that account is the one
@@ -1087,14 +1111,11 @@ static const RuntimeExport exports[]={
     {"sceHttpInit",lib_init_id}, {"sceHttpTerm",ok_void},
     {"sceHttpCreateTemplate",http_object}, {"sceHttpDeleteTemplate",ok_void},
 
-    {"sceHttpSendRequest",http_fail},
     {"sceHttpSetConnectTimeOut",ok_void},
 
     {"sceHttpAddRequestHeader",ok_void},
-    {"sceHttpDeleteConnection",ok_void}, {"sceHttpDeleteRequest",ok_void},
+    {"sceHttpDeleteConnection",ok_void},
 
-    {"sceHttpGetStatusCode",http_fail}, {"sceHttpGetResponseContentLength",http_fail},
-    {"sceHttpReadData",http_fail},
     {"sceNpGetState",np_state}, {"sceNpGetNpId",np_signed_out},
 
     {"sceNpRegisterStateCallbackA",np_register}, {"sceNpUnregisterStateCallbackA",ok_void},
@@ -1106,7 +1127,7 @@ static const RuntimeExport exports[]={
     {"sceNpCheckNpAvailabilityA",np_availability},
     {"sceNpGetParentalControlInfoA",np_parental}, {"sceNpGetAccountIdA",np_account_id},
 
-    {"sceNpCheckPlus",np_signed_out},
+    {"sceNpCheckPlus",np_check_plus},
 
     {"sceNpAuthDeleteRequest",ok_void},
 

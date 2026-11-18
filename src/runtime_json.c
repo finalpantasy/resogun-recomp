@@ -372,10 +372,147 @@ static ABI int32_t parser_parse(Value *value, const char *text, size_t size) {
     return ERR_PARSE;
 }
 
+/* Building documents (Golf writes its PSN request bodies with these). The game's sce::Json::Object
+ * and sce::Json::Array are handles of at least 8 bytes: here one pointer to the runtime's own. */
+static int copy_value(Value *to, const Value *from);
+static Object *copy_object(const Object *from) {
+    Object *o=runtime_low_alloc(sizeof(Object));
+    if (!o) return NULL;
+    memset(o,0,sizeof(*o));
+    if (!from || !from->count) return o;
+    if (!(o->items=runtime_low_alloc(from->count*sizeof(Pair)))) return o;
+    o->cap=from->count;
+    for (size_t i=0;i<from->count;++i) {
+        const char *key=from->items[i].key.text;
+        o->items[i].key.text=key ? copy_text(key,strlen(key)) : NULL;
+        copy_value(&o->items[i].value,&from->items[i].value);
+        ++o->count;
+    }
+    return o;
+}
+static Array *copy_array(const Array *from) {
+    Array *a=runtime_low_alloc(sizeof(Array));
+    if (!a) return NULL;
+    memset(a,0,sizeof(*a));
+    if (!from || !from->count) return a;
+    if (!(a->items=runtime_low_alloc(from->count*sizeof(Value)))) return a;
+    a->cap=from->count;
+    for (size_t i=0;i<from->count;++i) { copy_value(&a->items[i],&from->items[i]); ++a->count; }
+    return a;
+}
+/* A deep copy into `to`, whose old payload is already released or was never set. */
+static int copy_value(Value *to, const Value *from) {
+    memset(to,0,sizeof(*to));
+    to->null_access=from->null_access; to->context=from->context;
+    to->type=from->type;
+    if (from->type==T_STRING) to->s.text=from->s.text ? copy_text(from->s.text,strlen(from->s.text)) : NULL;
+    else if (from->type==T_ARRAY) to->a=copy_array(from->a);
+    else if (from->type==T_OBJECT) to->o=copy_object(from->o);
+    else to->u=from->u;
+    return (to->type!=T_ARRAY || to->a) && (to->type!=T_OBJECT || to->o);
+}
+/* Value::Value(bool / long / unsigned long / double / const String& / const Object& / const Array&) */
+static ABI void value_ctor_bool(Value *v, bool b) { memset(v,0,sizeof(*v)); v->type=T_BOOL; v->b=b; }
+static ABI void value_ctor_int(Value *v, int64_t i) { memset(v,0,sizeof(*v)); v->type=T_INT; v->i=i; }
+static ABI void value_ctor_uint(Value *v, uint64_t u) { memset(v,0,sizeof(*v)); v->type=T_UINT; v->u=u; }
+static ABI void value_ctor_real(Value *v, double d) { memset(v,0,sizeof(*v)); v->type=T_REAL; v->d=d; }
+static ABI void value_ctor_string(Value *v, const String *s) { memset(v,0,sizeof(*v)); value_set_string(v,s); }
+static ABI void value_set_object(Value *v, Object *const *object) {
+    Object *copy=copy_object(object ? *object : NULL);
+    release(v);
+    if (copy) { v->type=T_OBJECT; v->o=copy; }
+}
+static ABI void value_ctor_object(Value *v, Object *const *object) { memset(v,0,sizeof(*v)); value_set_object(v,object); }
+static ABI void value_ctor_array(Value *v, Array *const *array) {
+    memset(v,0,sizeof(*v));
+    if ((v->a=copy_array(array ? *array : NULL))) v->type=T_ARRAY;
+}
+/* Value &Value::operator=(const Value&): a deep copy; a Value without a callback keeps this one's. */
+static ABI Value *value_assign(Value *v, const Value *from) {
+    if (v==from || !from) return v;
+    NullCallback callback=v->null_access;
+    void *context=v->context;
+    Value copy;
+    copy_value(&copy,from);
+    release(v);
+    *v=copy;
+    if (!v->null_access) { v->null_access=callback; v->context=context; }
+    return v;
+}
+/* String &Value::referString(): the string payload for writing; a Value of another type becomes "". */
+static ABI String *value_refer_string(Value *v) {
+    if (v->type!=T_STRING) { release(v); v->type=T_STRING; }
+    return &v->s;
+}
+/* int Value::serialize(String&): the Value as JSON text (strings quoted). 0. */
+static ABI int32_t value_serialize(const Value *v, String *out) {
+    Buffer b={0};
+    serialize(&b,v,1);
+    string_set(out,b.data ? b.data : "",b.failed ? 0 : b.size);
+    free(b.data);
+    return 0;
+}
+/* String &String::operator=(const String&), String &String::append(const char*) */
+static ABI String *string_assign(String *s, const String *from) {
+    if (s!=from) string_set(s,string_c_str(from),string_size(from));
+    return s;
+}
+static ABI String *string_append(String *s, const char *text) {
+    size_t have=string_size(s), more=text ? strlen(text) : 0;
+    if (!more) return s;
+    char *joined=runtime_low_alloc(have+more+1);
+    if (!joined) return s;
+    memcpy(joined,string_c_str(s),have);
+    memcpy(joined+have,text,more+1);
+    if (s->text) runtime_low_free(s->text);
+    s->text=joined;
+    return s;
+}
+/* Object::Object(), ~Object(), Value &Object::operator[](const String &key): the key's Value,
+ * added as null when it is new. */
+static ABI void object_ctor(Object **self) { if ((*self=runtime_low_alloc(sizeof(Object)))) memset(*self,0,sizeof(Object)); }
+static ABI void object_dtor(Object **self) {
+    Value owner={.type=T_OBJECT,.o=*self};
+    release(&owner);
+    *self=NULL;
+}
+static ABI Value *object_key(Object **self, const String *key) {
+    static Value scratch;
+    Object *o=*self;
+    const char *text=string_c_str(key);
+    if (!o) { memset(&scratch,0,sizeof(scratch)); return &scratch; }
+    for (size_t i=0;i<o->count;++i)
+        if (!strcmp(string_c_str(&o->items[i].key),text)) return &o->items[i].value;
+    Pair *items=grow(o->items,&o->cap,o->count,sizeof(Pair));
+    if (!items) { memset(&scratch,0,sizeof(scratch)); return &scratch; }
+    o->items=items;
+    Pair *pair=&items[o->count++];
+    memset(pair,0,sizeof(*pair));
+    pair->key.text=*text ? copy_text(text,strlen(text)) : NULL;
+    return &pair->value;
+}
+/* Array::Array(), ~Array(), void Array::push_back(const Value&): appends a deep copy. */
+static ABI void array_ctor(Array **self) { if ((*self=runtime_low_alloc(sizeof(Array)))) memset(*self,0,sizeof(Array)); }
+static ABI void array_dtor(Array **self) {
+    Value owner={.type=T_ARRAY,.a=*self};
+    release(&owner);
+    *self=NULL;
+}
+static ABI void array_push_back(Array **self, const Value *value) {
+    Array *a=*self;
+    if (!a || !value) return;
+    Value *items=grow(a->items,&a->cap,a->count,sizeof(Value));
+    if (!items) return;
+    a->items=items;
+    copy_value(&items[a->count++],value);
+}
+
 /* Initializer(), ~Initializer(), initialize(const InitParameter*): nothing to set up, 0. */
 static ABI void initializer_ctor(uint64_t *self) { *self=0; }
 static ABI void initializer_dtor(uint64_t *self) { (void)self; }
 static ABI int32_t initializer_initialize(uint64_t *self, const void *param) { (void)self; (void)param; return 0; }
+/* int Initializer::terminate(): 0. */
+static ABI int32_t initializer_terminate(uint64_t *self) { (void)self; return 0; }
 /* MemAllocator base constructor/destructor (the game's subclass sets its own vtable after) and
  * the default notifyError(int error, size_t size, void *user): nothing. */
 static ABI void allocator_dtor(void *self) { (void)self; }
@@ -406,5 +543,25 @@ static const RuntimeExport exports[]={
     {"_ZNK3sce4Json5Value5countEv",value_count}, {"_ZNK3sce4Json5ValueixEPKc",value_key},
     {"_ZNK3sce4Json5ValueixEm",value_index}, {"_ZNK3sce4Json5Value8toStringERNS0_6StringE",value_to_string},
     {"_ZN3sce4Json6Parser5parseERNS0_5ValueEPKcm",parser_parse},
+    {"_ZN3sce4Json5ValueC1El",value_ctor_int},
+    {"_ZN3sce4Json5ValueC1ERKNS0_6ObjectE",value_ctor_object},
+    {"_ZN3sce4Json5ValueaSERKS1_",value_assign},
+    {"_ZN3sce4Json6ObjectD1Ev",object_dtor},
+    {"_ZN3sce4Json6ObjectixERKNS0_6StringE",object_key},
+    {"_ZN3sce4Json5ArrayD1Ev",array_dtor},
+    {"_ZN3sce4Json5ArrayC1Ev",array_ctor},
+    {"_ZN3sce4Json6ObjectC1Ev",object_ctor},
+    {"_ZN3sce4Json11Initializer9terminateEv",initializer_terminate},
+    {"_ZN3sce4Json5Value9serializeERNS0_6StringE",value_serialize},
+    {"_ZN3sce4Json5ValueC1Eb",value_ctor_bool},
+    {"_ZN3sce4Json6String6appendEPKc",string_append},
+    {"_ZN3sce4Json6StringaSERKS1_",string_assign},
+    {"_ZN3sce4Json5Value3setERKNS0_6ObjectE",value_set_object},
+    {"_ZN3sce4Json5ValueC1ERKNS0_5ArrayE",value_ctor_array},
+    {"_ZN3sce4Json5Value11referStringEv",value_refer_string},
+    {"_ZN3sce4Json5ValueC1Ed",value_ctor_real},
+    {"_ZN3sce4Json5ValueC1ERKNS0_6StringE",value_ctor_string},
+    {"_ZN3sce4Json5ValueC1Em",value_ctor_uint},
+    {"_ZN3sce4Json5Array9push_backERKNS0_5ValueE",array_push_back},
 };
 uintptr_t runtime_json_resolve(const char *name) { return RUNTIME_LOOKUP(exports,name); }

@@ -1,5 +1,5 @@
 /* Networking for an offline console (the cable is unplugged, as in runtime_services.c): the
- * libSceHttp normally reports HTTP NETWORK. Golf's discovery, server-time and EULA routes
+ * libSceHttp normally reports HTTP NETWORK. Golf's discovery and selected title routes
  * can replay over opt-in IPv4 loopback. The Second Screen server has no client. */
 #ifdef _WIN32
 #include <winsock2.h>
@@ -28,15 +28,23 @@ static _Atomic int32_t http_next=0x10000;
 #define DISCOVERY_PATH "/nmg-us/ss.info"
 #define SERVER_TIME_PATH "/nmg-us/replay-probe/gameapi_getservertime"
 #define EULA_PATH "/nmg-us/replay-probe/gameapi_geteula"
+#define NOTICE_PATH "/nmg-us/replay-probe/gameapi_getinfolist"
+#define DAILY_SCORE_PATH "/nmg-us/replay-probe/gameapi_getscorelist"
+#define BOARD_LIST_PATH "/nmg-us/replay-probe/gameapi_getboardlist"
+#define LOGIN_PREFIX "/nmg-us/replay-probe/gameapi_login?account=5932163534510096385&n="
 enum { DISCOVERY_HEADER_MAX=4096 };
 typedef struct {
     const char *url, *path;
-    unsigned request_size, response_min, response_max, response_alignment;
+    unsigned request_min, request_max, response_min, response_max, response_alignment;
 } ReplayRoute;
 static const ReplayRoute replay_routes[]={
-    {"https://ssps4.scej-network.jp:443" DISCOVERY_PATH, DISCOVERY_PATH, 0, 8, 0xa2800, 8},
-    {"https://127.0.0.1:8765" SERVER_TIME_PATH, SERVER_TIME_PATH, 102, 28, 28, 4},
-    {"https://127.0.0.1:8765" EULA_PATH, EULA_PATH, 110, 64, 60+0x8000, 4},
+    {"https://ssps4.scej-network.jp:443" DISCOVERY_PATH, DISCOVERY_PATH, 0, 0, 8, 0xa2800, 8},
+    {"https://127.0.0.1:8765" SERVER_TIME_PATH, SERVER_TIME_PATH, 102, 102, 28, 28, 4},
+    {"https://127.0.0.1:8765" EULA_PATH, EULA_PATH, 110, 110, 64, 60+0x8000, 4},
+    {"https://127.0.0.1:8765" NOTICE_PATH, NOTICE_PATH, 394, 1394, 36, 36, 4},
+    {"https://127.0.0.1:8765" DAILY_SCORE_PATH, DAILY_SCORE_PATH, 166, 258, 52, 52, 4},
+    {"https://127.0.0.1:8765" BOARD_LIST_PATH, BOARD_LIST_PATH, 138, 230, 40, 40, 4},
+    {"https://127.0.0.1:8765" LOGIN_PREFIX, NULL, 194, 246, 24, 24, 4},
 };
 static pthread_mutex_t discovery_lock=PTHREAD_MUTEX_INITIALIZER;
 static struct {
@@ -44,7 +52,8 @@ static struct {
     unsigned port;
     const ReplayRoute *route;
     int status, read;
-    size_t length;
+    size_t length, request_size;
+    char login_path[sizeof LOGIN_PREFIX+sizeof "-2147483648&s=1"];
     unsigned char *body;
 } discovery;
 
@@ -103,15 +112,16 @@ static int discovery_exchange(const void *data,int size) {
     target.sin_port=htons((uint16_t)discovery.port);
     if (connect(sock,(const struct sockaddr *)&target,sizeof target)) goto done;
 
-    char request[320], headers[96]="";
-    if (route->request_size) {
+    char request[384], headers[96]="";
+    if (size) {
         int n=snprintf(headers,sizeof headers,
                        "Content-Type: multipart/form-data; boundary=xYzZY\r\n"
-                       "Content-Length: %u\r\n",route->request_size);
+                       "Content-Length: %d\r\n",size);
         if (n<0 || (size_t)n>=sizeof headers) goto done;
     }
-    const char *method=route->request_size ? "POST" : "GET";
-    int request_size=snprintf(request,sizeof request,request_format,method,route->path,discovery.port,headers);
+    const char *method=size ? "POST" : "GET";
+    const char *path=route->path ? route->path : discovery.login_path;
+    int request_size=snprintf(request,sizeof request,request_format,method,path,discovery.port,headers);
     if (request_size<0 || (size_t)request_size>=sizeof request ||
         !discovery_send(sock,request,request_size) || !discovery_send(sock,data,size)) goto done;
 
@@ -172,12 +182,14 @@ done:
 static ABI int32_t http_send(int32_t id,const void *data,uint64_t length) {
     pthread_mutex_lock(&discovery_lock);
     int ok=0;
-    if (discovery.id && id==discovery.id && length==discovery.route->request_size && (!length || data)) {
+    if (discovery.id && id==discovery.id && length==discovery.request_size && (!length || data)) {
         free(discovery.body);
         discovery.body=NULL;
         discovery.status=discovery.read=0;
         discovery.length=0;
         ok=discovery_exchange(data,(int)length);
+        printf("Runtime: http replay request %d sent to 127.0.0.1:%u: %s, status %d, %llu body bytes\n",id,discovery.port,
+               ok ? "answered" : "no valid answer",discovery.status,(unsigned long long)discovery.length);
     }
     pthread_mutex_unlock(&discovery_lock);
     return ok ? 0 : HTTP_NETWORK;
@@ -266,6 +278,19 @@ static ABI int32_t http_request2(int32_t conn,const char *method,const char *pat
 /* sceHttpCreateRequestWithURL(connection, method, url, content length) (NID Aeu5wVKkF9w; Golf at
  * 0xec9174 passes method 0..2 from a table and keeps a result >= 0 as the request id): an id; the
  * URL is required. An explicitly configured discovery replay can use the returned id. */
+/* The only variable target is the primary local account and a signed 32-bit counter. */
+static int replay_url_matches(const ReplayRoute *route,const char *url) {
+    if (route->path) return !strcmp(url,route->url);
+    const size_t prefix=strlen(route->url);
+    if (strncmp(url,route->url,prefix)) return 0;
+    const char *counter=url+prefix;
+    const char *digits=counter+(*counter=='-');
+    const size_t size=strspn(digits,"0123456789");
+    if (!size || size>10 || (*digits=='0' && (size!=1 || digits!=counter)) ||
+        strcmp(digits+size,"&s=1")) return 0;
+    const long long value=strtoll(counter,NULL,10);
+    return value>=INT32_MIN && value<=INT32_MAX;
+}
 static ABI int32_t http_request_url(int32_t conn,int32_t method,const char *url,uint64_t length) {
     (void)conn;
     if (!url) return HTTP_INVALID_VALUE;
@@ -273,7 +298,8 @@ static ABI int32_t http_request_url(int32_t conn,int32_t method,const char *url,
     const ReplayRoute *replay=NULL;
     for (size_t i=0;i<sizeof replay_routes/sizeof *replay_routes;++i) {
         const ReplayRoute *route=&replay_routes[i];
-        if (method==(route->request_size!=0) && length==route->request_size && !strcmp(url,route->url)) {
+        if (method==(route->request_min!=0) && length>=route->request_min &&
+            length<=route->request_max && !((length-route->request_min)%4) && replay_url_matches(route,url)) {
             replay=route;
             break;
         }
@@ -286,13 +312,23 @@ static ABI int32_t http_request_url(int32_t conn,int32_t method,const char *url,
                 discovery.id=id;
                 discovery.port=port;
                 discovery.route=replay;
+                discovery.request_size=(size_t)length;
+                if (!replay->path)
+                    strcpy(discovery.login_path,url+sizeof("https://127.0.0.1:8765")-1);
                 pthread_mutex_unlock(&discovery_lock);
+                printf("Runtime: http replay request %d opened: %s\n",id,url);
                 return id;
             }
             pthread_mutex_unlock(&discovery_lock);
         }
     }
-    printf("Runtime: http request method %d, %llu body bytes: %s (not sent)\n",method,(unsigned long long)length,url);
+    /* The game retries a refused request many times a second: one line per run of the same URL. */
+    static _Atomic uint32_t last_url;
+    uint32_t hash=2166136261u;
+    for (const char *c=url;*c;++c) hash=(hash^(unsigned char)*c)*16777619u;
+    if (atomic_exchange(&last_url,hash)==hash) return id;
+    printf("Runtime: http request method %d, %llu body bytes: %s (not sent: %s)\n",method,(unsigned long long)length,url,
+           !replay ? "no replay route" : discovery_port() ? "another replay is open" : "GOLF_DISCOVERY_PORT is not set");
     return id;
 }
 /* sceHttpGetAllResponseHeaders(request, header, size): no request gets a response. */

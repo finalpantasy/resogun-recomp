@@ -12,19 +12,30 @@
 #include <string.h>
 
 #define NP_INVALID_ARGUMENT ((int32_t)0x80550003)
+#define AUTH_INVALID_ARGUMENT ((int32_t)0x80550301)
+#define AUTH_INVALID_SIZE ((int32_t)0x80550302)
+#define AUTH_INVALID_ID ((int32_t)0x80550307)
 #define WEBAPI_OUT_OF_MEMORY ((int32_t)0x80552901)
 #define WEBAPI_INVALID_ARGUMENT ((int32_t)0x80552902)
 #define WEBAPI_INVALID_LIB_CONTEXT_ID ((int32_t)0x80552903)
 #define WEBAPI_REQUEST_NOT_FOUND ((int32_t)0x80552907)
 #define USER_INVALID (-1)
 
-static int local_account, replay_tickets;
+static int local_account, replay_tickets, replay_auth;
+static pthread_mutex_t auth_lock=PTHREAD_MUTEX_INITIALIZER;
+static int32_t auth_id, auth_next=0x10010000;
+static int auth_ready;
 static char online_id[17]="Golfer";
 void runtime_golf_set_title(const char *title_id) {
     const char *mode=getenv("GOLF_NP"), *name=getenv("GOLF_ONLINE_ID");
     local_account=title_id && !strncmp(title_id,"CUSA04687",9) && !(mode && !strcmp(mode,"offline"));
     const char *grants=getenv("GOLF_TICKET_GRANTS");
     replay_tickets=grants && !strcmp(grants,"1");
+    const char *auth=getenv("GOLF_LOCAL_AUTH");
+    pthread_mutex_lock(&auth_lock);
+    replay_auth=local_account && auth && !strcmp(auth,"1");
+    auth_id=auth_ready=0;
+    pthread_mutex_unlock(&auth_lock);
     if (name && *name) snprintf(online_id,sizeof(online_id),"%.16s",name);
     if (local_account) printf("Runtime: local PSN account '%s' signed in (GOLF_NP=offline turns this off)\n",online_id);
 }
@@ -221,6 +232,76 @@ static ABI int32_t webapi_delete(int64_t id) {
     return r ? 0 : WEBAPI_REQUEST_NOT_FOUND;
 }
 
+/* One async request for the guest's local title login probe. No platform credentials. */
+typedef struct {
+    uint64_t size;
+    int32_t user, reserved;
+    const char *client_id, *scope;
+} LocalAuthCodeParam;
+
+static ABI int32_t local_auth_create(const uint64_t *param) {
+    if (!param) return AUTH_INVALID_ARGUMENT;
+    if (param[0]!=24) return AUTH_INVALID_SIZE;
+    pthread_mutex_lock(&auth_lock);
+    int32_t result=AUTH_INVALID_ID;
+    if (!auth_id && auth_next<INT32_MAX) result=auth_id=auth_next++;
+    pthread_mutex_unlock(&auth_lock);
+    return result;
+}
+
+static ABI int32_t local_auth_code(int32_t id,const LocalAuthCodeParam *param,char *code,int32_t *issuer) {
+    if (!param || !code || !issuer) return AUTH_INVALID_ARGUMENT;
+    if (param->size!=sizeof(*param)) return AUTH_INVALID_SIZE;
+    if (param->user==USER_INVALID || !param->client_id || !param->scope) return AUTH_INVALID_ARGUMENT;
+    pthread_mutex_lock(&auth_lock);
+    int32_t result=AUTH_INVALID_ID;
+    if (auth_id && id==auth_id && !auth_ready) {
+        static const char synthetic[]="GolfLocalProbe";
+        memcpy(code,synthetic,sizeof synthetic);
+        *issuer=0;
+        auth_ready=1;
+        result=0;
+    }
+    pthread_mutex_unlock(&auth_lock);
+    return result;
+}
+
+static ABI int32_t local_auth_poll(int32_t id,int32_t *operation) {
+    if (!operation) return AUTH_INVALID_ARGUMENT;
+    pthread_mutex_lock(&auth_lock);
+    int32_t result=AUTH_INVALID_ID;
+    if (auth_id && id==auth_id && auth_ready) {
+        *operation=0;
+        result=0;
+    }
+    pthread_mutex_unlock(&auth_lock);
+    return result;
+}
+
+static ABI int32_t local_auth_abort(int32_t id) {
+    pthread_mutex_lock(&auth_lock);
+    const int match=auth_id && id==auth_id;
+    if (match) auth_ready=0;
+    pthread_mutex_unlock(&auth_lock);
+    return match ? 0 : AUTH_INVALID_ID;
+}
+
+static ABI int32_t local_auth_delete(int32_t id) {
+    pthread_mutex_lock(&auth_lock);
+    const int match=auth_id && id==auth_id;
+    if (match) auth_id=auth_ready=0;
+    pthread_mutex_unlock(&auth_lock);
+    return match ? 0 : AUTH_INVALID_ID;
+}
+
+static const RuntimeExport auth_exports[]={
+    {"sceNpAuthCreateAsyncRequest",local_auth_create},
+    {"sceNpAuthGetAuthorizationCodeA",local_auth_code},
+    {"sceNpAuthPollAsync",local_auth_poll},
+    {"sceNpAuthAbortRequest",local_auth_abort},
+    {"sceNpAuthDeleteRequest",local_auth_delete},
+};
+
 static const RuntimeExport exports[]={
     {"sceNpGetState",np_state}, {"sceNpGetOnlineId",np_online_id}, {"sceNpGetNpId",np_id},
     {"sceNpGetAccountCountryA",np_country},
@@ -230,4 +311,10 @@ static const RuntimeExport exports[]={
     {"sceNpWebApiReadData",webapi_read}, {"sceNpWebApiDeleteRequest",webapi_delete},
     {"sceNpWebApiAbortRequest",ok},
 };
-uintptr_t runtime_golf_resolve(const char *name) { return local_account ? RUNTIME_LOOKUP(exports,name) : 0; }
+uintptr_t runtime_golf_resolve(const char *name) {
+    if (replay_auth && !strncmp(name,"sceNpAuth",9)) {
+        uintptr_t address=RUNTIME_LOOKUP(auth_exports,name);
+        if (address) return address;
+    }
+    return local_account ? RUNTIME_LOOKUP(exports,name) : 0;
+}

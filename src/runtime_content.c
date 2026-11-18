@@ -150,7 +150,7 @@ static void builtin_addons(void) {
     for (size_t i=0;i<sizeof(golf_addons)/sizeof(golf_addons[0]) && addon_count<MAX_ADDONS;++i) {
         if (find_addon(golf_addons[i])>=0) continue;
         Addon *a=&addons[addon_count++];
-        memcpy(a->label,golf_addons[i],LABEL_SIZE); strcpy(a->folder,"built in");
+        memcpy(a->label,golf_addons[i],strlen(golf_addons[i])+1); strcpy(a->folder,"built in");
         ++added;
     }
     printf("Runtime: %u built-in add-ons unlocked (GOLF_ENTITLEMENTS=original turns this off)\n",added);
