@@ -62,7 +62,7 @@ if [[ ${1:-} == --test ]]; then
         "$cc" -std=c11 -O2 -g -Wall -Wextra -Werror -pthread "${cflags[@]}" -I. -Isrc "$source" "$@" -o "out/$name-test$exe"
         "out/$name-test$exe"
     }
-    run_test services tests/test_services.c "${compat[@]}"
+    run_test services tests/test_services.c "${compat[@]}" src/runtime_golf.c
     run_test savedata tests/test_savedata.c "${compat[@]}"
     run_test content tests/test_content.c "${compat[@]}"
     run_test eventflag tests/test_eventflag.c
