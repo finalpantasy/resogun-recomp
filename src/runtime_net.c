@@ -160,6 +160,16 @@ static int discovery_exchange(ReplayRequest *req,const void *data,int size) {
         "User-Agent: PS4Application nolib/0.0 (U-UP9000-CUSA04687_00-EVERYBODYSGOLF07/2017022700/1170)\r\n"
         "%sConnection: close\r\n\r\n";
     const ReplayRoute *route=req->route;
+    /* GOLF_HTTP_DUMP=<folder> (diagnostics): save each replayed request body as <counter>-<last path part>.bin. */
+    if (getenv("GOLF_HTTP_DUMP") && data && size>0) {
+        static atomic_int dumped;
+        const char *path=route->path ? route->path : req->login_path, *name=strrchr(path,'/');
+        char file[512];
+        snprintf(file,sizeof file,"%s/%03d-%.64s.bin",getenv("GOLF_HTTP_DUMP"),atomic_fetch_add(&dumped,1),name ? name+1 : path);
+        for (char *c=strrchr(file,'/')+1;*c;++c) if (*c=='?' || *c=='&' || *c=='=') *c='_';
+        FILE *f=fopen(file,"wb");
+        if (f) { fwrite(data,1,(size_t)size,f); fclose(f); }
+    }
 #ifdef _WIN32
     WSADATA wsa;
     if (WSAStartup(MAKEWORD(2,2),&wsa)) return 0;
