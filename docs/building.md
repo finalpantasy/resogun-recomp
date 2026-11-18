@@ -29,13 +29,15 @@ git clone --recurse-submodules <repository URL>
 ```
 
 `build.sh` fetches the submodules itself if the clone was made without them. The runner links a
-small static FFmpeg (9.0.2; `tools/build_ffmpeg.sh`): only the H.264, AAC and PNG decoders, the MP4
-demuxer and the file protocol, for movies and save icons. A build of it
-for each platform is committed in `prebuilt/ffmpeg-windows.tar.xz` and `prebuilt/ffmpeg-linux.tar.xz`,
-and the first build unpacks the one for its platform into `out/ffmpeg`. If that archive was made
-with another version or options than the script names, FFmpeg's source is downloaded (checked
-against its SHA-256) and built instead, which takes a few minutes; `nasm` gives it its x86 assembly
-(without it, decoding is slower). `RESOGUN_FFMPEG_PREBUILT=0` always builds from source.
+small static FFmpeg 9.0.2 through `tools/build_ffmpeg.sh`. H.264 and AAC
+decode movies, PNG decodes save icons, and ATRAC9 decodes Ngs2 audio. The
+build uses the MP4 demuxer and the file protocol.
+
+The script unpacks the platform archive in `prebuilt/` into `out/ffmpeg`
+when its version and options match. Otherwise it downloads and verifies
+FFmpeg's source against its SHA-256 before building it into that folder.
+Install `nasm` to enable the faster x86 assembly paths. Set
+`RESOGUN_FFMPEG_PREBUILT=0` to build from source.
 
 After changing FFmpeg's version or options, rewrite both archives and commit them with the script:
 `bash tools/build_ffmpeg.sh --pack` on Windows (Git Bash or the MSYS2 shell), and
