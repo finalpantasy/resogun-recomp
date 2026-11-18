@@ -1265,7 +1265,10 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 break;
             }
             case PM4ItOpcode::WaitOnCeCounter: {
-                while (cblock.ce_count <= cblock.de_count && !ce_task.handle.done()) {
+                // resogun: an indirect buffer runs with no CE stream, so ce_task has no
+                // coroutine; Everybody's Golf issues WAIT_ON_CE_COUNTER inside one mid-round.
+                while (ce_task.handle && cblock.ce_count <= cblock.de_count &&
+                       !ce_task.handle.done()) {
                     RESUME_GFX(ce_task);
                 }
                 break;
