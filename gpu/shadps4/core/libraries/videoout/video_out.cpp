@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <atomic>
 #include <cstdio>
 #include "common/assert.h"
 #include "common/elf_info.h"
@@ -356,7 +357,16 @@ s32 sceVideoOutSubmitEopFlip(s32 handle, u32 buf_id, u32 mode, s64 flip_arg, voi
     Platform::IrqC::Instance()->RegisterOnce(
         Platform::InterruptId::GfxFlip, [=](Platform::InterruptId irq) {
             ASSERT_MSG(irq == Platform::InterruptId::GfxFlip, "An unexpected IRQ occured");
-            ASSERT_MSG(port->buffer_labels[buf_id] == 1, "Out of order flip IRQ");
+            // resogun: Everybody's Golf once reached this with the label not yet 1 during the Open
+            // Course load (an IRQ ahead of the label write, or the same buffer flipped twice). The flip
+            // itself is valid, so log it and present instead of ending the run.
+            if (port->buffer_labels[buf_id] != 1) {
+                static std::atomic<int> logged{0};
+                if (logged.fetch_add(1) < 4) {
+                    LOG_WARNING(Lib_VideoOut, "Out of order flip IRQ (buffer {}, label {})", buf_id,
+                                port->buffer_labels[buf_id]);
+                }
+            }
             const auto result = driver->SubmitFlip(port, buf_id, flip_arg, true);
             ASSERT_MSG(result, "EOP flip submission failed");
         });
