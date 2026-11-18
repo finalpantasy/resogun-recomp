@@ -23,7 +23,7 @@ Linux)
 *) echo 'Windows (Git Bash or an MSYS2 shell) or Linux only.' >&2; exit 1 ;;
 esac
 jobs=${GOLF_BUILD_JOBS:-8}
-version=$(git describe --tags --always --dirty 2>/dev/null || printf development)
+version=$(git describe --tags --always 2>/dev/null || printf development)
 launcher_cmake=$PWD/packaging/launcher.cmake
 command -v cygpath >/dev/null && launcher_cmake=$(cygpath -m "$launcher_cmake")
 cc=${CC:-clang} cxx=${CXX:-clang++}
