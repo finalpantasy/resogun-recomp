@@ -293,9 +293,34 @@ static int64_t do_open(const char *guest,int flags,int mode) {
         pthread_mutex_unlock(&lock);
         return fd<0 ? -EMFILE : fd;
     }
-    if (game_path(guest) && (flags & (3|0x8|0x200|0x400|0x800))) return -EROFS;
     char path[1024];
     int e=translate(guest,path,sizeof(path));
+    if (game_path(guest) && (flags & (3|0x8|0x200|0x400|0x800))) {
+        /* The read-only game image: a write fails with EROFS, but a path whose directory is not
+         * there fails the lookup first (Everybody's Golf tries /app0//savedata0/DATA0.BIN before
+         * /savedata0/DATA0.BIN and only goes on after ENOENT). */
+        int result=EROFS;
+        if (!e) {
+            char *slash=strrchr(path,'/');
+#ifdef _WIN32
+            char *back=strrchr(path,'\\');
+            if (back && (!slash || back>slash)) slash=back;
+            HostStat parent;
+#else
+            struct stat parent;
+#endif
+            if (slash && slash!=path) {
+                *slash=0;
+#ifdef _WIN32
+                if (host_stat(path,&parent)) result=ENOENT;
+#else
+                if (stat(path,&parent)) result=ENOENT;
+#endif
+            }
+        } else if (e==ENOENT) result=ENOENT;
+        if (trace_match(guest)) printf("File trace: open(%s) for writing -> errno %d%c",guest,result,10);
+        return -result;
+    }
     if (e) return -e;
 #ifdef _WIN32
     /* Windows cannot open a directory as a CRT descriptor: directories are listings only. */
