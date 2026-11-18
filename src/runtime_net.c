@@ -36,6 +36,9 @@ static _Atomic int32_t http_next=0x10000;
 #define BOARD_LIST_PATH "/nmg-us/replay-probe/gameapi_getboardlist"
 #define CHARACTER_BOARD_PATH "/nmg-us/replay-probe/gameapi_getboardlistcharactordownload"
 #define NATIONAL_BOARD_PATH "/nmg-us/replay-probe/gameapi_getboardlistnational"
+#define NATIONAL_GAME_DATA_PATH "/nmg-us/replay-probe/gameapi_getnationalgamedata"
+#define NATIONAL_BOARD_DOWNLOAD_PATH "/nmg-us/replay-probe/gamedata-down/local-national-board.bin"
+#define NATIONAL_GAME_DOWNLOAD_PATH "/nmg-us/replay-probe/gamedata-down/local-tournament.xb"
 #define CHARACTER_COUNT_PATH "/nmg-us/replay-probe/gameapi_getcountcharactordownload"
 #define PROPERTY_INFO_PATH "/nmg-us/replay-probe/gameapi_getgamepropertyinfo"
 #define TELEMETRY_PATH "/nmg-us/replay-probe/analytics/19d916d7-6a01-4371-9e6c-c91b2ff386bb/telemetry"
@@ -92,6 +95,9 @@ static const ReplayRoute replay_routes[]={
     /* Action 0x26 of the login run (slot 0x2f). Over plain http the game encrypts the payload and drops
      * it (eboot 0xec97d0), so the discovery fixture must list this key as https. */
     {"https://127.0.0.1:8765" NATIONAL_BOARD_PATH, NATIONAL_BOARD_PATH, 378, 1378, 28, 0x8000, 4, NULL},
+    {"http://127.0.0.1:8765" NATIONAL_BOARD_DOWNLOAD_PATH, NATIONAL_BOARD_DOWNLOAD_PATH, 0, 0, 136, 136, 4, NULL},
+    {"https://127.0.0.1:8765" NATIONAL_GAME_DATA_PATH, NATIONAL_GAME_DATA_PATH, 406, 1406, 72, 72, 4, NULL},
+    {"http://127.0.0.1:8765" NATIONAL_GAME_DOWNLOAD_PATH, NATIONAL_GAME_DOWNLOAD_PATH, 0, 0, 16, 8192, 1, NULL},
     {"https://127.0.0.1:8765" PROPERTY_INFO_PATH, PROPERTY_INFO_PATH, 118, 118, 24, 24, 4, NULL},
     {"https://127.0.0.1:8765" CHARACTER_COUNT_PATH "?account=", CHARACTER_COUNT_PATH "?account=", 394, 1394, 44, 44, 4, NULL},
     {"https://127.0.0.1:8765" CHARACTER_COUNT_PATH SESSION_QUERY, NULL, 394, 1394, 44, 44, 4, NULL},
