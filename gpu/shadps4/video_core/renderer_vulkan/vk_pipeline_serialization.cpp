@@ -881,7 +881,9 @@ vk::ResultValue<vk::UniquePipeline> CreateCachedGraphicsPipeline(
     ++binary_misses;
     flags.flags = vk::PipelineCreateFlags2{static_cast<VkPipelineCreateFlags>(info.flags)} |
                   vk::PipelineCreateFlagBits2::eCaptureDataKHR;
+    const auto compile_started = std::chrono::steady_clock::now();
     auto result = create(nullptr, captured_info, false);
+    const double compile_ms = ElapsedNs(compile_started) / 1e6;
     if (result.result != vk::Result::eSuccess) {
         ++binary_errors;
         return create(cache, info, false);
@@ -940,6 +942,13 @@ vk::ResultValue<vk::UniquePipeline> CreateCachedGraphicsPipeline(
             binaries.push_back(std::move(binary));
         }
         CountDictionary(DictionaryHash(binaries), &DictionaryCounts::captured);
+        // resogun: a compile this long stalls a load when the GPU thread waits for it.
+        if (compile_ms >= 1000.0) {
+            std::printf("Pipeline slow compile: %.0f ms, %s, dictionary %s, stages %016zx %016zx %016zx\n",
+                        compile_ms, file.filename().string().c_str(),
+                        DictionaryHash(binaries) ? "yes" : "no", key.stage_hashes[0],
+                        key.stage_hashes[1], key.stage_hashes[MaxShaderStages - 1]);
+        }
         if (SelftestEnabled()) {
             VkResult handles_result = VK_SUCCESS;
             const auto again = restore(binaries, handles_result);
