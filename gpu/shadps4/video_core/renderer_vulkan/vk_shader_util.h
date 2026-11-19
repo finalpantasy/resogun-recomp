@@ -17,4 +17,8 @@ namespace Vulkan {
  */
 vk::ShaderModule CompileSPV(std::span<const u32> code, vk::Device device);
 
+/// resogun: XXH3 of the SPIR-V a module was made from by CompileSPV (0 if unknown), for the
+/// pipeline fingerprints of RESOGUN_PIPELINE_FINGERPRINT.
+u64 ShaderModuleHash(vk::ShaderModule module);
+
 } // namespace Vulkan

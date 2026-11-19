@@ -10,6 +10,7 @@
 #include <windows.h>
 #endif
 #include "resogun_png.h"
+#include "resogun_toggles.h"
 #include "resogun_settings.h"
 #include "video_core/buffer_cache/buffer.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
@@ -51,12 +52,27 @@ FormatTraits Traits(vk::Format format) {
 }
 
 /// The content key: the guest bytes, size and format family (sRGB and UNORM views share it).
+/// 0 if the guest range cannot be read: an upload from GPU-side data can name memory the game
+/// has already unmapped (seen in a course load), and the texture then keeps its own image.
 u64 KeyOf(const Image& image) {
     const auto& info = image.info;
     const u64 seed = (u64(info.size.width) << 40) ^ (u64(info.size.height) << 16) ^
                      Traits(info.pixel_format).family;
-    return XXH3_64bits_withSeed(reinterpret_cast<const void*>(info.guest_address),
-                                info.guest_size, seed);
+    sigjmp_buf recover;
+    if (sigsetjmp(recover, 0)) {
+        static std::atomic<u32> unreadable{};
+        if (unreadable++ < 4) {
+            std::printf("Texture pack: %ux%u texture at %#llx not readable; it keeps its own image\n",
+                        info.size.width, info.size.height,
+                        static_cast<unsigned long long>(info.guest_address));
+        }
+        return 0;
+    }
+    runtime_fault_recover = &recover;
+    const u64 key = XXH3_64bits_withSeed(reinterpret_cast<const void*>(info.guest_address),
+                                         info.guest_size, seed);
+    runtime_fault_recover = nullptr;
+    return key;
 }
 
 /// A DDS file with a DX10 header holding one 2D mip level.
@@ -147,6 +163,9 @@ void TexturePack::OnUpload(Image& image) {
         return;
     }
     const u64 key = KeyOf(image);
+    if (!key) {
+        return;
+    }
     if (!dump_dir.empty() && dumped.insert(key).second) {
         Dump(image, key);
     }

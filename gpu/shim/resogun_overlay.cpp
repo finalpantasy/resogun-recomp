@@ -149,7 +149,7 @@ int exit_focus = 0;
 std::atomic<bool> cheats_open{false};
 int cheat_row = 0;
 bool cheats_dirty = false;
-enum DisplayRow : int { RowAspect, RowMode, RowResolution, RowMonitor, RowVsync, RowFps, RowRender, RowSharpen, RowHdr, RowCount };
+enum DisplayRow : int { RowAspect, RowMode, RowResolution, RowMonitor, RowVsync, RowFps, RowRender, RowSharpen, RowSmaa, RowHdr, RowCount };
 
 // The colours of the game's own menus (Main Menu, Options): teal bars on a dark, see-through
 // backdrop inside a thin cyan frame.
@@ -413,6 +413,7 @@ void ChangeDisplayRow(int row, int delta) {
                                                                                    : ResogunSettings::Render4k;
         break;
     case RowSharpen: s.sharpening = !s.sharpening; break;
+    case RowSmaa: s.smaa = !s.smaa; break;
     case RowHdr: s.hdr = !s.hdr; break;
     default: return;
     }
@@ -506,6 +507,10 @@ DisplayRowText DisplayRowAt(int row) {
         return {"Sharpening", s.sharpening ? "On" : "Off",
                 "AMD FSR 1 RCAS sharpening of the picture at the window's size: crisper edges and detail, "
                 "without halos. Costs well under a millisecond a frame. Applies at once; F9 switches it over the game."};
+    case RowSmaa:
+        return {"Anti-aliasing", s.smaa ? "SMAA" : "Off",
+                "SMAA 1x smooths jagged edges of the game's picture at its render size, before it is scaled "
+                "to the window. Off keeps the game's own look. Applies at once."};
     case RowHdr: {
         std::string text = s.hdr ? "On" : "Off";
         if (s.hdr != s.startup_hdr) {

@@ -373,6 +373,7 @@ Presenter::Presenter(Frontend::WindowSDL& window_, AmdGpu::Liverpool* liverpool_
 
     pp_pass.Create(device, swapchain.GetSurfaceFormat().format);
     rcas_pass.Create(device, instance.GetAllocator(), swapchain.GetSurfaceFormat().format);
+    smaa_pass.Create(device, instance.GetAllocator());
     ResogunOverlay::Init(instance, swapchain.GetSurfaceFormat().format, num_images);
     // resogun: the window was created hidden. Until the game's first frame, a while later,
     // nothing else draws into it, so it gets the start-up picture as soon as it is shown (cloaked on
@@ -704,6 +705,10 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
         runtime.FlushBarriers();
     }
     expected_ratio = static_cast<float>(image_size.width) / static_cast<float>(image_size.height);
+    // resogun: SMAA works on the game's picture at its own size, before it is scaled to the window.
+    if (image_view && ResogunSettings::Get().smaa.load(std::memory_order_relaxed)) {
+        image_view = smaa_pass.Render(cmdbuf, draw_scheduler, image_view, image_size, view_info.format);
+    }
 
 
     // Vulkan has no sRGB variant of the 10-bit format, so an A2R10G10B10Srgb buffer reaches
