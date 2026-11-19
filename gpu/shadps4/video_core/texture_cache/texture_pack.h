@@ -34,6 +34,8 @@ struct TextureReplacement {
     TextureReplacement(vk::Device device, VmaAllocator allocator) : image{device, allocator} {}
     UniqueImage image;
     u32 width = 0, height = 0, levels = 0;
+    /// Its formats for UNORM and sRGB views (RGBA8 for a PNG, the BCn pair for a DDS).
+    vk::Format unorm = vk::Format::eR8G8B8A8Unorm, srgb = vk::Format::eR8G8B8A8Srgb;
 };
 
 class TexturePack {
@@ -60,13 +62,17 @@ private:
         std::vector<std::vector<u8>> mips;
         std::vector<vk::Extent2D> extents;
         u64 bytes = 0;
+        vk::Format unorm = vk::Format::eR8G8B8A8Unorm, srgb = vk::Format::eR8G8B8A8Srgb;
+        u32 block_bytes = 0; ///< 0 for RGBA8, else the bytes of one 4x4 block
     };
     static constexpr u64 MaxDecoded = 256ull << 20; ///< decoded and not yet uploaded
     static bool Eligible(const Image& image);
     void Dump(Image& image, u64 key);
     void Work(std::stop_token stop);
-    /// PNG to RGBA8 with a mip chain; `out.mips` stays empty when the file cannot be decoded.
+    /// PNG to RGBA8 with a mip chain, or a DDS's BC1/BC3/BC7 mips as they are; `out.mips` stays
+    /// empty when the file cannot be decoded.
     static void Decode(const std::string& path, Decoded& out);
+    static void DecodeDds(const std::string& path, Decoded& out);
     void Upload(Decoded& decoded);
 
     const Vulkan::Instance& instance;

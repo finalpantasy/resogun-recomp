@@ -130,15 +130,19 @@ TexturePack::TexturePack(const Vulkan::Instance& instance_, Vulkan::Scheduler& s
     if (const char* dir = settings.texture_pack.c_str(); *dir) {
         std::error_code ec;
         for (const auto& entry : std::filesystem::recursive_directory_iterator(dir, ec)) {
-            if (!entry.is_regular_file(ec) || entry.path().extension() != ".png") {
+            const auto ext = entry.path().extension();
+            if (!entry.is_regular_file(ec) || (ext != ".png" && ext != ".dds")) {
                 continue;
             }
             const auto stem = entry.path().stem().string();
             if (stem.size() < 16 || stem.find_first_not_of("0123456789abcdef") < 16) {
                 continue;
             }
-            index[std::strtoull(stem.substr(0, 16).c_str(), nullptr, 16)] =
-                entry.path().string();
+            // A DDS (block-compressed, with its mips) wins over a PNG of the same texture.
+            auto& path = index[std::strtoull(stem.substr(0, 16).c_str(), nullptr, 16)];
+            if (path.empty() || ext == ".dds") {
+                path = entry.path().string();
+            }
         }
         std::printf("Texture pack: %zu replacement textures in %s\n", index.size(), dir);
         if (!index.empty()) {
@@ -219,7 +223,52 @@ void TexturePack::Work(std::stop_token stop) {
     }
 }
 
+void TexturePack::DecodeDds(const std::string& path, Decoded& out) {
+    FILE* f = std::fopen(path.c_str(), "rb");
+    if (!f) {
+        return;
+    }
+    u32 header[37] = {};
+    const bool read = std::fread(header, 1, sizeof(header), f) == sizeof(header);
+    // "DDS ", then a DX10 header (fourcc at dword 21) with the DXGI format at dword 32.
+    if (!read || header[0] != 0x20534444 || header[21] != 0x30315844) {
+        std::fclose(f);
+        return;
+    }
+    switch (header[32]) {
+    case 71: case 72:
+        out.unorm = vk::Format::eBc1RgbaUnormBlock, out.srgb = vk::Format::eBc1RgbaSrgbBlock;
+        out.block_bytes = 8;
+        break;
+    case 77: case 78:
+        out.unorm = vk::Format::eBc3UnormBlock, out.srgb = vk::Format::eBc3SrgbBlock;
+        out.block_bytes = 16;
+        break;
+    case 98: case 99:
+        out.unorm = vk::Format::eBc7UnormBlock, out.srgb = vk::Format::eBc7SrgbBlock;
+        out.block_bytes = 16;
+        break;
+    default: std::fclose(f); return;
+    }
+    u32 width = header[4], height = header[3];
+    const u32 levels = std::max(header[7], 1u);
+    for (u32 m = 0; m < levels && width && height && width <= 16384 && height <= 16384; ++m) {
+        std::vector<u8> mip(size_t((width + 3) / 4) * ((height + 3) / 4) * out.block_bytes);
+        if (std::fread(mip.data(), 1, mip.size(), f) != mip.size()) {
+            break;
+        }
+        out.mips.push_back(std::move(mip));
+        out.extents.push_back({width, height});
+        width = std::max(width / 2, 1u), height = std::max(height / 2, 1u);
+    }
+    std::fclose(f);
+}
+
 void TexturePack::Decode(const std::string& path, Decoded& out) {
+    if (path.ends_with(".dds")) {
+        DecodeDds(path, out);
+        return;
+    }
     ResogunPng::Image png;
     if (!ResogunPng::LoadRgba(path.c_str(), png) || png.width <= 0 || png.height <= 0) {
         return;
@@ -269,7 +318,7 @@ void TexturePack::Tick() {
             decoded_bytes -= next.bytes;
         }
         queue_cv.notify_one();
-        const u64 bytes = u64(next.extents[0].width) * next.extents[0].height * 4;
+        const u64 bytes = next.mips[0].size();
         Upload(next);
         budget = bytes >= budget ? 0 : budget - bytes;
     }
@@ -316,10 +365,12 @@ void TexturePack::Upload(Decoded& decoded) {
     replacement->width = extents[0].width;
     replacement->height = extents[0].height;
     replacement->levels = u32(mips.size());
+    replacement->unorm = decoded.unorm;
+    replacement->srgb = decoded.srgb;
     const vk::ImageCreateInfo image_ci = {
         .flags = vk::ImageCreateFlagBits::eMutableFormat,
         .imageType = vk::ImageType::e2D,
-        .format = vk::Format::eR8G8B8A8Unorm,
+        .format = decoded.unorm,
         .extent = {replacement->width, replacement->height, 1},
         .mipLevels = replacement->levels,
         .arrayLayers = 1,
@@ -378,12 +429,16 @@ void TexturePack::Upload(Decoded& decoded) {
     // Bands of rows through the staging ring (reused once the GPU is done with them): a
     // dedicated buffer per texture would hold pinned memory for each until it is trimmed.
     constexpr u64 Band = 8ull << 20;
+    // Block-compressed mips go in rows of 4x4 blocks: a "row" below is one block row.
+    const u32 block = decoded.block_bytes ? 4 : 1;
     for (u32 m = 0; m < mips.size(); ++m) {
         const u32 width = extents[m].width, height = extents[m].height;
-        const u64 row = u64(width) * 4;
+        const u64 row = decoded.block_bytes ? u64((width + 3) / 4) * decoded.block_bytes
+                                            : u64(width) * 4;
+        const u32 block_rows = (height + block - 1) / block;
         const u32 rows = u32(std::max<u64>(1, Band / row));
-        for (u32 y = 0; y < height; y += rows) {
-            const u32 count = std::min(rows, height - y);
+        for (u32 y = 0; y < block_rows; y += rows) {
+            const u32 count = std::min(rows, block_rows - y);
             const auto staging =
                 runtime.GetStagingPool().Request(row * count, MemoryType::HostUncached, 16);
             std::memcpy(staging.mapped, mips[m].data() + row * y, row * count);
@@ -391,8 +446,8 @@ void TexturePack::Upload(Decoded& decoded) {
             const vk::BufferImageCopy copy = {
                 .bufferOffset = staging.offset,
                 .imageSubresource = {vk::ImageAspectFlagBits::eColor, m, 0, 1},
-                .imageOffset = {0, s32(y), 0},
-                .imageExtent = {width, count, 1},
+                .imageOffset = {0, s32(y * block), 0},
+                .imageExtent = {width, std::min(count * block, height - y * block), 1},
             };
             scheduler.Record([buffer = staging.buffer->Handle(), image, copy](vk::CommandBuffer cmd) {
                 cmd.copyBufferToImage(buffer, image, vk::ImageLayout::eTransferDstOptimal, copy);
@@ -433,7 +488,7 @@ vk::ImageView TexturePack::ViewFor(const Image& image, const ImageView& view) {
     }
     const TextureReplacement* owner = found->second.get();
     const ViewKey view_key{owner,
-                           traits.srgb ? vk::Format::eR8G8B8A8Srgb : vk::Format::eR8G8B8A8Unorm,
+                           traits.srgb ? owner->srgb : owner->unorm,
                            type, info.mapping};
     const u64 hash = XXH3_64bits(&view_key, sizeof(view_key));
     for (auto [it, end] = views.equal_range(hash); it != end; ++it) {
