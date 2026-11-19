@@ -20,6 +20,7 @@ struct Target {
     vk::Format format{};
     u32 width{}, height{};
     vk::Format asked{}, view{}; ///< resogun: guest's format and the bound view's, if known
+    u32 layers{1}, levels{1}, tile{}; ///< resogun: image layers, mip levels, guest tile mode
     bool operator==(const Target&) const = default;
 };
 
@@ -67,7 +68,13 @@ std::array<std::atomic<VAddr>, 16> display_list{};
 std::atomic<u32> display_count{0};
 
 Target ToTarget(const VideoCore::ImageInfo& info) {
-    return {info.guest_address, info.pixel_format, info.size.width, info.size.height};
+    return {.address = info.guest_address,
+            .format = info.pixel_format,
+            .width = info.size.width,
+            .height = info.size.height,
+            .layers = info.resources.layers,
+            .levels = info.resources.levels,
+            .tile = static_cast<u32>(info.tile_mode)};
 }
 
 std::string Describe(const Target& t) {
@@ -76,6 +83,10 @@ std::string Describe(const Target& t) {
     }
     std::string out =
         std::format("{:#x} {} {}x{}", t.address, vk::to_string(t.format), t.width, t.height);
+    if (t.layers > 1 || t.levels > 1) {
+        out += std::format(" layers {} mips {}", t.layers, t.levels);
+    }
+    out += std::format(" tile {}", t.tile);
     if ((t.asked != vk::Format{} && t.asked != t.format) || (t.view != vk::Format{} && t.view != t.format)) {
         out += std::format(" (asked {}, view {})", vk::to_string(t.asked), vk::to_string(t.view));
     }
