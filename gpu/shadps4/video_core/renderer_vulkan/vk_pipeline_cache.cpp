@@ -370,8 +370,14 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
             instance_.IsAmdShaderExplicitVertexParameterSupported(),
         .supports_fragment_shader_barycentric = instance_.IsFragmentShaderBarycentricSupported(),
         .supports_shader_subgroup_clock = instance_.IsShaderSubgroupClockSupported(),
-        .needs_manual_interpolation = instance.IsFragmentShaderBarycentricSupported() &&
-                                      instance.GetDriverID() == vk::DriverId::eNvidiaProprietary,
+        // resogun: RESOGUN_MANUAL_INTERP=0/1 overrides (diagnostic; changes the cache profile).
+        .needs_manual_interpolation = [&] {
+            if (const char* env = std::getenv("RESOGUN_MANUAL_INTERP")) {
+                return env[0] == '1';
+            }
+            return instance.IsFragmentShaderBarycentricSupported() &&
+                   instance.GetDriverID() == vk::DriverId::eNvidiaProprietary;
+        }(),
         // resogun: older NVIDIA (Pascal) has no barycentrics; RESOGUN_INTERP_INT_FIX=0/1 overrides.
         .needs_integer_interpolation_fix = [&] {
             if (const char* env = std::getenv("RESOGUN_INTERP_INT_FIX")) {
@@ -460,9 +466,14 @@ struct CompileTimer {
 thread_local bool must_draw = false;
 
 // resogun: GPU frames a draw may be skipped while its build runs, after which the GPU thread
-// waits for it. Draws that must not be skipped have no budget.
+// waits for it. Draws that must not be skipped have no budget, and RESOGUN_SYNC_PIPELINES=1
+// (diagnostic) gives none to any draw.
 int SkipFrames() {
-    return must_draw ? 0 : 1;
+    static const bool sync = [] {
+        const char* env = std::getenv("RESOGUN_SYNC_PIPELINES");
+        return env && *env == '1';
+    }();
+    return must_draw || sync ? 0 : 1;
 }
 
 // resogun: whether draws needing a build were skipped for the budget of GPU frames, counted
