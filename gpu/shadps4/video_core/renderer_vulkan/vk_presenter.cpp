@@ -712,7 +712,10 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
         attribute.attrib.pixel_format == Libraries::VideoOut::PixelFormat::A2R10G10B10Srgb;
     // resogun: with sharpening on, the post process pass draws into the RCAS pass's image and
     // RCAS draws that into the frame.
-    if (ResogunSettings::Get().sharpening.load(std::memory_order_relaxed)) {
+    // FSR 1 in full: EASU upscales in the post process pass (when the frame is smaller than
+    // the window), RCAS sharpens after it.
+    pp_settings.easu = ResogunSettings::Get().sharpening.load(std::memory_order_relaxed) ? 1 : 0;
+    if (pp_settings.easu) {
         pp_pass.Render(cmdbuf, image_view, image_size, rcas_pass.Input(cmdbuf, draw_scheduler, *frame),
                        pp_settings);
         rcas_pass.Render(cmdbuf, *frame, HostPasses::RcasPass::DefaultSharpness);
