@@ -1358,6 +1358,7 @@ void Rasterizer::OnSubmit() {
         buffer_cache.ProcessFaultBuffer();
     }
     texture_cache.ProcessDownloadImages();
+    texture_cache.TickTexturePack();
     texture_cache.RunGarbageCollector();
     runtime.TickFrame();
 }
@@ -2447,12 +2448,22 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
                                       u32(desc.view_info.format));
             }
 
-            image_infos.emplace_back(VK_NULL_HANDLE, *image_view.image_view,
-                                     image.backing->state.layout);
+            // resogun: texture packs (texture_pack.h) swap in their own image, always readable.
+            const vk::ImageView replacement =
+                is_storage || binding.force_general || binding.is_target
+                    ? vk::ImageView{}
+                    : texture_cache.ReplacementView(image, image_view);
+            image_infos.emplace_back(VK_NULL_HANDLE,
+                                     replacement ? replacement : *image_view.image_view,
+                                     replacement ? vk::ImageLayout::eShaderReadOnlyOptimal
+                                                 : image.backing->state.layout);
             if (set_ok && binding_index < resolved.size()) {
                 resolved[binding_index] = {image_id, *image_view.image_view, image.backing,
-                                           desc.view_info.range};
+                                           desc.view_info.range, replacement,
+                                           replacement ? image.replacement_key : 0};
                 set_ok = !is_storage && !binding.force_general && !binding.is_target;
+                // A replacement still loading: bind this set again until it is in.
+                set_ok &= !(image.replacement_key && !replacement);
             }
         }
     }
@@ -2596,6 +2607,12 @@ bool Rasterizer::BindTexturesFromSet(const Shader::Info& stage, const PreparedSt
                                     : vk::ImageLayout::eShaderReadOnlyOptimal;
         barrier |= runtime.Transit(&image, new_layout, vk::PipelineStageFlagBits2::eAllCommands,
                                    vk::AccessFlagBits2::eShaderRead, entry.range);
+        if (entry.replacement && image.replacement_key == entry.replacement_key &&
+            False(image.flags & VideoCore::ImageFlagBits::GpuModified)) {
+            image_infos.emplace_back(VK_NULL_HANDLE, entry.replacement,
+                                     vk::ImageLayout::eShaderReadOnlyOptimal);
+            continue;
+        }
         image_infos.emplace_back(VK_NULL_HANDLE, entry.view, image.backing->state.layout);
     }
     (void)first_image_idx;

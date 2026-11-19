@@ -261,6 +261,8 @@ private:
         vk::ImageView view;
         const void* backing = nullptr;
         VideoCore::SubresourceRange range;
+        vk::ImageView replacement; ///< texture pack view, while the image keeps this key
+        u64 replacement_key = 0;
     };
     struct TextureSet {
         u64 key = 0;

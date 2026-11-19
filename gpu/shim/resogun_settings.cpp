@@ -67,6 +67,10 @@ void Set(Values& v, const std::string& key, const std::string& value) {
         v.skip_intro = Truthy(value);
     } else if (key == "frame_rate_priority") {
         v.frame_rate_priority = Truthy(value);
+    } else if (key == "texture_pack") {
+        v.texture_pack = value;
+    } else if (key == "texture_dump") {
+        v.texture_dump = value;
     } else if (key == "title_back_exits") {
         v.title_back_exits = Truthy(value);
     } else if (key == "sharpening") {
@@ -227,6 +231,7 @@ void Load() {
         {"RESOGUN_SKIP_INTRO", "skip_intro"},     {"RESOGUN_FRAME_RATE", "frame_rate"},
         {"RESOGUN_TITLE_BACK_EXITS", "title_back_exits"},
         {"RESOGUN_FRAME_RATE_PRIORITY", "frame_rate_priority"},
+        {"RESOGUN_TEXTURE_PACK", "texture_pack"}, {"RESOGUN_TEXTURE_DUMP", "texture_dump"},
         {"RESOGUN_RENDER_RESOLUTION", "render_resolution"},
         {"RESOGUN_HDR", "hdr"},
         {"RESOGUN_SHARPENING", "sharpening"},

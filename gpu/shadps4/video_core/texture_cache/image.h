@@ -192,6 +192,8 @@ public:
     boost::container::static_vector<u64, 16> mip_hashes{};
     u64 lru_id{};
     u64 hash{};
+    /// resogun: the texture pack key of this image's contents (texture_pack.h); 0: none
+    u64 replacement_key = 0;
 
 private:
     static Common::IncrementalIdProvider<u64> global_image_uid;

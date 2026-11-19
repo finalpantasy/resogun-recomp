@@ -37,6 +37,7 @@ TextureCache::TextureCache(const Vulkan::Instance& instance_, Vulkan::Scheduler&
     : instance{instance_}, scheduler{scheduler_}, runtime{runtime_}, liverpool{liverpool_},
       buffer_cache{buffer_cache_}, tracker{tracker_}, blit_helper{instance, scheduler},
       tile_manager{instance, scheduler, runtime, buffer_cache.GetStreamBuffer()},
+      texture_pack{instance, scheduler, runtime},
       readback_linear_images{EmulatorSettings.IsReadbackLinearImagesEnabled()} {
 
     std::printf("GPU: deferred image readback %s (64 copies, 64 MiB pending limit)%s\n",
@@ -1499,6 +1500,9 @@ void TextureCache::RefreshImage(Image& image) {
     }
 
     runtime.UploadImage(&image, buffer, image_copies);
+    if (texture_pack.Active()) {
+        texture_pack.OnUpload(image);
+    }
 }
 
 vk::Sampler TextureCache::GetSampler(const AmdGpu::Sampler& sampler,
