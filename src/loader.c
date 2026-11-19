@@ -467,7 +467,12 @@ static int stack_readable(uintptr_t address, void *stack) {
 static int thread_frames(CONTEXT *c, uintptr_t *out) {
     MEMORY_BASIC_INFORMATION info;
     void *stack=VirtualQuery((void *)(uintptr_t)c->Rsp,&info,sizeof(info)) ? info.AllocationBase : NULL;
-    int n=0;
+    volatile int n=0;
+    /* RtlVirtualUnwind follows the frame register without checks, and a running thread's stack
+     * changes under the walk: a fault there ends this thread's frames instead of the process. */
+    sigjmp_buf recover;
+    if (sigsetjmp(recover,0)) return n;
+    runtime_fault_recover=&recover;
     while (n<HANG_FRAMES && c->Rip) {
         out[n++]=(uintptr_t)c->Rip;
         const DWORD64 rsp=c->Rsp;
@@ -487,6 +492,7 @@ static int thread_frames(CONTEXT *c, uintptr_t *out) {
         }
         if (c->Rsp<=rsp) break;
     }
+    runtime_fault_recover=NULL;
     return n;
 }
 /* Every other thread: name, tid, CPU time and frames, one line each. A thread is suspended only to
