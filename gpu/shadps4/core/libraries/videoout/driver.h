@@ -102,6 +102,10 @@ private:
         s64 flip_arg;
         s32 index;
         bool eop;
+        // resogun: steady-clock ns when the guest submitted the flip and when the GPU thread
+        // queued it for the present thread (RESOGUN_FRAME_STATS flip latency).
+        s64 submit_ns = 0;
+        s64 queued_ns = 0;
 
         operator bool() const noexcept {
             return frame != nullptr;
@@ -111,7 +115,8 @@ private:
     void Flip(const Request& req);
     void DrawBlankFrame(); // Video port out not open
     void DrawLastFrame();  // Used when there is no flip request
-    void SubmitFlipInternal(VideoOutPort* port, s32 index, s64 flip_arg, bool is_eop = false);
+    void SubmitFlipInternal(VideoOutPort* port, s32 index, s64 flip_arg, bool is_eop = false,
+                            s64 submit_ns = 0);
     void PresentThread(std::stop_token token);
     /// resogun: runs presenter work (acquire, blit, vkQueuePresent) off the vblank thread, in
     /// order. Acquire and present block while the GPU is the bottleneck (much longer on NVIDIA);

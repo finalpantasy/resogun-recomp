@@ -7,6 +7,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <cstdarg>
 #include <ctime>
 #include <limits>
 #include <thread>
@@ -48,7 +49,57 @@ extern std::atomic<u32> g_resogun_pending_draws, g_resogun_build_waits;
 extern std::atomic<u64> g_resogun_build_wait_ns;
 } // namespace Vulkan
 
+// resogun: steady-clock ns of the last flip's start and of its event trigger, for the slow-wait
+// log (equeue.cpp): how long after them a flip waiter woke.
+std::atomic<long long> g_resogun_flip_start_ns{0}, g_resogun_flip_trigger_ns{0};
+static long long resogun_mono_ns() {
+    return std::chrono::steady_clock::now().time_since_epoch().count();
+}
+
 namespace Libraries::VideoOut {
+
+// resogun: RESOGUN_FRAME_STATS output goes through a printer thread. Printed from the present
+// thread it blocked on the output pipe for 40-60 ms per stall report, which delayed the flip
+// event, caused the next stall and so measured itself (about 11 slow frames in every 5 s).
+static void StatsPrintf(FILE* file, const char* format, ...) {
+    static std::mutex queue_mutex;
+    static std::condition_variable queue_cv;
+    static std::deque<std::pair<FILE*, std::string>> queue;
+    static const bool started = [] {
+        std::thread([] {
+            Common::SetCurrentThreadName("resogun:StatsLog");
+            while (true) {
+                std::pair<FILE*, std::string> line;
+                {
+                    std::unique_lock lock{queue_mutex};
+                    queue_cv.wait(lock, [] { return !queue.empty(); });
+                    line = std::move(queue.front());
+                    queue.pop_front();
+                }
+                std::fputs(line.second.c_str(), line.first);
+                std::fflush(line.first);
+            }
+        }).detach();
+        return true;
+    }();
+    (void)started;
+    va_list args;
+    va_start(args, format);
+    va_list copy;
+    va_copy(copy, args);
+    const int size = std::vsnprintf(nullptr, 0, format, copy);
+    va_end(copy);
+    std::string text(size > 0 ? size_t(size) : 0, '\0');
+    if (size > 0) {
+        std::vsnprintf(text.data(), text.size() + 1, format, args);
+    }
+    va_end(args);
+    {
+        std::scoped_lock lock{queue_mutex};
+        queue.emplace_back(file, std::move(text));
+    }
+    queue_cv.notify_one();
+}
 
 constexpr static bool Is32BppPixelFormat(PixelFormat format) {
     switch (format) {
@@ -311,6 +362,7 @@ int VideoOutDriver::ChangeBufferAttribute(VideoOutPort* port, s32 attributeIndex
 static std::atomic<u64> g_resogun_flips_shown;
 
 void VideoOutDriver::Flip(const Request& req) {
+    g_resogun_flip_start_ns.store(resogun_mono_ns(), std::memory_order_relaxed);
     g_resogun_flips_shown.fetch_add(1, std::memory_order_relaxed);
     // Update HDR status before presenting, then present the frame (resogun: on the swap thread).
     RunPresenter([this, frame = req.frame, hdr = req.port->is_hdr] {
@@ -332,6 +384,22 @@ void VideoOutDriver::Flip(const Request& req) {
         worst_ms = std::max(worst_ms, frame_ms);
         static std::vector<double> intervals;
         intervals.push_back(frame_ms);
+        // Flip latency: guest submit to GPU-thread queue, then queue to this flip (vblank slot).
+        static double queue_sum, queue_max, slot_sum, slot_max;
+        static u32 latency_n, by_vblanks[6];
+        if (req.submit_ns && req.queued_ns) {
+            const double queue_ms = (req.queued_ns - req.submit_ns) / 1e6;
+            const double slot_ms = (now.time_since_epoch().count() - req.queued_ns) / 1e6;
+            queue_sum += queue_ms;
+            queue_max = std::max(queue_max, queue_ms);
+            slot_sum += slot_ms;
+            slot_max = std::max(slot_max, slot_ms);
+            ++latency_n;
+        }
+        {
+            const double period_ms = EmulatorSettings.GetVblankPeriod().count() / 1e6;
+            ++by_vblanks[std::min<u32>(5, u32(std::lround(frame_ms / period_ms)))];
+        }
         // Where each flip lands in the display's refresh (Windows): a thread stamps every refresh.
         static std::atomic<s64> refresh_ns{0};
         static const bool refresh_stamps = [] {
@@ -381,7 +449,7 @@ void VideoOutDriver::Flip(const Request& req) {
                                  u64(Vulkan::g_resogun_compile_ns.load()), u64(Vulkan::g_resogun_compiles.load()),
                                  ResogunStats::t_gc.load()};
         if (stall) {
-            std::printf("Stall: %.1f ms frame; waits: readback %.1f ms, GPU ticks %.1f ms, "
+            StatsPrintf(stdout, "Stall: %.1f ms frame; waits: readback %.1f ms, GPU ticks %.1f ms, "
                         "recorder %.1f ms, host copies %.1f ms; %llu compiles %.1f ms; GC %.1f ms\n",
                         frame_ms, (wait_now[0] - last_wait[0]) / 1e6, (wait_now[1] - last_wait[1]) / 1e6,
                         (wait_now[2] - last_wait[2]) / 1e6, (wait_now[3] - last_wait[3]) / 1e6,
@@ -390,7 +458,7 @@ void VideoOutDriver::Flip(const Request& req) {
         }
         std::copy(std::begin(wait_now), std::end(wait_now), std::begin(last_wait));
         if (stall) {
-            std::printf("       fault handlers: %llu read faults %.1f ms, write faults %.1f ms\n",
+            StatsPrintf(stdout, "       fault handlers: %llu read faults %.1f ms, write faults %.1f ms\n",
                         static_cast<unsigned long long>(rf - last_rf), (trf - last_trf) / 1e6,
                         (twf - last_twf) / 1e6);
         }
@@ -439,13 +507,13 @@ void VideoOutDriver::Flip(const Request& req) {
         const u64 image_bytes = ResogunStats::image_upload_bytes.load();
         const u64 buffer_bytes = ResogunStats::buffer_upload_bytes.load();
         if (stall) {
-            std::printf("       GPU thread on CPU %.1f ms; %llu images registered, "
+            StatsPrintf(stdout, "       GPU thread on CPU %.1f ms; %llu images registered, "
                         "%.1f MB image uploads, %.1f MB buffer uploads\n",
                         (gpu_ns - last_gpu_ns) / 1e6,
                         static_cast<unsigned long long>(images - last_images),
                         (image_bytes - last_image_bytes) / 1e6,
                         (buffer_bytes - last_buffer_bytes) / 1e6);
-            std::printf("       %llu draws, %llu dispatches, %llu submissions; GPU thread user %.1f ms, "
+            StatsPrintf(stdout, "       %llu draws, %llu dispatches, %llu submissions; GPU thread user %.1f ms, "
                         "kernel %.1f ms, %llu preempted, %llu waits\n",
                         static_cast<unsigned long long>(draws - last_draws),
                         static_cast<unsigned long long>(dispatches - last_dispatches),
@@ -454,12 +522,12 @@ void VideoOutDriver::Flip(const Request& req) {
                         static_cast<unsigned long long>(vol - last_vol));
         }
         if (stall) {
-            std::printf("       ms in: resident %.1f, protect %.1f, image create %.1f, "
+            StatsPrintf(stdout, "       ms in: resident %.1f, protect %.1f, image create %.1f, "
                         "image refresh %.1f, staging %.1f, waiting for host copies %.1f\n",
                         (t_now[0] - last_t[0]) / 1e6, (t_now[1] - last_t[1]) / 1e6,
                         (t_now[2] - last_t[2]) / 1e6, (t_now[3] - last_t[3]) / 1e6,
                         (t_now[4] - last_t[4]) / 1e6, (t_now[5] - last_t[5]) / 1e6);
-            std::printf("       GPU thread page faults %llu (process %llu), protection faults %llu; "
+            StatsPrintf(stdout, "       GPU thread page faults %llu (process %llu), protection faults %llu; "
                         "protect calls %llu (%llu pages), of which write-revoking %llu (%llu pages)\n",
                         static_cast<unsigned long long>(minflt - last_minflt),
                         static_cast<unsigned long long>(proc_flt - last_proc_flt),
@@ -475,7 +543,7 @@ void VideoOutDriver::Flip(const Request& req) {
         last_rp = rp;
         last_minflt = minflt;
         if (stall && copy_ns > last_copy_ns) {
-            std::printf("       guest copies %.1f MB in %.1f thread-ms, %.1f ms on CPU (kernel %.1f ms, "
+            StatsPrintf(stdout, "       guest copies %.1f MB in %.1f thread-ms, %.1f ms on CPU (kernel %.1f ms, "
                         "%llu page faults in large copies) (%.2f GB/s per thread)\n",
                         (copy_bytes - last_copy_bytes) / 1e6, (copy_ns - last_copy_ns) / 1e6,
                         (copy_cpu - last_copy_cpu) / 1e6, (copy_sys - last_copy_sys) / 1e3,
@@ -527,7 +595,7 @@ void VideoOutDriver::Flip(const Request& req) {
             const double draws_per_frame = frames ? double(all_draws - window_draws) / frames : 0.0;
             window_draws = all_draws;
             window_gpu_us = gpu_us;
-            std::printf("Frame stats: %.1f FPS, worst frame %.1f ms (vblank %u Hz); "
+            StatsPrintf(stdout, "Frame stats: %.1f FPS, worst frame %.1f ms (vblank %u Hz); "
                         "%u shader/pipeline compiles, %.1f ms; async: capture %.1f ms, workers "
                         "%.1f ms, sync wait %.1f ms, snapshots %.1f ms, GPU capture wait %.1f ms, "
                         "%u pending draws, %u build waits %.1f ms; %llu recorder syncs; "
@@ -568,7 +636,7 @@ void VideoOutDriver::Flip(const Request& req) {
                 if (const std::tm* local = std::localtime(&wall)) {
                     std::strftime(clock, sizeof(clock), "%H:%M:%S", local);
                 }
-                std::printf("Frame pacing (%s): median %.2f ms, stddev %.2f ms, p99 %.2f ms, "
+                StatsPrintf(stdout, "Frame pacing (%s): median %.2f ms, stddev %.2f ms, p99 %.2f ms, "
                             "%u frames over 1.5x median\n",
                             clock, median, std::sqrt(std::max(0.0, sq / intervals.size() - mean * mean)),
                             sorted[std::min(sorted.size() - 1, sorted.size() * 99 / 100)], spikes);
@@ -578,9 +646,19 @@ void VideoOutDriver::Flip(const Request& req) {
             if (phases.size() > 2) {
                 std::vector<double> sorted = phases;
                 std::sort(sorted.begin(), sorted.end());
-                std::printf("Refresh phase: median %+.2f ms, p1 %+.2f, p99 %+.2f ms\n", sorted[sorted.size() / 2],
+                StatsPrintf(stdout, "Refresh phase: median %+.2f ms, p1 %+.2f, p99 %+.2f ms\n", sorted[sorted.size() / 2],
                             sorted[sorted.size() / 100], sorted[std::min(sorted.size() - 1, sorted.size() * 99 / 100)]);
             }
+            if (latency_n) {
+                StatsPrintf(stdout, "Flip latency: submit to GPU queue avg %.2f ms, max %.2f ms; queue to "
+                            "flip avg %.2f ms, max %.2f ms; intervals in vblanks 1:%u 2:%u 3:%u 4:%u "
+                            "5+:%u\n",
+                            queue_sum / latency_n, queue_max, slot_sum / latency_n, slot_max,
+                            by_vblanks[1], by_vblanks[2], by_vblanks[3], by_vblanks[4], by_vblanks[5]);
+            }
+            queue_sum = queue_max = slot_sum = slot_max = 0;
+            latency_n = 0;
+            std::fill(std::begin(by_vblanks), std::end(by_vblanks), 0u);
             phases.clear();
             intervals.clear();
             window_start = now;
@@ -618,6 +696,8 @@ void VideoOutDriver::Flip(const Request& req) {
                                         (req.flip_arg << 16)));
         }
     }
+
+    g_resogun_flip_trigger_ns.store(resogun_mono_ns(), std::memory_order_relaxed);
 
     // Reset prev flip label
     if (port->prev_index != -1) {
@@ -659,18 +739,21 @@ bool VideoOutDriver::SubmitFlip(VideoOutPort* port, s32 index, s64 flip_arg,
         ++port->flip_status.flip_pending_num; // integral GPU and CPU pending flips counter
         port->flip_status.submit_tsc = Libraries::Kernel::sceKernelReadTsc();
     }
+    const s64 submit_ns = std::chrono::steady_clock::now().time_since_epoch().count();
 
     if (!is_eop) {
         // Non EOP flips can arrive from any thread so ask GPU thread to perform them
-        liverpool->SendCommand([=, this]() { SubmitFlipInternal(port, index, flip_arg, is_eop); });
+        liverpool->SendCommand(
+            [=, this]() { SubmitFlipInternal(port, index, flip_arg, is_eop, submit_ns); });
     } else {
-        SubmitFlipInternal(port, index, flip_arg, is_eop);
+        SubmitFlipInternal(port, index, flip_arg, is_eop, submit_ns);
     }
 
     return true;
 }
 
-void VideoOutDriver::SubmitFlipInternal(VideoOutPort* port, s32 index, s64 flip_arg, bool is_eop) {
+void VideoOutDriver::SubmitFlipInternal(VideoOutPort* port, s32 index, s64 flip_arg, bool is_eop,
+                                       s64 submit_ns) {
     Vulkan::Frame* frame;
     if (index == -1) {
         frame = presenter->PrepareBlankFrame(false);
@@ -689,6 +772,8 @@ void VideoOutDriver::SubmitFlipInternal(VideoOutPort* port, s32 index, s64 flip_
             .flip_arg = flip_arg,
             .index = index,
             .eop = is_eop,
+            .submit_ns = submit_ns,
+            .queued_ns = std::chrono::steady_clock::now().time_since_epoch().count(),
         });
     }
 }

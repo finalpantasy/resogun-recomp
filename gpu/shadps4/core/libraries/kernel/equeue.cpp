@@ -2,6 +2,10 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <atomic>
+#include <chrono>
+#include <set>
+#include <tuple>
+#include <cstdio>
 #include <thread>
 #include <magic_enum/magic_enum.hpp>
 
@@ -15,6 +19,9 @@
 #include "core/libraries/kernel/posix_error.h"
 #include "core/libraries/kernel/time.h"
 #include "core/libraries/libs.h"
+
+// resogun: set by the video out driver at each flip (videoout/driver.cpp).
+extern std::atomic<long long> g_resogun_flip_start_ns, g_resogun_flip_trigger_ns;
 
 namespace Libraries::Kernel {
 
@@ -469,6 +476,7 @@ int PS4_SYSV_ABI sceKernelDeleteEqueue(OrbisKernelEqueue eq) {
 
 // resogun: RESOGUN_SLOW_WAITS=<ms> logs guest waits longer than that (src/runtime_thread.c).
 extern "C" uint64_t runtime_wait_begin(void);
+extern "C" const char* runtime_current_thread_name(void);
 extern "C" void runtime_wait_end(const char* what, uint64_t start, const char* detail,
                                  long long arg);
 
@@ -493,10 +501,38 @@ int PS4_SYSV_ABI sceKernelWaitEqueue(OrbisKernelEqueue eq, OrbisKernelEvent* ev,
         return ORBIS_KERNEL_ERROR_EINVAL;
     }
 
+    // resogun: RESOGUN_EQUEUE_WAITERS=1 prints each queue's waiters once per thread and call site
+    // (two threads waiting on one queue take each other's events).
+    static const bool log_waiters = [] {
+        const char* value = std::getenv("RESOGUN_EQUEUE_WAITERS");
+        return value && value[0] == '1';
+    }();
+    if (log_waiters) {
+        static std::mutex seen_mutex;
+        static std::set<std::tuple<s64, std::string, const void*>> seen;
+        const auto key = std::make_tuple(eq, std::string(runtime_current_thread_name()),
+                                         static_cast<const void*>(__builtin_return_address(0)));
+        std::scoped_lock lock{seen_mutex};
+        if (seen.insert(key).second) {
+            std::fprintf(stderr, "Equeue waiter: queue %lld '%s', thread '%s', caller %p\n",
+                         static_cast<long long>(eq), std::string(equeue->GetName()).c_str(),
+                         std::get<1>(key).c_str(), std::get<2>(key));
+        }
+    }
     const u64 wait_start = runtime_wait_begin(); // resogun: slow-wait log, 0 when off
     *out = equeue->WaitForEvents(ev, num, timo);
     if (wait_start) {
-        runtime_wait_end("equeue wait", wait_start, std::string(equeue->GetName()).c_str(), *out);
+        // resogun: the name, the guest call site and the timeout; the count is the last number.
+        // Woken how long after the last flip started and after its event was triggered.
+        const long long wake_ns = std::chrono::steady_clock::now().time_since_epoch().count();
+        char detail[224];
+        std::snprintf(detail, sizeof(detail),
+                      "%s caller %p timeout %lld us, flip start %.1f ms / trigger %.1f ms ago, events",
+                      std::string(equeue->GetName()).c_str(), __builtin_return_address(0),
+                      timo ? static_cast<long long>(*timo) : -1LL,
+                      (wake_ns - ::g_resogun_flip_start_ns.load()) / 1e6,
+                      (wake_ns - ::g_resogun_flip_trigger_ns.load()) / 1e6);
+        runtime_wait_end("equeue wait", wait_start, detail, *out);
     }
 
     if (*out == 0) {

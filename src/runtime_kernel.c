@@ -99,8 +99,15 @@ static int sleep_ns(uint64_t ns) {
     runtime_thread_testcancel();
     return 0;
 }
-static ABI int32_t kernel_usleep(uint32_t usec) { sleep_ns((uint64_t)usec*1000); return 0; }
-static ABI int32_t posix_usleep(uint32_t usec) { sleep_ns((uint64_t)usec*1000); return 0; }
+/* RESOGUN_SLOW_WAITS also logs long sleeps, with the guest call site (the stub jumps, so the
+ * return address is the guest's). */
+static void sleep_logged(uint64_t ns,const void *caller) {
+    const uint64_t wait_start=runtime_wait_begin();
+    sleep_ns(ns);
+    runtime_wait_end("sleep",wait_start,"caller",(long long)(uintptr_t)caller);
+}
+static ABI int32_t kernel_usleep(uint32_t usec) { sleep_logged((uint64_t)usec*1000,__builtin_return_address(0)); return 0; }
+static ABI int32_t posix_usleep(uint32_t usec) { sleep_logged((uint64_t)usec*1000,__builtin_return_address(0)); return 0; }
 static ABI int32_t posix_nanosleep(const GuestTimespec *rq,GuestTimespec *rem) {
     if (!rq || rq->nsec<0 || rq->nsec>=1000000000 || rq->sec<0) return fail_posix(EINVAL);
     sleep_ns((uint64_t)rq->sec*1000000000+(uint64_t)rq->nsec);

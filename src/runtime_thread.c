@@ -79,8 +79,17 @@ static int slow_wait_ms(void) {
     if (threshold_ms<0) { const char *e=getenv("RESOGUN_SLOW_WAITS"); threshold_ms=e ? atoi(e) : 0; }
     return threshold_ms;
 }
+/* The calling guest thread's name ("host" off guest threads), for diagnostics. */
+const char *runtime_current_thread_name(void) { return current ? current->name : "host"; }
+/* RESOGUN_SLOW_WAITS_THREAD=text: log only threads whose name holds it (idle workers otherwise
+ * fill the 4000-line cap). */
+static int slow_wait_thread(void) {
+    static const char *only=(const char *)1;
+    if (only==(const char *)1) { only=getenv("RESOGUN_SLOW_WAITS_THREAD"); if (only && !*only) only=NULL; }
+    return !only || (current && strstr(current->name,only));
+}
 uint64_t runtime_wait_begin(void) {
-    if (slow_wait_ms()<=0) return 0;
+    if (slow_wait_ms()<=0 || !slow_wait_thread()) return 0;
     struct timespec t;
     clock_gettime(CLOCK_MONOTONIC,&t);
     return (uint64_t)t.tv_sec*1000000000ull+(uint64_t)t.tv_nsec;
@@ -96,7 +105,8 @@ void runtime_wait_end(const char *what,uint64_t start,const char *detail,long lo
     /* Callers read errno after this (a failed read returns -errno); a failed log write must not
      * change it. */
     const int saved_errno=errno;
-    fprintf(stderr,"Slow wait: %s %.1f ms, thread '%s' %s %lld\n",what,ns/1e6,
+    fprintf(stderr,"Slow wait: [%.3f s] %s %.1f ms, thread '%s' %s %lld\n",
+            (double)t.tv_sec+(double)t.tv_nsec/1e9,what,ns/1e6,
             current ? current->name : "host",detail ? detail : "",arg);
     errno=saved_errno;
 }

@@ -22,6 +22,8 @@ void runtime_restart(void);
  * runtime_wait_begin() returns 0 when it is off; runtime_wait_end() then does nothing. */
 uint64_t runtime_wait_begin(void);
 void runtime_wait_end(const char *what,uint64_t start,const char *detail,long long arg);
+/* The calling guest thread's name ("host" off guest threads), for diagnostics. */
+const char *runtime_current_thread_name(void);
 /* The floating-point state a PS4 gives its threads (runtime_thread.c). */
 void runtime_orbis_fpu(void);
 #define ABI __attribute__((sysv_abi))
