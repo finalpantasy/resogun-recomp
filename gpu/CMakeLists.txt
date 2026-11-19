@@ -201,6 +201,14 @@ if (WIN32)
     target_compile_definitions(resogun-setup PRIVATE UNICODE _UNICODE)
     target_link_options(resogun-setup PRIVATE -municode -static)
     target_link_libraries(resogun-setup PRIVATE comctl32 ole32 shell32 uuid gdi32 msimg32 dwmapi)
+    # EverybodysGolf.exe (launcher_gui/): the player's launcher window. Static, so it starts without
+    # the MSYS2 DLLs.
+    add_executable(golf-launcher WIN32 ../launcher_gui/main.cpp ../launcher_gui/launcher.rc)
+    set_target_properties(golf-launcher PROPERTIES OUTPUT_NAME EverybodysGolf CXX_STANDARD 20)
+    target_compile_definitions(golf-launcher PRIVATE UNICODE _UNICODE)
+    target_compile_options(golf-launcher PRIVATE -Wall -Wextra -Werror -Wno-missing-field-initializers)
+    target_link_options(golf-launcher PRIVATE -municode -static)
+    target_link_libraries(golf-launcher PRIVATE comctl32 ole32 shell32 uuid)
 else()
     # Not PIE: host heap objects handed to the guest stay in the brk heap, below 1 TiB (loader.c main).
     set_target_properties(resogun PROPERTIES POSITION_INDEPENDENT_CODE OFF)
