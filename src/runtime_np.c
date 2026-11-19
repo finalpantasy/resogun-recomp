@@ -346,15 +346,18 @@ static ABI int32_t invitation_result(uint8_t *result) {
     return 0;
 }
 static ABI int32_t invitation_term(void) { return dialog_term(INVITATION); }
-/* sceSigninDialog*: there is no PSN to sign in to; the player cancels. OrbisSigninDialogResult
- * starts with int32 result. Everybody's Golf polls UpdateStatus from 0xa5ab55 every frame. */
+/* sceSigninDialog*: OrbisSigninDialogResult starts with int32 result. With the local account
+ * signed in (runtime_golf_local_account) the dialog returns OK at once, as on a console that is
+ * already signed in: the daily ranking opens it and showed "Failed to connect" on a cancel. Without
+ * it there is no PSN to sign in to and the player cancels. Everybody's Golf polls UpdateStatus from
+ * 0xa5ab55 every frame. */
 static ABI int32_t signin_init(void) { return dialog_init(SIGNIN); }
 static ABI int32_t signin_open(const void *param) { if (!param) return DIALOG_ARG_NULL; return dialog_open(SIGNIN,""); }
 static ABI int32_t signin_status(void) { return atomic_load(&dialog_status[SIGNIN]); }
 static ABI int32_t signin_result(int32_t *result) {
     int32_t r=dialog_result(SIGNIN,result);
     if (r) return r;
-    *result=RESULT_USER_CANCELED;
+    *result=runtime_golf_local_account() ? 0 : RESULT_USER_CANCELED;
     return 0;
 }
 static ABI int32_t signin_term(void) { return dialog_term(SIGNIN); }
