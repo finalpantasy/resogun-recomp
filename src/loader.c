@@ -536,6 +536,131 @@ static void hang_dump(unsigned seconds) {
     fprintf(stderr,"Hang: end of thread stacks\n");
     fflush(NULL);
 }
+/* CPU profile (GOLF_PROFILE=seconds): about 250 times a second every thread that ran since the last
+ * look is suspended just long enough to read RIP; a runtime RIP is charged with the guest frame that
+ * called into the runtime. Every interval prints each busy thread's CPU time and the hottest
+ * (thread, address) pairs, then starts over. A diagnostic: it slows the game slightly. */
+enum { PROF_THREADS = 192, PROF_SLOTS = 1 << 16, PROF_TOP = 40 };
+typedef struct { DWORD tid; HANDLE h; char name[48]; ULONG64 cycles; uint64_t cpu; } ProfThread;
+typedef struct { uint64_t key; uintptr_t rip, caller; uint32_t count; uint16_t thread; } ProfSlot;
+static ProfThread prof_threads[PROF_THREADS];
+static int prof_count;
+static ProfSlot *prof_slots;
+static uint64_t thread_cpu_100ns(HANDLE h) {
+    FILETIME created,exited,kernel,user;
+    if (!GetThreadTimes(h,&created,&exited,&kernel,&user)) return 0;
+    return (((uint64_t)kernel.dwHighDateTime<<32)|kernel.dwLowDateTime)+(((uint64_t)user.dwHighDateTime<<32)|user.dwLowDateTime);
+}
+static void prof_refresh(void) {
+    HANDLE snap=CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD,0);
+    if (snap==INVALID_HANDLE_VALUE) return;
+    THREADENTRY32 entry={.dwSize=sizeof(entry)};
+    const DWORD pid=GetCurrentProcessId(), self=GetCurrentThreadId();
+    for (BOOL ok=Thread32First(snap,&entry);ok && prof_count<PROF_THREADS;ok=Thread32Next(snap,&entry)) {
+        if (entry.th32OwnerProcessID!=pid || entry.th32ThreadID==self) continue;
+        int known=0;
+        for (int i=0;i<prof_count && !known;++i) known=prof_threads[i].tid==entry.th32ThreadID;
+        if (known) continue;
+        HANDLE h=OpenThread(THREAD_SUSPEND_RESUME|THREAD_GET_CONTEXT|THREAD_QUERY_LIMITED_INFORMATION,FALSE,entry.th32ThreadID);
+        if (!h) continue;
+        ProfThread *t=&prof_threads[prof_count++];
+        memset(t,0,sizeof(*t));
+        t->tid=entry.th32ThreadID; t->h=h;
+        snprintf(t->name,sizeof(t->name),"tid %lu",entry.th32ThreadID);
+        QueryThreadCycleTime(h,&t->cycles);
+        t->cpu=thread_cpu_100ns(h);
+    }
+    CloseHandle(snap);
+    for (int i=0;i<prof_count;++i) { /* guest threads are named after they start */
+        PWSTR wide=NULL;
+        if (SUCCEEDED(GetThreadDescription(prof_threads[i].h,&wide)) && wide) {
+            if (wide[0]) WideCharToMultiByte(CP_UTF8,0,wide,-1,prof_threads[i].name,sizeof(prof_threads[i].name),NULL,NULL);
+            LocalFree(wide);
+        }
+    }
+}
+static void prof_sample(int index) {
+    ProfThread *t=&prof_threads[index];
+    ULONG64 cycles=0;
+    const char *only=getenv("GOLF_PROFILE_THREAD"); /* sample only threads whose name holds this */
+    if (only && *only && !strstr(t->name,only)) return;
+    static int waits=-1; /* GOLF_PROFILE_WAITS=1: blocked threads are sampled too, to see where they wait */
+    if (waits<0) waits=getenv("GOLF_PROFILE_WAITS") && *getenv("GOLF_PROFILE_WAITS")=='1';
+    if (!QueryThreadCycleTime(t->h,&cycles) || (!waits && cycles-t->cycles<200000)) { t->cycles=cycles; return; }
+    t->cycles=cycles;
+    CONTEXT c;
+    memset(&c,0,sizeof(c));
+    c.ContextFlags=CONTEXT_CONTROL|CONTEXT_INTEGER;
+    /* The stack is copied while the thread is still suspended, by ReadProcessMemory, which cannot
+       fault; the caller is the first word on it that points into the guest image (a heuristic). */
+    static uint64_t words[1024];
+    SIZE_T copied=0;
+    if (SuspendThread(t->h)==(DWORD)-1) return;
+    const BOOL got=GetThreadContext(t->h,&c);
+    const int guest_rip=got && image && (uintptr_t)c.Rip-(uintptr_t)image<0x20000000;
+    if (got && !guest_rip && c.Rsp) ReadProcessMemory(GetCurrentProcess(),(void *)(uintptr_t)c.Rsp,words,sizeof(words),&copied);
+    ResumeThread(t->h);
+    if (!got || !c.Rip) return;
+    const uintptr_t rip=(uintptr_t)c.Rip;
+    uintptr_t caller=0;
+    for (size_t i=0;i<copied/8 && !caller;++i) if (image && words[i]-(uintptr_t)image<0x20000000) caller=(uintptr_t)words[i];
+    const uint64_t key=((uint64_t)index<<56)^(uint64_t)rip^((uint64_t)caller<<20);
+    for (uint32_t probe=0,slot=(uint32_t)((key*0x9e3779b97f4a7c15ull)>>48);probe<64;++probe,slot=(slot+1)&(PROF_SLOTS-1)) {
+        ProfSlot *s=&prof_slots[slot];
+        if (!s->count) { s->key=key; s->rip=rip; s->caller=caller; s->thread=(uint16_t)index; s->count=1; return; }
+        if (s->key==key && s->rip==rip && s->caller==caller && s->thread==index) { ++s->count; return; }
+    }
+}
+static int prof_by_count(const void *a,const void *b) {
+    const uint32_t x=((const ProfSlot *)a)->count, y=((const ProfSlot *)b)->count;
+    return x<y ? 1 : x>y ? -1 : 0;
+}
+static void prof_report(unsigned seconds) {
+    uint64_t total=0;
+    fprintf(stderr,"Profile: %u s window; threads over 2%% of a core:\n",seconds);
+    for (int i=0;i<prof_count;++i) {
+        const uint64_t now=thread_cpu_100ns(prof_threads[i].h), used=now-prof_threads[i].cpu;
+        prof_threads[i].cpu=now;
+        const double share=(double)used/((double)seconds*1e5);
+        if (share>=2.0) fprintf(stderr,"Profile:   %5.1f%%  %s\n",share,prof_threads[i].name);
+    }
+    uint32_t used=0;
+    for (uint32_t i=0;i<PROF_SLOTS;++i) if (prof_slots[i].count) { prof_slots[used++]=prof_slots[i]; total+=prof_slots[i].count; }
+    qsort(prof_slots,used,sizeof(ProfSlot),prof_by_count);
+    for (uint32_t i=0;i<used && i<PROF_TOP;++i) {
+        char where[MAX_PATH+64], from[MAX_PATH+64]="";
+        describe_address(where,sizeof(where),prof_slots[i].rip);
+        if (prof_slots[i].caller) { strcpy(from," < "); describe_address(from+3,sizeof(from)-3,prof_slots[i].caller); }
+        fprintf(stderr,"Profile: %5.1f%% %-22s %s%s\n",100.0*prof_slots[i].count/(double)(total ? total : 1),
+                prof_threads[prof_slots[i].thread].name,where,from);
+    }
+    memset(prof_slots,0,sizeof(ProfSlot)*PROF_SLOTS);
+    fflush(stderr);
+}
+static DWORD WINAPI prof_thread(void *unused) {
+    (void)unused;
+    SetThreadDescription(GetCurrentThread(),L"golf:Profiler");
+    SetThreadPriority(GetCurrentThread(),THREAD_PRIORITY_HIGHEST);
+    const unsigned seconds=(unsigned)strtoul(getenv("GOLF_PROFILE"),NULL,10);
+    const ULONGLONG window=(ULONGLONG)(seconds ? seconds : 10)*1000;
+    ULONGLONG start=GetTickCount64(), refreshed=0;
+    for (;;) {
+        const ULONGLONG now=GetTickCount64();
+        if (now-refreshed>=1000) { prof_refresh(); refreshed=now; }
+        for (int i=0;i<prof_count;++i) prof_sample(i);
+        if (now-start>=window) { prof_report((unsigned)((now-start)/1000)); start=now; }
+        Sleep(4);
+    }
+    return 0;
+}
+static void start_profiler(void) {
+    const char *env=getenv("GOLF_PROFILE");
+    if (!env || !*env || !strcmp(env,"0")) return;
+    prof_slots=calloc(PROF_SLOTS,sizeof(ProfSlot));
+    if (!prof_slots) return;
+    HANDLE h=CreateThread(NULL,0,prof_thread,NULL,0,NULL);
+    if (h) CloseHandle(h);
+}
 static DWORD WINAPI watchdog_thread(void *seconds) {
     const unsigned timeout=*(const unsigned *)seconds;
     uint64_t remaining=(uint64_t)timeout*1000u;
@@ -1020,6 +1145,9 @@ int main(int argc, char **argv) {
         if (resogun_gpu_init(&gpu)) fail("GPU initialization failed");
         printf("GPU: window and Vulkan presenter ready; SDK 0x%08x, %u HLE symbols\n",(unsigned)sdk,resogun_gpu_symbol_count());
         start_hang_watch();
+#ifdef _WIN32
+        start_profiler();
+#endif
         if (resogun_render_4k()) runtime_kernel_set_neo_mode(1);
     }
 #ifdef _WIN32
