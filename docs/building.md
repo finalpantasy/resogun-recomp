@@ -112,6 +112,12 @@ Use `--ngs2-mix 0` to mute the sampler mix and `--ngs2-trace 1` to log
 voice parameters. The launcher passes these settings to the audio runtime
 through `RESOGUN_NGS2_MIX` and `RESOGUN_NGS2_TRACE`.
 
+`--http-dump DIR` writes local replay request bodies to a capture directory.
+Relative capture paths resolve under `--data-dir`. The launcher creates the directory
+and passes its absolute path to the bridge through `GOLF_HTTP_DUMP`.
+`--ngs2-matrix-trace 1` logs voice matrix levels. Set it to `0` to clear
+an inherited `GOLF_NGS2_MATRIX_TRACE` setting.
+
 `--fault-log 1` logs access faults on the Matching2 callback thread.
 Use `--fault-log 0` to clear an inherited setting.
 

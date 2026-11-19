@@ -449,7 +449,7 @@ static const Setting settings[] = {
 
 typedef struct {
     const char *game, *dlc, *data, *save, *log, *prepared, *shortcut;
-    const char *boot, *profile, *isa, *timeout;
+    const char *boot, *profile, *isa, *timeout, *http_dump;
     int prepare_only, reprepare, any_build, console, no_dlc;
     int forward_count, mount_count;
     char *forward[106], mount[24][PATH_CHARS + 128];
@@ -485,9 +485,11 @@ static void usage(void) {
            "  --online-id NAME    Local account name (up to 16 bytes)\n"
            "  --discovery-port N  Local replay port (0 disables replay)\n"
            "  --local-auth N      Synthetic login fixture, 0 or 1\n"
+           "  --http-dump DIR     Save local replay request bodies (relative to DATA)\n"
            "  --ticket-grants N   Synthetic ticket fixture, 0 or 1\n"
            "  --tus MODE          In-process Title User Storage, local or off\n"
            "  --font-file FILE    Host font for guest text\n"
+           "  --ngs2-matrix-trace N  Log audio voice matrices, 0 or 1\n"
            "  --save DIR           Save location (default: DATA/save)\n"
            "  --config FILE        Settings file (default: SAVE/settings.ini)\n"
            "  --log FILE           Append launcher and runtime output here\n"
@@ -565,6 +567,7 @@ static int parse(Options *o, int argc, char **argv) {
         else if (!strcmp(flag, "--ticket-grants")) golf_env = "GOLF_TICKET_GRANTS";
         else if (!strcmp(flag, "--tus")) golf_env = "GOLF_TUS";
         else if (!strcmp(flag, "--font-file")) golf_env = "GOLF_FONT_FILE";
+        else if (!strcmp(flag, "--ngs2-matrix-trace")) golf_env = "GOLF_NGS2_MATRIX_TRACE";
         if (golf_env) {
             if (++i >= argc || !argv[i][0] || !strncmp(argv[i], "--", 2)) return option_error(flag, "missing argument");
             const char *value = argv[i];
@@ -581,6 +584,10 @@ static int parse(Options *o, int argc, char **argv) {
             if ((!strcmp(golf_env, "GOLF_LOCAL_AUTH") || !strcmp(golf_env, "GOLF_TICKET_GRANTS"))
                     && strcmp(value, "0") && strcmp(value, "1"))
                 return option_error(flag, "expected 0 or 1");
+            if (!strcmp(golf_env, "GOLF_NGS2_MATRIX_TRACE")) {
+                if (strcmp(value, "0") && strcmp(value, "1")) return option_error(flag, "expected 0 or 1");
+                if (value[0] == '0') value = "";
+            }
             if (!strcmp(golf_env, "GOLF_TUS") && strcmp(value, "local") && strcmp(value, "off"))
                 return option_error(flag, "expected local or off");
             if (!strcmp(golf_env, "GOLF_FONT_FILE")) {
@@ -636,6 +643,7 @@ static int parse(Options *o, int argc, char **argv) {
         else if (!strcmp(flag, "--isa-rewrite")) target = &o->isa;
         else if (!strcmp(flag, "--timeout")) target = &o->timeout;
         else if (!strcmp(flag, "--log")) target = &o->log;
+        else if (!strcmp(flag, "--http-dump")) target = &o->http_dump;
         if (target) {
             if (++i >= argc || !argv[i][0] || !strncmp(argv[i], "--", 2)) return option_error(flag, "missing argument");
             *target = argv[i];
@@ -829,6 +837,15 @@ static int prepare_launch(const Options *o, const Saved *saved, const char *ini)
 
 static int setup_paths(const Options *o, int have_console) {
     char config[PATH_CHARS], defaults[PATH_CHARS], gpu[PATH_CHARS], shader[PATH_CHARS];
+    const char *capture = o->http_dump ? o->http_dump : getenv("GOLF_HTTP_DUMP");
+    if (capture && *capture) {
+        char path[PATH_CHARS];
+        if (!rooted(path, data_dir, capture)) return complain("Invalid HTTP capture path");
+        /* The replay bridge uses a 512-byte buffer for DIR/<counter>-<64-char route>.bin. */
+        if (strlen(path) > 430) return complain("HTTP capture path is too long");
+        if (!make_dirs(path)) return complain("Cannot create the HTTP capture directory");
+        if (!set_env("GOLF_HTTP_DUMP", path)) return complain("Cannot set the HTTP capture path");
+    }
     const char *fallback = getenv("RESOGUN_CONFIG_DEFAULT");
     if (!fallback || !*fallback) {
         if (!join_path(defaults, data_dir, "settings.ini")) return LAUNCH_ERROR;
