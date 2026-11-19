@@ -204,8 +204,14 @@ void PatchBufferSharp(const ResourceDiscovery& resource, Info& info, Descriptors
         .used_types = BufferDataType(inst, profile),
         .buffer_type = BufferType::Guest,
         .is_written = IsBufferStore(inst),
-        .is_formatted = inst.GetOpcode() == IR::Opcode::LoadBufferFormatF32 ||
-                        inst.GetOpcode() == IR::Opcode::StoreBufferFormatF32,
+        // resogun: MTBUF instructions carry their own format (LowerBufferFormatToRaw uses it), so
+        // only descriptor-formatted operations specialize on the descriptor's format. A typed
+        // load from a buffer whose descriptor said SnormNz/32_32_32_32 stopped the game in
+        // MapNumberConversion (Codex, mailbox 2026-11-18 21:52).
+        .is_formatted = (inst.GetOpcode() == IR::Opcode::LoadBufferFormatF32 ||
+                         inst.GetOpcode() == IR::Opcode::StoreBufferFormatF32) &&
+                        inst.Flags<IR::BufferInstInfo>().inst_data_fmt ==
+                            AmdGpu::DataFormat::FormatInvalid,
         .post_op = resource.sharps[0].post_op,
         .post_op_dw1_mask = resource.sharps[0].post_op_data.dw1_mask,
     });
