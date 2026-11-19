@@ -1225,6 +1225,7 @@ int main(int argc, char **argv) {
         resogun_set_width_4k(3840);
     if (gpu_enabled) runtime_game_cheats(image); /* the Cheats page (L3+R3) */
     if (gpu_enabled) runtime_game_golf_sixty(image); /* the 60 FPS option everywhere */
+    if (gpu_enabled) runtime_game_golf_resolution(image); /* settings.ini render_height */
     runtime_set_report_hook(loader_report_hook);
     protect(traps, round_page((import_count + 1) * 32), 5);
     protect(image, round_page(size), 0);

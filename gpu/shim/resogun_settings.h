@@ -159,6 +159,10 @@ struct Values {
     /// Everybody's Golf: the game's display option reads as frame rate priority, its 60 FPS mode
     /// (src/runtime_game.c); read once, before the game starts. On by default.
     bool frame_rate_priority = true;
+    /// Everybody's Golf in PS4 Pro mode: the height the game renders its scene at, 16:9 (1080,
+    /// 1440, 1800, 2160 or 2880), in either display mode (src/runtime_game.c); 0 leaves it to the
+    /// game: 3200x1800 in resolution priority, 1920x1080 in frame rate priority. Read once.
+    int render_height = 0;
     /// Texture packs (gpu/shadps4/video_core/texture_cache/texture_pack.h): the folder of
     /// replacement PNGs, and a folder to dump the game's textures into; empty: off. Read once.
     std::string texture_pack, texture_dump;

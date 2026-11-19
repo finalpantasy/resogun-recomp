@@ -26,16 +26,23 @@
 #endif
 /* sceKernelGetDirectMemorySize on retail PS4: 5056 MiB; a PS4 Pro (render_resolution=4k) gives
  * games 512 MiB more, and Resogun sizes its render pools for it in Pro mode (5240 MiB at boot).
- * RESOGUN_DMEM_MB raises it. pool() falls back to the retail size when the host refuses the larger
+ * RESOGUN_DMEM_MB raises it, and so does a game patch that renders bigger than the console did
+ * (runtime_memory_want_pool). pool() falls back to the retail size when the host refuses the larger
  * pool. */
 #define RETAIL_POOL (UINT64_C(5056) * 1024 * 1024)
-static uint64_t pool_bytes;
+static uint64_t pool_bytes, wanted_mb;
+/* A patch's minimum pool size in MiB; only takes effect before the game's first direct memory call. */
+void runtime_memory_want_pool(uint64_t mb) { __atomic_store_n(&wanted_mb, mb, __ATOMIC_RELEASE); }
 static uint64_t pool_size_bytes(void) {
     uint64_t bytes = __atomic_load_n(&pool_bytes, __ATOMIC_ACQUIRE);
     if (!bytes) {
         const char *env = getenv("RESOGUN_DMEM_MB");
         uint64_t mb = env ? strtoull(env, NULL, 10) : 0;
-        if (mb < 5056 || mb > 16384) mb = runtime_kernel_neo_mode() ? 5568 : 5056;
+        if (mb < 5056 || mb > 16384) {
+            mb = runtime_kernel_neo_mode() ? 5568 : 5056;
+            const uint64_t want = __atomic_load_n(&wanted_mb, __ATOMIC_ACQUIRE);
+            if (want > mb && want <= 16384) mb = want;
+        }
         /* Set once: callers read the size before taking the lock, and a thread that loses this
          * race must not overwrite pool()'s retail fallback with the refused size. */
         uint64_t expected = 0;

@@ -67,6 +67,12 @@ void Set(Values& v, const std::string& key, const std::string& value) {
         v.skip_intro = Truthy(value);
     } else if (key == "frame_rate_priority") {
         v.frame_rate_priority = Truthy(value);
+    } else if (key == "render_height") {
+        const bool listed = i == 0 || i == 1080 || i == 1440 || i == 1800 || i == 2160 || i == 2880;
+        v.render_height = listed ? i : 0;
+        if (!value.empty() && !listed) {
+            std::printf("Settings: render_height=%s is not 0, 1080, 1440, 1800, 2160 or 2880; using 0\n", value.c_str());
+        }
     } else if (key == "texture_pack") {
         v.texture_pack = value;
     } else if (key == "texture_dump") {
@@ -234,6 +240,7 @@ void Load() {
         {"RESOGUN_SKIP_INTRO", "skip_intro"},     {"RESOGUN_FRAME_RATE", "frame_rate"},
         {"RESOGUN_TITLE_BACK_EXITS", "title_back_exits"},
         {"RESOGUN_FRAME_RATE_PRIORITY", "frame_rate_priority"},
+        {"RESOGUN_RENDER_HEIGHT", "render_height"},
         {"RESOGUN_TEXTURE_PACK", "texture_pack"}, {"RESOGUN_TEXTURE_DUMP", "texture_dump"},
         {"RESOGUN_RENDER_RESOLUTION", "render_resolution"},
         {"RESOGUN_HDR", "hdr"},
@@ -322,6 +329,10 @@ extern "C" void resogun_set_width_4k(int width) {
 
 extern "C" int resogun_cheats(void) {
     return ResogunSettings::Get().cheats.load(std::memory_order_relaxed);
+}
+
+extern "C" int resogun_render_height(void) {
+    return ResogunSettings::Get().render_height;
 }
 
 extern "C" int resogun_render_4k(void) {
