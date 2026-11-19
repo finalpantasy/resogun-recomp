@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <atomic>
+#include <cstdio>
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/texture_cache/sampler.h"
@@ -49,8 +51,20 @@ Sampler::Sampler(const Vulkan::Instance& instance, const AmdGpu::Sampler& sample
     const bool no_mips = sampler.mip_filter == AmdGpu::MipFilter::None;
     const float min_lod = no_mips ? 0.0f : sampler.MinLod();
     const float max_lod = no_mips ? 0.25f : sampler.MaxLod();
-    const vk::SamplerCreateInfo sampler_ci = {
+    // resogun: FILTER_MODE Min/Max takes the smallest or largest texel in the footprint instead
+    // of the weighted average. Vulkan requires the average for compare samplers.
+    const bool reduce = sampler.filter_mode != AmdGpu::FilterMode::Blend && !is_depth &&
+                        instance.IsSamplerFilterMinmaxSupported();
+    const vk::SamplerReductionModeCreateInfo reduction{
         .pNext = custom_color ? &*custom_color : nullptr,
+        .reductionMode = sampler.filter_mode == AmdGpu::FilterMode::Min
+                             ? vk::SamplerReductionMode::eMin
+                             : vk::SamplerReductionMode::eMax,
+    };
+    const void* next = reduce ? static_cast<const void*>(&reduction)
+                              : custom_color ? static_cast<const void*>(&*custom_color) : nullptr;
+    const vk::SamplerCreateInfo sampler_ci = {
+        .pNext = next,
         .magFilter = LiverpoolToVK::Filter(sampler.xy_mag_filter),
         .minFilter = LiverpoolToVK::Filter(sampler.xy_min_filter),
         .mipmapMode = LiverpoolToVK::MipFilter(sampler.mip_filter),
@@ -73,6 +87,14 @@ Sampler::Sampler(const Vulkan::Instance& instance, const AmdGpu::Sampler& sample
     ASSERT_MSG(sampler_result == vk::Result::eSuccess, "Failed to create sampler: {}",
                vk::to_string(sampler_result));
     handle = std::move(smplr);
+    if (sampler.filter_mode != AmdGpu::FilterMode::Blend) {
+        static std::atomic<bool> logged{false};
+        if (!logged.exchange(true)) {
+            std::printf("Sampler: filter reduction %s requested (%s)\n",
+                        sampler.filter_mode == AmdGpu::FilterMode::Min ? "min" : "max",
+                        reduce ? "applied" : is_depth ? "compare sampler, averaged" : "unsupported");
+        }
+    }
 }
 
 Sampler::~Sampler() = default;
