@@ -327,6 +327,8 @@ std::pair<u64, s64> ConvertToShared(const std::filesystem::path& directory,
 
 namespace {
 std::atomic<u64> binary_hits{}, binary_misses{}, binary_rejected{}, binary_saved{}, binary_errors{};
+std::atomic<u64> binary_rejected_handles{}, binary_rejected_create{}, binary_key_shared{};
+std::atomic<u64> binary_rejected_from[3]{};
 std::atomic<u64> binary_restore_ns{}, binary_compile_ns{};
 std::atomic<u64> binary_restore_calls{}, binary_compile_calls{};
 std::atomic<u64> binary_key_ns{}, binary_load_ns{}, binary_handles_ns{};
@@ -397,6 +399,16 @@ void ReportPipelineBinaryCache() {
     std::printf("Pipeline binaries: %llu shared binaries written, %llu already shared\n",
                 static_cast<unsigned long long>(PipelineBinaryCache::shared_written.load()),
                 static_cast<unsigned long long>(PipelineBinaryCache::shared_reused.load()));
+    std::printf("Pipeline binary rejections: %llu at binary creation, %llu at pipeline creation; "
+                "%llu driver keys shared by different draw states\n",
+                static_cast<unsigned long long>(binary_rejected_handles.load()),
+                static_cast<unsigned long long>(binary_rejected_create.load()),
+                static_cast<unsigned long long>(binary_key_shared.load()));
+    std::printf("Pipeline binary rejections by file: %llu state-named, %llu driver-key-only, "
+                "%llu legacy\n",
+                static_cast<unsigned long long>(binary_rejected_from[0].load()),
+                static_cast<unsigned long long>(binary_rejected_from[1].load()),
+                static_cast<unsigned long long>(binary_rejected_from[2].load()));
 }
 
 vk::ResultValue<vk::UniquePipeline> CreateCachedGraphicsPipeline(
@@ -453,8 +465,28 @@ vk::ResultValue<vk::UniquePipeline> CreateCachedGraphicsPipeline(
     for (const auto byte : pipeline_id) {
         name += fmt::format("{:02x}", byte);
     }
-    // The driver key identifies the pipeline independently of emulator draw-state keys.
-    const auto file = directory / (name + ".bin");
+    // resogun: NVIDIA gives pipelines that differ in draw state (such as a squaring pass's blend)
+    // the same driver key, and restoring one's binaries for the other returns
+    // VK_PIPELINE_COMPILE_REQUIRED. The two then overwrote one file every run and both compiled
+    // again. The file is named by the driver key and a hash of the emulator key and blend state;
+    // the binaries stay shared through shared/. A file under the older driver-key-only name is
+    // still tried once.
+    u64 state = XXH3_64bits(&key, sizeof(key));
+    if (const auto* blend = info.pColorBlendState) {
+        state = XXH3_64bits_withSeed(blend->pAttachments,
+                                     blend->attachmentCount * sizeof(*blend->pAttachments),
+                                     state ^ (u64(blend->logicOpEnable) << 32 | u64(blend->logicOp)));
+    }
+    {
+        static std::mutex seen_mutex;
+        static std::unordered_map<std::string, u64> seen;
+        std::scoped_lock lock{seen_mutex};
+        if (const auto [it, inserted] = seen.try_emplace(name, state); !inserted && it->second != state) {
+            ++binary_key_shared;
+        }
+    }
+    const auto file = directory / fmt::format("{}-{:016x}.bin", name, state);
+    const auto old_file = directory / (name + ".bin");
     std::vector<VkPipelineBinaryKHR> handles;
     const auto destroy = [&] {
         for (auto handle : handles) {
@@ -467,9 +499,15 @@ vk::ResultValue<vk::UniquePipeline> CreateCachedGraphicsPipeline(
     SCOPE_EXIT { destroy(); };
     try {
         const auto load_started = std::chrono::steady_clock::now();
+        int source = 0; // the state-named file, the driver-key-only file, a legacy file
         auto binaries = Load(file, global, pipeline_id, 0);
         if (!binaries) {
-            binaries = LoadLegacyBinary(directory, name, global, pipeline_id);
+            source = 1;
+            binaries = Load(old_file, global, pipeline_id, 0);
+            if (!binaries) {
+                source = 2;
+                binaries = LoadLegacyBinary(directory, name, global, pipeline_id);
+            }
             if (binaries) {
                 Store(file, global, pipeline_id, 0, *binaries);
             }
@@ -511,6 +549,18 @@ vk::ResultValue<vk::UniquePipeline> CreateCachedGraphicsPipeline(
                 if (result.result == vk::Result::eSuccess) {
                     ++binary_hits;
                     return result;
+                }
+                ++binary_rejected_create;
+                ++binary_rejected_from[source];
+                if (binary_rejected_create.load() <= 6) {
+                    std::printf("Pipeline binary rejected at pipeline creation: %s (%zu binaries)\n",
+                                vk::to_string(result.result).c_str(), handles.size());
+                }
+            } else {
+                ++binary_rejected_handles;
+                if (binary_rejected_handles.load() <= 6) {
+                    std::printf("Pipeline binary rejected at binary creation: %d (%zu binaries)\n",
+                                int(handles_result), handles.size());
                 }
             }
             ++binary_rejected;
