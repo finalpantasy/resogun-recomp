@@ -255,6 +255,19 @@ public:
     Id base_vertex{};
     Id base_instance{};
     Id frag_coord{};
+    // resogun: RESOGUN_PS_DEBUG output override (GolfDebugSetup).
+    struct GolfDebugView {
+        Id var;
+        char kind;
+        u32 n;
+        u32 m;
+    };
+    std::vector<GolfDebugView> golf_dbg;
+    u32 golf_dbg_seen{};
+    bool golf_noquad{};
+    Id GolfDebugSample(Id sample, Id coords, Id type);
+    void GolfDebugAttribute(u32 param, u32 comp, Id value);
+    Id GolfDebugOutput(u32 element, Id original);
     Id front_facing{};
     Id frag_depth{};
     Id stencil_ref{};
@@ -405,6 +418,7 @@ private:
     void DefineImagesAndSamplers();
     void DefineSharedMemory();
     void DefineFunctions();
+    void GolfDebugSetup();
 
     SpirvAttribute GetAttributeInfo(AmdGpu::NumberFormat fmt, Id id, u32 num_components,
                                     bool output, bool loaded = false, bool array = false);

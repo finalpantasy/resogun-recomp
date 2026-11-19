@@ -108,8 +108,9 @@ Id EmitImageSampleImplicitLod(EmitContext& ctx, IR::Inst* inst, u32 handle, Id c
     ImageOperands operands;
     operands.Add(spv::ImageOperandsMask::Bias, bias);
     operands.AddOffset(ctx, offset);
-    const Id sample = ctx.OpImageSampleImplicitLod(result_type, sampled_image, coords,
+    Id sample = ctx.OpImageSampleImplicitLod(result_type, sampled_image, coords,
                                                    operands.mask, operands.operands);
+    sample = ctx.GolfDebugSample(sample, coords, result_type);
     return texture.is_integer ? ctx.OpBitcast(ctx.F32[4], sample) : sample;
 }
 
@@ -123,8 +124,9 @@ Id EmitImageSampleExplicitLod(EmitContext& ctx, IR::Inst* inst, u32 handle, Id c
     ImageOperands operands;
     operands.Add(spv::ImageOperandsMask::Lod, lod);
     operands.AddOffset(ctx, offset);
-    const Id sample = ctx.OpImageSampleExplicitLod(result_type, sampled_image, coords,
+    Id sample = ctx.OpImageSampleExplicitLod(result_type, sampled_image, coords,
                                                    operands.mask, operands.operands);
+    sample = ctx.GolfDebugSample(sample, coords, result_type);
     return texture.is_integer ? ctx.OpBitcast(ctx.F32[4], sample) : sample;
 }
 
@@ -142,7 +144,7 @@ Id EmitImageSampleDrefImplicitLod(EmitContext& ctx, IR::Inst* inst, u32 handle, 
     ImageOperands operands;
     operands.Add(spv::ImageOperandsMask::Bias, bias);
     operands.AddOffset(ctx, offset);
-    const Id sample = ctx.OpImageSampleDrefImplicitLod(result_type, sampled_image, coords, dref,
+    Id sample = ctx.OpImageSampleDrefImplicitLod(result_type, sampled_image, coords, dref,
                                                        operands.mask, operands.operands);
     const Id sample_typed = texture.is_integer ? ctx.OpBitcast(ctx.F32[1], sample) : sample;
     return ctx.OpCompositeConstruct(ctx.F32[4], sample_typed, ctx.f32_zero_value, ctx.f32_zero_value,
@@ -159,7 +161,7 @@ Id EmitImageSampleDrefExplicitLod(EmitContext& ctx, IR::Inst* inst, u32 handle, 
     ImageOperands operands;
     operands.Add(spv::ImageOperandsMask::Lod, lod);
     operands.AddOffset(ctx, offset);
-    const Id sample = ctx.OpImageSampleDrefExplicitLod(result_type, sampled_image, coords, dref,
+    Id sample = ctx.OpImageSampleDrefExplicitLod(result_type, sampled_image, coords, dref,
                                                        operands.mask, operands.operands);
     const Id sample_typed = texture.is_integer ? ctx.OpBitcast(ctx.F32[1], sample) : sample;
     return ctx.OpCompositeConstruct(ctx.F32[4], sample_typed, ctx.f32_zero_value, ctx.f32_zero_value,
@@ -240,8 +242,9 @@ Id EmitImageGradient(EmitContext& ctx, IR::Inst* inst, u32 handle, Id coords, Id
     ImageOperands operands;
     operands.AddDerivatives(ctx, derivatives_dx, derivatives_dy);
     operands.AddOffset(ctx, offset);
-    const Id sample = ctx.OpImageSampleExplicitLod(result_type, sampled_image, coords,
+    Id sample = ctx.OpImageSampleExplicitLod(result_type, sampled_image, coords,
                                                    operands.mask, operands.operands);
+    sample = ctx.GolfDebugSample(sample, coords, result_type);
     return texture.is_integer ? ctx.OpBitcast(ctx.F32[4], sample) : sample;
 }
 
