@@ -654,6 +654,44 @@ IR::Value FixCubeCoords(IR::IREmitter& ir, const AmdGpu::Image& image, const IR:
     return ir.CompositeConstruct(fixed_x, fixed_y, fixed_face);
 }
 
+// resogun: GCN cube math leaves (s, t) in [1, 2] on face slice `face` (8 slices per cube of an
+// array: face id 0-5 plus 8 * cube index). Turns that back into the direction a Vulkan cube array
+// samples, with the major axis 1: x, y, z and, for samples, the cube index. Faces follow the cube
+// face selection table GCN and Vulkan share (+X, -X, +Y, -Y, +Z, -Z):
+//   sc = -z, z, x, x, x, -x;  tc = -y, -y, z, -z, -y, -y.
+// With `derivatives`, (s, t) are face-space derivatives and only the linear part is rebuilt.
+struct CubeFace {
+    IR::F32 id;
+    IR::F32 index;
+};
+
+CubeFace SplitCubeFace(IR::IREmitter& ir, const IR::F32& face) {
+    const IR::F32 index = ir.FPFloor(ir.FPMul(face, ir.Imm32(0.125f)));
+    return {ir.FPFma(index, ir.Imm32(-8.f), face), index};
+}
+
+std::array<IR::F32, 3> CubeDirection(IR::IREmitter& ir, const IR::F32& s, const IR::F32& t,
+                                     const IR::F32& face_id, bool derivatives) {
+    // Coordinates map [1, 2] to [-1, 1]; derivatives only scale.
+    const IR::F32 sc = derivatives ? ir.FPMul(s, ir.Imm32(2.f))
+                                   : ir.FPFma(s, ir.Imm32(2.f), ir.Imm32(-3.f));
+    const IR::F32 tc = derivatives ? ir.FPMul(t, ir.Imm32(2.f))
+                                   : ir.FPFma(t, ir.Imm32(2.f), ir.Imm32(-3.f));
+    const IR::F32 nsc = ir.FPNeg(sc);
+    const IR::F32 ntc = ir.FPNeg(tc);
+    const IR::F32 one = ir.Imm32(derivatives ? 0.f : 1.f);
+    const IR::F32 neg_one = ir.Imm32(derivatives ? 0.f : -1.f);
+    const auto pick = [&](const std::array<IR::F32, 6>& v) {
+        IR::F32 r = v[5];
+        for (int f = 4; f >= 0; --f) {
+            r = IR::F32{ir.Select(ir.FPLessThan(face_id, ir.Imm32(f + 0.5f)), v[f], r)};
+        }
+        return r;
+    };
+    return {pick({one, neg_one, sc, sc, sc, nsc}), pick({ntc, ntc, one, neg_one, ntc, ntc}),
+            pick({nsc, sc, tc, ntc, one, neg_one})};
+}
+
 void PatchImageSampleArgs(IR::Inst& inst, Info& info, const ImageResource& image_res,
                           const AmdGpu::Image& image) {
     const auto handle = inst.Arg(0);
@@ -783,6 +821,8 @@ void PatchImageSampleArgs(IR::Inst& inst, Info& info, const ImageResource& image
     };
 
     // Now we can load body components as noted in Table 8.9 Image Opcodes with Sampler
+    const bool cube_sampled = !is_msaa && !unnormalized && image_res.IsCubeSampled(image);
+    IR::F32 cube_face_id{};
     const IR::Value coords = [&] -> IR::Value {
         switch (view_type) {
         case AmdGpu::ImageType::Color1D: // x
@@ -795,6 +835,13 @@ void PatchImageSampleArgs(IR::Inst& inst, Info& info, const ImageResource& image
             return ir.CompositeConstruct(get_coord(addr_reg - 2, 0), get_coord(addr_reg - 1, 1));
         case AmdGpu::ImageType::Color2DArray: // x, y, slice
             addr_reg = addr_reg + 3;
+            if (cube_sampled) {
+                const CubeFace face = SplitCubeFace(ir, get_addr_reg(addr_reg - 1));
+                cube_face_id = face.id;
+                const auto dir = CubeDirection(ir, get_addr_reg(addr_reg - 3),
+                                               get_addr_reg(addr_reg - 2), face.id, false);
+                return ir.CompositeConstruct(dir[0], dir[1], dir[2], face.index);
+            }
             // Note we can use FixCubeCoords with fallthrough cases since it checks for image type.
             return FixCubeCoords(ir, image, get_coord(addr_reg - 3, 0), get_coord(addr_reg - 2, 1),
                                  get_addr_reg(addr_reg - 1));
@@ -825,6 +872,17 @@ void PatchImageSampleArgs(IR::Inst& inst, Info& info, const ImageResource& image
             return ir.ImageGather(handle, coords, offset, inst_info);
         }
         if (inst_info.has_derivatives) {
+            if (cube_sampled) {
+                const auto cube_derivative = [&](const IR::Value& d) {
+                    const auto dir = CubeDirection(ir, IR::F32{ir.CompositeExtract(d, 0)},
+                                                   IR::F32{ir.CompositeExtract(d, 1)},
+                                                   cube_face_id, true);
+                    return ir.CompositeConstruct(dir[0], dir[1], dir[2]);
+                };
+                return ir.ImageGradient(handle, coords, cube_derivative(derivatives_dx),
+                                        cube_derivative(derivatives_dy), offset, lod_clamp,
+                                        inst_info);
+            }
             return ir.ImageGradient(handle, coords, derivatives_dx, derivatives_dy, offset,
                                     lod_clamp, inst_info);
         }
@@ -904,6 +962,15 @@ void PatchImageArgs(IR::Inst& inst, Info& info) {
             UNREACHABLE_MSG("Unknown image type {}", view_type);
         }
     }();
+
+    if (inst.GetOpcode() == IR::Opcode::ImageQueryLod && image_res.IsCubeSampled(image)) {
+        // A cube LOD query takes the direction alone, without the cube index.
+        const CubeFace face = SplitCubeFace(ir, IR::F32{body->Arg(2)});
+        const auto dir =
+            CubeDirection(ir, IR::F32{body->Arg(0)}, IR::F32{body->Arg(1)}, face.id, false);
+        inst.SetArg(1, ir.CompositeConstruct(dir[0], dir[1], dir[2]));
+        return;
+    }
 
     const auto has_ms = view_type == AmdGpu::ImageType::Color2DMsaa ||
                         view_type == AmdGpu::ImageType::Color2DMsaaArray;

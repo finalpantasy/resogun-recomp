@@ -1797,10 +1797,11 @@ void Rasterizer::ResolveVertexBuffers(const GraphicsPipeline* pipeline,
         // resogun: every attribute's guest format (data/number) and the Vulkan format it reads as.
         for (size_t i = 0; i < attributes.size() && i < guest_buffers.size(); ++i) {
             const auto& g = guest_buffers[i];
-            capture_vertices += std::format(" | a{} {}/{} {} +{:#x}", attributes[i].location,
+            capture_vertices += std::format(" | a{} {}/{} {} +{:#x} s{} n{}", attributes[i].location,
                                             u32(g.GetDataFmt()), u32(g.GetNumberFmt()),
                                             vk::to_string(attributes[i].format),
-                                            u64(g.base_address) & 0xffff);
+                                            u64(g.base_address) & 0xffff, g.GetStride(),
+                                            g.num_records);
         }
     }
     if (bindings.empty()) {

@@ -264,8 +264,11 @@ public:
     };
     std::vector<GolfDebugView> golf_dbg;
     u32 golf_dbg_seen{};
+    u32 golf_dref_seen{};
     bool golf_noquad{};
     Id GolfDebugSample(Id sample, Id coords, Id type);
+    Id GolfDebugDref(Id result);
+    Id GolfDebugColumn(u32 view, Id mine, Id other, Id type);
     void GolfDebugAttribute(u32 param, u32 comp, Id value);
     Id GolfDebugOutput(u32 element, Id original);
     Id front_facing{};

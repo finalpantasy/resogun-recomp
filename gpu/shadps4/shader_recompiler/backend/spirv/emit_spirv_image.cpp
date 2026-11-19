@@ -110,6 +110,18 @@ Id EmitImageSampleImplicitLod(EmitContext& ctx, IR::Inst* inst, u32 handle, Id c
     operands.AddOffset(ctx, offset);
     Id sample = ctx.OpImageSampleImplicitLod(result_type, sampled_image, coords,
                                                    operands.mask, operands.operands);
+    for (u32 i = 0; i < ctx.golf_dbg.size(); ++i) {
+        // x: the own color with every implicit-LOD sample taken at LOD 0.
+        if (ctx.golf_dbg[i].kind != 'x') {
+            continue;
+        }
+        ImageOperands lod0;
+        lod0.Add(spv::ImageOperandsMask::Lod, ctx.f32_zero_value);
+        lod0.AddOffset(ctx, offset);
+        const Id base = ctx.OpImageSampleExplicitLod(result_type, sampled_image, coords,
+                                                     lod0.mask, lod0.operands);
+        sample = ctx.GolfDebugColumn(i, base, sample, result_type);
+    }
     sample = ctx.GolfDebugSample(sample, coords, result_type);
     return texture.is_integer ? ctx.OpBitcast(ctx.F32[4], sample) : sample;
 }
@@ -146,7 +158,8 @@ Id EmitImageSampleDrefImplicitLod(EmitContext& ctx, IR::Inst* inst, u32 handle, 
     operands.AddOffset(ctx, offset);
     Id sample = ctx.OpImageSampleDrefImplicitLod(result_type, sampled_image, coords, dref,
                                                        operands.mask, operands.operands);
-    const Id sample_typed = texture.is_integer ? ctx.OpBitcast(ctx.F32[1], sample) : sample;
+    const Id sample_typed =
+        ctx.GolfDebugDref(texture.is_integer ? ctx.OpBitcast(ctx.F32[1], sample) : sample);
     return ctx.OpCompositeConstruct(ctx.F32[4], sample_typed, ctx.f32_zero_value, ctx.f32_zero_value,
                                     ctx.f32_zero_value);
 }
@@ -163,7 +176,8 @@ Id EmitImageSampleDrefExplicitLod(EmitContext& ctx, IR::Inst* inst, u32 handle, 
     operands.AddOffset(ctx, offset);
     Id sample = ctx.OpImageSampleDrefExplicitLod(result_type, sampled_image, coords, dref,
                                                        operands.mask, operands.operands);
-    const Id sample_typed = texture.is_integer ? ctx.OpBitcast(ctx.F32[1], sample) : sample;
+    const Id sample_typed =
+        ctx.GolfDebugDref(texture.is_integer ? ctx.OpBitcast(ctx.F32[1], sample) : sample);
     return ctx.OpCompositeConstruct(ctx.F32[4], sample_typed, ctx.f32_zero_value, ctx.f32_zero_value,
                                     ctx.f32_zero_value);
 }

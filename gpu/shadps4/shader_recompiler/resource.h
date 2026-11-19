@@ -129,6 +129,18 @@ struct ImageResource {
     MipStorageFallbackMode mip_fallback_mode{};
     SharpFetchPostOp post_op{};
 
+    /// resogun: a cube map read only by normalized sampling. It is bound as a Vulkan cube array
+    /// so filtering crosses face edges as on GCN; sampled per face of a 2D array, the low mips
+    /// that rough surfaces read from image-based lighting drew straight seams on faces and necks.
+    /// The shader type, the coordinates and the image view all follow this one rule.
+    bool IsCubeSampled(const AmdGpu::Image& image) const noexcept {
+        if (!image.IsCube() || is_written || is_depth || is_atomic || needs_native) {
+            return false;
+        }
+        return image.width == image.height && image.NumViewLayers(true) % 6 == 0 &&
+               image.base_array % 6 == 0;
+    }
+
     constexpr AmdGpu::Image GetSharp(const auto& info) const noexcept {
         AmdGpu::Image image{};
         if (!Fetch(info.FlatUserData().data(), &image)) {
