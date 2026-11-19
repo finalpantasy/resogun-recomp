@@ -41,7 +41,7 @@
 namespace Serialization {
 /* You should increment versions below once corresponding serialization scheme is changed. */
 static constexpr u32 ShaderBinaryVersion = 8u; // resogun: v_writelane and spilled SGPR reloads (golf-fix v41)
-static constexpr u32 ShaderMetaVersion = 9u; // resogun: typed buffers no longer specialize on descriptor format
+static constexpr u32 ShaderMetaVersion = 10u; // resogun: images and samplers specialize on golf-fix v22's LOD 0 sampling
 static constexpr u32 PipelineKeyVersion = 6u; // resogun: Info layout (larger image and sampler lists)
 } // namespace Serialization
 

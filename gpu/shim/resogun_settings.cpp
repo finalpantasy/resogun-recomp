@@ -65,6 +65,8 @@ void Set(Values& v, const std::string& key, const std::string& value) {
         v.startup_aspect_ratio = v.aspect_ratio = ratio;
     } else if (key == "skip_intro") {
         v.skip_intro = Truthy(value);
+    } else if (key == "frame_rate_priority") {
+        v.frame_rate_priority = Truthy(value);
     } else if (key == "title_back_exits") {
         v.title_back_exits = Truthy(value);
     } else if (key == "sharpening") {
@@ -224,6 +226,7 @@ void Load() {
         {"RESOGUN_AUDIO_CHANNELS", "audio_channels"},
         {"RESOGUN_SKIP_INTRO", "skip_intro"},     {"RESOGUN_FRAME_RATE", "frame_rate"},
         {"RESOGUN_TITLE_BACK_EXITS", "title_back_exits"},
+        {"RESOGUN_FRAME_RATE_PRIORITY", "frame_rate_priority"},
         {"RESOGUN_RENDER_RESOLUTION", "render_resolution"},
         {"RESOGUN_HDR", "hdr"},
         {"RESOGUN_SHARPENING", "sharpening"},
@@ -278,6 +281,10 @@ int EffectiveFrameRate() {
 
 extern "C" int resogun_skip_intro(void) {
     return ResogunSettings::Get().skip_intro ? 1 : 0;
+}
+
+extern "C" int resogun_frame_rate_priority(void) {
+    return ResogunSettings::Get().frame_rate_priority ? 1 : 0;
 }
 
 extern "C" int resogun_title_back_exits(void) {

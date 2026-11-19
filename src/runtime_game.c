@@ -501,3 +501,61 @@ int runtime_game_cheats(unsigned char *image) {
                      mask&32 ? " max-weapon" : "",mask&64 ? " no-multiplier-decay" : "");
     return 1;
 }
+
+/* Everybody's Golf 1.17: the game's own 60 FPS option (PS4 Pro, the flag at 0x2cea1d9) in every
+ * scene. With it on, the game keeps flip rate 0 for its 30 Hz scenes unless one of five scene
+ * objects of the global game object is active (+0x13150, +0x181b0, +0x181a8, +0x12bda,
+ * +0x12c18: the tee, the shot, the course flyover), then drops to 30 FPS. Every check sits behind
+ * the flag, so with the option off nothing changes. Port of golf-fix v41's 60 FPS patch
+ * (danilenko22, GPL-2.0-or-later): the same conditional jumps become nops. Its one other change
+ * (0xeac3a, the vsync interval 0xec3cf0 gets: 2 in the 30 Hz mode) here gives 1 only with the
+ * flag on, so the 30 Hz mode keeps 2 when the option is off. */
+static const uint32_t golf_sixty_jumps[]={
+    0xeadc8,0xeadd2,0xeaddb,0xeade4,0xeaded, 0x25ea76,0x25ea80,0x25ea8a,0x25ea93,0x25ea9c,0x25eaa5,
+    0xe54801,0xe5480b,0xe54815,0xe5481e,0xe54827,0xe54830, 0xe5d1b7,0xe5d1c1,0xe5d1cb,0xe5d1d4,0xe5d1dd,0xe5d1e6,
+    0xe5e4fd,0xe5e507,0xe5e511,0xe5e51a,0xe5e523,0xe5e52c, 0xfb29f3,0xfb2a02,0xfb2a0c,0xfb2a16,0xfb2a20,0xfb2a2a,
+    0xfb2a99,0xfb2aac,0xfb2ab6,0xfb2abf,0xfb2ac8,0xfb2ad1, 0xfd3c81,0xfd3c8b,0xfd3c95,0xfd3c9f,0xfd3ca9,
+    0xfd3ce5,0xfd3cef,0xfd3cf9,0xfd3d03,0xfd3d0d};
+/* 0xeac31: xor edi,edi; cmp dword [rax+0x24ec],60; setne dil; inc edi (then call 0xec3cf0). */
+static const unsigned char golf_interval_site[15]={0x31,0xff,0x83,0xb8,0xec,0x24,0x00,0x00,0x3c,0x40,0x0f,0x95,0xc7,0xff,0xc7};
+int runtime_game_golf_sixty(unsigned char *image) {
+    if (!clock_foreign) return 0; /* Resogun */
+    for (size_t i=0;i<sizeof(golf_sixty_jumps)/sizeof(golf_sixty_jumps[0]);++i) {
+        const unsigned char op=image[golf_sixty_jumps[i]];
+        if (op!=0x74 && op!=0x75) { puts("60 FPS: the frame rate checks are not where eboot 1.17 has them; not patched"); return 0; }
+    }
+    if (memcmp(image+0xeac31,golf_interval_site,sizeof(golf_interval_site))) {
+        puts("60 FPS: the vsync interval is not where eboot 1.17 has it; not patched");
+        return 0;
+    }
+    unsigned char *stub=runtime_low_map(4096,PROT_READ|PROT_WRITE|PROT_EXEC), *p=stub;
+    if (!stub) return 0;
+    for (size_t i=0;i<sizeof(golf_sixty_jumps)/sizeof(golf_sixty_jumps[0]);++i) memset(image+golf_sixty_jumps[i],0x90,2);
+    /* edi = 1 + (mode != 60 && !flag); rax (the game object) is not read after it. */
+    const uint64_t flag=(uint64_t)(uintptr_t)(image+0x2cea1d9), back=(uint64_t)(uintptr_t)(image+0xeac40),
+                   to=(uint64_t)(uintptr_t)stub;
+    memcpy(p,golf_interval_site,9); p+=9;                   /* xor edi,edi; cmp [rax+0x24ec],60 */
+    *p++=0x74; *p++=0x11;                                   /* je done */
+    *p++=0x48; *p++=0xb8; memcpy(p,&flag,8); p+=8;          /* mov rax, flag */
+    *p++=0x80; *p++=0x38; *p++=0x00;                        /* cmp byte [rax],0 */
+    *p++=0x40; *p++=0x0f; *p++=0x94; *p++=0xc7;             /* sete dil */
+    *p++=0xff; *p++=0xc7;                                   /* done: inc edi */
+    *p++=0xff; *p++=0x25; memset(p,0,4); p+=4;              /* jmp [rip]: back */
+    memcpy(p,&back,8);
+    unsigned char *site=image+0xeac31;
+    site[0]=0xff; site[1]=0x25; memset(site+2,0,4);         /* jmp [rip]: the stub */
+    memcpy(site+6,&to,8);
+    site[14]=0x90;
+    puts("60 FPS: the game's 60 FPS option applies in every scene (golf-fix v41 patch)");
+    /* settings.ini frame_rate_priority (default on): the save's display option (+0x2c at
+     * 0xbced47, +0x37 at 0x14a2d7) reads as 2, frame rate priority, the 60 FPS mode, whatever the
+     * menu holds. The game still needs PS4 Pro mode (render_resolution=4k) for it. */
+    static const unsigned char read_a[5]={0x41,0x8b,0x44,0x24,0x2c}, read_b[5]={0x41,0x0f,0xbe,0x46,0x37},
+                               two[5]={0xb8,0x02,0x00,0x00,0x00};
+    if (resogun_frame_rate_priority() && !memcmp(image+0xbced47,read_a,5) && !memcmp(image+0x14a2d7,read_b,5)) {
+        memcpy(image+0xbced47,two,5);
+        memcpy(image+0x14a2d7,two,5);
+        puts("60 FPS: settings.ini frame_rate_priority=1, the display option reads as frame rate priority");
+    }
+    return 1;
+}

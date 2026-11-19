@@ -13,6 +13,7 @@
 #include "../src/runtime_game.c"
 
 int resogun_frame_rate(void) { return 60; }
+int resogun_frame_rate_priority(void) { return 0; }
 void resogun_set_frame_rate(int rate) { (void)rate; }
 int resogun_cheats(void) { return 0; }
 int resogun_game_held(void) { return 0; }
