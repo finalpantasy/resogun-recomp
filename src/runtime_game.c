@@ -559,3 +559,57 @@ int runtime_game_golf_sixty(unsigned char *image) {
     }
     return 1;
 }
+
+/* Everybody's Golf 1.17: the scene's render size (settings.ini render_height). At 0xfb7887 the
+ * game object's update picks it from the PS4 Pro flag (0x2cea525) and the frame rate priority
+ * flag (wanted 0x2cea1d8, current 0x2cea1d9): frame rate priority clears the Pro flag and renders
+ * 1920x1080 (scale 0x1000, 4.12 fixed point); otherwise Pro renders 3200x1800 (scale 0x1aaa).
+ * Both paths (0xfb78ce, and 0xfb78b6 through its jump at 0xfb78cc) end at 0xfb7919, which stores
+ * the size in the game object (+0x244c, +0x2450, scale +0x12c48); a new size (r14b) rebuilds the
+ * scene targets and display buffers (0xfb7997). Patched: 0xfb78cc jumps on to 0xfb78ce, where a
+ * stub stores the mode, counts a mode change as a change, so the targets are rebuilt for the new
+ * mode at the same size, and gives render_height's 16:9 size in either mode. The rebuild makes
+ * the frame rate priority target (+0x15168, drawn by 0xfb5a27 and 0xfb5d4b) only on a Pro with
+ * a height up to 1080 (0xfb7e95); above that frame rate priority faulted at 0xfee27a (a clear
+ * with no colour target bound), so its jg goes. Needs PS4 Pro mode (render_resolution=4k). */
+int runtime_game_golf_resolution(unsigned char *image) {
+    const int height=resogun_render_height();
+    if (!clock_foreign || !height || !resogun_render_4k()) return 0;
+    static const unsigned char at_cc[2]={0xeb,0x3b}, at_ce[2]={0x88,0x15}, at_db[6]={0x41,0xbd,0x08,0x07,0x00,0x00},
+                               at_19[6]={0x89,0x97,0x48,0x2c,0x01,0x00}, at_e95[8]={0x81,0xfa,0x38,0x04,0x00,0x00,0x7f,0x55};
+    if (memcmp(image+0xfb78cc,at_cc,2) || memcmp(image+0xfb78ce,at_ce,2) || memcmp(image+0xfb78db,at_db,6) ||
+        memcmp(image+0xfb7919,at_19,6) || memcmp(image+0xfb7e95,at_e95,8)) {
+        puts("Render size: the size choice is not where eboot 1.17 has it; not patched");
+        return 0;
+    }
+    unsigned char *stub=runtime_low_map(4096,PROT_READ|PROT_WRITE|PROT_EXEC), *p=stub;
+    if (!stub) return 0;
+    const uint32_t h=(uint32_t)height, w=h*16/9, scale=(h*0x1000+1079)/1080;
+    unsigned char *last=stub+4095; /* the mode last seen here; 0 like the game's flag at start */
+    const uint64_t flag=(uint64_t)(uintptr_t)(image+0x2cea1d9), seen=(uint64_t)(uintptr_t)last,
+                   back=(uint64_t)(uintptr_t)(image+0xfb7919), to=(uint64_t)(uintptr_t)stub;
+    /* Live here: dl the mode, rdi the game object, r14b changed; rsi free. Out: edx scale, ebx
+     * width, r13d height. */
+    *p++=0x48; *p++=0xbe; memcpy(p,&seen,8); p+=8;         /* mov rsi, last */
+    *p++=0x38; *p++=0x16;                                   /* cmp [rsi], dl */
+    *p++=0x74; *p++=0x03;                                   /* je same */
+    *p++=0x41; *p++=0xb6; *p++=0x01;                        /* mov r14b, 1 */
+    *p++=0x88; *p++=0x16;                                   /* same: mov [rsi], dl */
+    *p++=0x48; *p++=0xbe; memcpy(p,&flag,8); p+=8;         /* mov rsi, flag */
+    *p++=0x88; *p++=0x16;                                   /* mov [rsi], dl */
+    *p++=0xba; memcpy(p,&scale,4); p+=4;                    /* mov edx, scale */
+    *p++=0xbb; memcpy(p,&w,4); p+=4;                        /* mov ebx, width */
+    *p++=0x41; *p++=0xbd; memcpy(p,&h,4); p+=4;             /* mov r13d, height */
+    *p++=0xff; *p++=0x25; memset(p,0,4); p+=4;              /* jmp [rip]: back */
+    memcpy(p,&back,8);
+    image[0xfb7e9b]=0x90; image[0xfb7e9c]=0x90;             /* 0xfb7e9b: jg 0xfb7ef2 */
+    image[0xfb78cd]=0x00;                                   /* 0xfb78cc: jmp 0xfb78ce */
+    unsigned char *site=image+0xfb78ce;
+    site[0]=0xff; site[1]=0x25; memset(site+2,0,4);         /* jmp [rip]: the stub */
+    memcpy(site+6,&to,8);
+    /* The Pro's 5568 MiB of direct memory holds 3200x1800; at 2160 the first course load needed
+     * 5716 MiB, and with none left the loader (0xf8d090) asks for 0 bytes and retries forever. */
+    if (h>1800) runtime_memory_want_pool(h>2160 ? 8704 : 6592);
+    printf("Render size: %ux%u in either display mode (settings.ini render_height)\n",w,h);
+    return 1;
+}

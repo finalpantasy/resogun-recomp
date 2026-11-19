@@ -65,6 +65,7 @@ int runtime_game_cheats(unsigned char *image);
 /* Everybody's Golf 1.17: the game's 60 FPS option applies in every scene (runtime_game.c). At
  * load, before the image is protected; 0, with a log line, when the eboot is not 1.17. */
 int runtime_game_golf_sixty(unsigned char *image);
+int runtime_game_golf_resolution(unsigned char *image);
 uint32_t runtime_game_wide_width(const char *name, uint32_t width, uint32_t height, uint32_t width_4k);
 const char *runtime_import_name(const char *name);
 uintptr_t runtime_rwlock_resolve(const char *name);
@@ -133,6 +134,7 @@ uintptr_t runtime_kernel_resolve(const char *name);
 void runtime_kernel_set_neo_mode(int enabled);
 /* 1 in PS4 Pro mode: set before the guest runs, so the direct memory pool can size itself from it. */
 int runtime_kernel_neo_mode(void);
+void runtime_memory_want_pool(uint64_t mb);
 /* skip_intro's title screen press (runtime_pad.c): the AvPlayer reports title.mp4 starting (1) and
  * its player going away (0). */
 void runtime_pad_title_movie(int playing);

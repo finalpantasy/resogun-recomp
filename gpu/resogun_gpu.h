@@ -73,6 +73,9 @@ int resogun_skip_intro(void);
 /* settings.ini frame_rate_priority (RESOGUN_FRAME_RATE_PRIORITY, default on): Everybody's Golf runs
  * in its PS4 Pro frame rate priority mode (60 FPS). Valid once resogun_gpu_init returned. */
 int resogun_frame_rate_priority(void);
+/* settings.ini render_height (RESOGUN_RENDER_HEIGHT): Everybody's Golf's scene height in PS4 Pro
+ * mode, 16:9; 0 leaves it to the game. Valid once resogun_gpu_init returned. */
+int resogun_render_height(void);
 /* settings.ini frame_rate (RESOGUN_FRAME_RATE): 30, 60, 90, 120, 144 or 180; the Display Settings panel
  * changes it while the game runs. The PS4 vblank runs at it and the engine's target frame rate is set to
  * match at each flip (runtime_game.c). Valid once resogun_gpu_init returned; any thread. */
