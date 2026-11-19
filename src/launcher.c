@@ -42,7 +42,7 @@
 #define SETUP "resogun-setup"
 #endif
 
-#define TITLE "Resogun"
+#define TITLE "Everybody's Golf"
 #define RUN_SETUP "Run " SETUP " (in the game's folder) to set the game up."
 #define SETUP_FAILED -1
 

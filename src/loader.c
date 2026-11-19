@@ -1004,7 +1004,7 @@ int main(int argc, char **argv) {
         return 20;
     }
     if (!cpu_only) {
-        char title[128]="Resogun", serial[16]="UNKNOWN", sfo[4096];
+        char title[128]="Everybody's Golf", serial[16]="UNKNOWN", sfo[4096];
         uint32_t attributes=0;
         snprintf(sfo,sizeof(sfo),"%s/sce_sys/param.sfo",app0 ? app0 : ".");
         sfo_value(sfo,"TITLE",title,sizeof(title),NULL);

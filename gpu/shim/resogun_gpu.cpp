@@ -257,8 +257,8 @@ extern "C" int resogun_gpu_init(const ResogunGpuConfig* config) {
     if (config->user_dir) setenv("RESOGUN_GPU_USER_DIR", config->user_dir, 0);
 #endif
     Core::Emulator::FillElfInfo(*config);
-    // The window carries the project name; the dump's own title stays in ElfInfo (above).
-    const std::string title = "Resogun";
+    // The window carries the game's own title from param.sfo (TITLE), else the port's name.
+    const std::string title = config->title && *config->title ? config->title : "Everybody's Golf";
     const s32 width = config->width, height = config->height;
     g_window_thread = std::thread([title, width, height] {
         Common::SetCurrentThreadName("runner:window");
