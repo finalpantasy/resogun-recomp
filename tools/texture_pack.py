@@ -36,6 +36,8 @@ import struct
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 
 import numpy
 from PIL import Image, ImageFilter, ImageStat
@@ -128,9 +130,12 @@ def upscale(args):
                     with Image.open(png) as image:
                         pad(image.convert("RGB")).save(work / "in" / png.name)
                 exe = pathlib.Path(args.esrgan)
-                subprocess.run([str(exe), "-i", str(work / "in"), "-o", str(work / "out"), "-n",
-                                args.model, "-s", "4", "-f", "png", "-t", str(args.tile)],
-                               check=True, cwd=exe.parent)
+                code = run_esrgan([str(exe), "-i", str(work / "in"), "-o", str(work / "out"), "-n",
+                                   args.model, "-s", "4", "-f", "png", "-t", str(args.tile)],
+                                  exe.parent, work / "out", len(missing))
+                if code:
+                    # The textures it did not finish get Lanczos below; a rerun retries them.
+                    print(f"Real-ESRGAN stopped (exit {code}); the rest use Lanczos", flush=True)
                 for png in missing:
                     big_path = work / "out" / png.name
                     if not big_path.exists():
@@ -144,12 +149,45 @@ def upscale(args):
             finally:
                 shutil.rmtree(work, ignore_errors=True)
     jobs = [(png, png.name in color, cache, args) for png in todo]
+    results = []
     with concurrent.futures.ProcessPoolExecutor(max(1, args.jobs)) as pool:
-        results = list(pool.map(finish, *zip(*jobs))) if jobs else []
+        for result in pool.map(finish, *zip(*jobs)) if jobs else ():
+            results.append(result)
+            progress("writing", len(results), len(jobs))
     used, fallback = results.count("ai"), results.count("fallback")
     print(f"{len(todo)} textures upscaled {args.scale}x into {out} ({len(color)} color, "
           f"{len(todo) - len(color)} normal maps and masks; Real-ESRGAN kept for {used}, "
           f"Lanczos for {fallback} that lost detail)")
+
+
+def progress(stage, done, total, _last={}):
+    """Prints "progress STAGE DONE/TOTAL" (the launcher's progress bar) at most once a second."""
+    now = time.monotonic()
+    if done == total or now - _last.get(stage, 0) >= 1:
+        _last[stage] = now
+        print(f"progress {stage} {done}/{total}", flush=True)
+
+
+def run_esrgan(command, cwd, out_dir, total):
+    """Runs Real-ESRGAN and returns its exit code. Its per-tile percentages are dropped; other
+    lines pass through. Progress is the count of finished images in out_dir."""
+    proc = subprocess.Popen(command, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                            text=True, errors="replace")
+
+    def lines():
+        for line in proc.stdout:
+            line = line.rstrip()
+            if line and not line.endswith("%"):
+                print(line, flush=True)
+
+    reader = threading.Thread(target=lines, daemon=True)
+    reader.start()
+    while proc.poll() is None:
+        progress("upscaling", min(total, sum(1 for _ in out_dir.iterdir())), total)
+        time.sleep(0.5)
+    reader.join()
+    progress("upscaling", total, total)
+    return proc.returncode
 
 
 def finish(png, is_color, cache, args):

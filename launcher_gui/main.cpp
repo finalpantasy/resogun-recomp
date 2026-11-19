@@ -16,6 +16,8 @@
 #include <shobjidl.h>
 
 #include <atomic>
+#include <cstdio>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <functional>
@@ -136,6 +138,16 @@ std::ofstream job_log;
 void post_line(const std::wstring& line) {
     PostMessageW(window, WM_JOB_LINE, 0, (LPARAM)new std::wstring(line));
 }
+// Sets a progress bar at once. Themed bars animate only forward steps, so the bar is pushed one
+// past the target (with the range widened for 100) and set back, which draws without animation.
+void set_bar(HWND bar, int percent) {
+    SendMessageW(bar, PBM_SETRANGE32, 0, 101);
+    SendMessageW(bar, PBM_SETPOS, percent + 1, 0);
+    SendMessageW(bar, PBM_SETPOS, percent, 0);
+    SendMessageW(bar, PBM_SETRANGE32, 0, 100);
+    SendMessageW(bar, PBM_SETPOS, percent, 0);
+}
+
 void post_progress(int percent) { PostMessageW(window, WM_JOB_PROGRESS, (WPARAM)percent, 0); }
 
 std::wstring quote(const std::wstring& arg) {
@@ -180,7 +192,7 @@ int run_tool(const std::vector<std::wstring>& argv, const std::function<void(con
         while ((end = pending.find('\n')) != std::string::npos) {
             std::string line = pending.substr(0, end);
             if (!line.empty() && line.back() == '\r') line.pop_back();
-            job_log << line << "\n";
+            if (line.rfind("progress ", 0) != 0) job_log << line << "\n";
             on_line(line);
             pending.erase(0, end + 1);
         }
@@ -452,22 +464,24 @@ void build_textures() {
         post_progress(-1);
         if (run_tool({python.wstring(), L"-I", script.wstring(), L"convert", dump.wstring(), png.wstring()},
                      [](const std::string& line) { if (!line.empty()) post_line(wide(line)); }) != 0) return false;
-        size_t total = count_files(png, L".png");
-        std::atomic<bool> running{true};
-        std::thread watch([&] {
-            while (running) {
-                size_t done = count_files(pack, nullptr);
-                post_progress(total ? (int)std::min<size_t>(100, done * 100 / total) : 0);
-                post_line(L"Upscaling with Real-ESRGAN: " + std::to_wstring(done) + L" of about " + std::to_wstring(total) + L" textures");
-                Sleep(1500);
-            }
-        });
+        post_line(L"Upscaling...");
         std::vector<std::wstring> argv = {python.wstring(), L"-I", script.wstring(), L"upscale", png.wstring(), pack.wstring(),
                                           L"--scale", wide(scale), L"--format", L"dds", L"--jobs", L"4"};
         if (fs::exists(esrgan, e)) { argv.push_back(L"--esrgan"); argv.push_back(esrgan.wstring()); }
-        int code = run_tool(argv, [](const std::string& line) { if (!line.empty()) post_line(wide(line)); });
-        running = false;
-        watch.join();
+        // texture_pack.py prints "progress upscaling|writing DONE/TOTAL": Real-ESRGAN is the first
+        // 90% of the bar, writing the block-compressed files the rest.
+        int code = run_tool(argv, [](const std::string& line) {
+            char stage[32];
+            unsigned done = 0, total = 0;
+            if (sscanf(line.c_str(), "progress %31s %u/%u", stage, &done, &total) == 3 && total) {
+                bool ai = strcmp(stage, "upscaling") == 0;
+                post_progress(ai ? (int)(done * 90ull / total) : 90 + (int)(done * 10ull / total));
+                post_line((ai ? L"Upscaling with Real-ESRGAN: " : L"Writing the pack: ") + std::to_wstring(done) +
+                          L" of " + std::to_wstring(total) + L" textures");
+            } else if (!line.empty()) {
+                post_line(wide(line));
+            }
+        });
         post_progress(100);
         post_line(code == 0 ? L"HD texture pack built: " + std::to_wstring(count_files(pack, nullptr)) + L" textures. It is used from the next start."
                             : L"Building the pack failed (exit " + std::to_wstring(code) + L"); see data\\logs\\launcher.log.");
@@ -656,7 +670,7 @@ LRESULT CALLBACK proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             } else {
                 SendMessageW(progress_target, PBM_SETMARQUEE, FALSE, 0);
                 SetWindowLongPtrW(progress_target, GWL_STYLE, style & ~PBS_MARQUEE);
-                SendMessageW(progress_target, PBM_SETPOS, percent, 0);
+                set_bar(progress_target, percent);
             }
         }
         return 0;
@@ -666,7 +680,11 @@ LRESULT CALLBACK proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         if (progress_target) {
             SendMessageW(progress_target, PBM_SETMARQUEE, FALSE, 0);
             SetWindowLongPtrW(progress_target, GWL_STYLE, GetWindowLongPtrW(progress_target, GWL_STYLE) & ~PBS_MARQUEE);
-            SendMessageW(progress_target, PBM_SETPOS, wp ? 100 : 0, 0);
+            set_bar(progress_target, wp ? 100 : 0);
+        }
+        if (wp && progress_target == tex_progress) {  // a new pack is wanted in game: step 3 on
+            check(ID_USE_PACK, true);
+            set_setting("texture_pack", utf8((data / L"textures" / L"pack").wstring()));
         }
         refresh_status();
         return 0;
