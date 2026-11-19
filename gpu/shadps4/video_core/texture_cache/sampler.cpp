@@ -42,6 +42,13 @@ Sampler::Sampler(const Vulkan::Instance& instance, const AmdGpu::Sampler& sample
         }
     }();
 
+    // resogun: MIP_FILTER None samples the base level only. Vulkan has no such mode; the spec's
+    // equivalent is NEAREST mipmapping with the LOD clamped to [0, 0.25], which keeps the
+    // min/mag filter choice. Mapping it to NEAREST over the whole range let Everybody's Golf's
+    // face textures pick lower mips per UV island, drawing seams.
+    const bool no_mips = sampler.mip_filter == AmdGpu::MipFilter::None;
+    const float min_lod = no_mips ? 0.0f : sampler.MinLod();
+    const float max_lod = no_mips ? 0.25f : sampler.MaxLod();
     const vk::SamplerCreateInfo sampler_ci = {
         .pNext = custom_color ? &*custom_color : nullptr,
         .magFilter = LiverpoolToVK::Filter(sampler.xy_mag_filter),
@@ -57,8 +64,8 @@ Sampler::Sampler(const Vulkan::Instance& instance, const AmdGpu::Sampler& sample
         // GCN compares per instruction; a plain read of a compare sampler is undefined in Vulkan.
         .compareEnable = is_depth,
         .compareOp = LiverpoolToVK::DepthCompare(sampler.depth_compare_func),
-        .minLod = sampler.MinLod(),
-        .maxLod = sampler.MaxLod(),
+        .minLod = min_lod,
+        .maxLod = max_lod,
         .borderColor = border_color,
         .unnormalizedCoordinates = false, // Handled in shader due to Vulkan limitations.
     };
