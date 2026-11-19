@@ -8,6 +8,8 @@
 #include <string.h>
 #include <math.h>
 #include <time.h>
+#include <pthread.h>
+#include <unistd.h>
 #ifndef _WIN32
 #include <sys/mman.h>
 #endif
@@ -572,9 +574,50 @@ int runtime_game_golf_sixty(unsigned char *image) {
  * the frame rate priority target (+0x15168, drawn by 0xfb5a27 and 0xfb5d4b) only on a Pro with
  * a height up to 1080 (0xfb7e95); above that frame rate priority faulted at 0xfee27a (a clear
  * with no colour target bound), so its jg goes. Needs PS4 Pro mode (render_resolution=4k). */
+/* The size the stub gives, packed so one aligned 8-byte store changes it at once: height in bits
+ * 0..15, width in 16..31, scale in 32..47; 0 leaves it to the game (1920x1080 in frame rate
+ * priority, 3200x1800 otherwise). golf_size[1] is the size last given, golf_size[2] the mode. */
+static volatile uint64_t *golf_size;
+static int golf_size_limit;
+
+static uint64_t golf_pack_size(int height) {
+    if (height<=0) return 0;
+    const uint64_t h=(uint64_t)height, w=h*16/9, scale=(h*0x1000+1079)/1080;
+    return h|w<<16|scale<<32;
+}
+
+/* The Display Settings panel (gpu/shim/resogun_overlay.cpp): a new render height while the game
+ * runs. The stub sees it at the game object's next update and the game rebuilds its scene
+ * targets, as it does when its own display option changes. Heights the direct memory pool set up
+ * at start cannot hold wait for a restart: 0 is returned and nothing changes. */
+int runtime_game_golf_set_render_height(int height) {
+    if (!golf_size || height>golf_size_limit) return 0;
+    __atomic_store_n(&golf_size[0],golf_pack_size(height),__ATOMIC_RELEASE);
+    printf("Render size: %d lines from the next frame (Display Settings)\n",height);
+    return 1;
+}
+
+int runtime_game_golf_render_height_limit(void) { return golf_size ? golf_size_limit : 0; }
+
+/* RESOGUN_TEST_RENDER_HEIGHT=<seconds>:<height>[,<seconds>:<height>...] (diagnostics): the
+ * panel's live change, made by a timer, for scripted runs (their pad input cannot open the panel). */
+static void *golf_size_test(void *arg) {
+    const char *spec=arg;
+    unsigned waited=0;
+    for (const char *at=spec; at && *at;) {
+        unsigned seconds=0; int height=0;
+        if (sscanf(at,"%u:%d",&seconds,&height)!=2) break;
+        if (seconds>waited) { sleep(seconds-waited); waited=seconds; }
+        if (!runtime_game_golf_set_render_height(height)) printf("Render size: %d is past this start's limit\n",height);
+        at=strchr(at,',');
+        if (at) ++at;
+    }
+    return NULL;
+}
+
 int runtime_game_golf_resolution(unsigned char *image) {
     const int height=resogun_render_height();
-    if (!clock_foreign || !height || !resogun_render_4k()) return 0;
+    if (!clock_foreign || !resogun_render_4k()) return 0;
     static const unsigned char at_cc[2]={0xeb,0x3b}, at_ce[2]={0x88,0x15}, at_db[6]={0x41,0xbd,0x08,0x07,0x00,0x00},
                                at_19[6]={0x89,0x97,0x48,0x2c,0x01,0x00}, at_e95[8]={0x81,0xfa,0x38,0x04,0x00,0x00,0x7f,0x55};
     if (memcmp(image+0xfb78cc,at_cc,2) || memcmp(image+0xfb78ce,at_ce,2) || memcmp(image+0xfb78db,at_db,6) ||
@@ -584,32 +627,66 @@ int runtime_game_golf_resolution(unsigned char *image) {
     }
     unsigned char *stub=runtime_low_map(4096,PROT_READ|PROT_WRITE|PROT_EXEC), *p=stub;
     if (!stub) return 0;
-    const uint32_t h=(uint32_t)height, w=h*16/9, scale=(h*0x1000+1079)/1080;
-    unsigned char *last=stub+4095; /* the mode last seen here; 0 like the game's flag at start */
-    const uint64_t flag=(uint64_t)(uintptr_t)(image+0x2cea1d9), seen=(uint64_t)(uintptr_t)last,
-                   back=(uint64_t)(uintptr_t)(image+0xfb7919), to=(uint64_t)(uintptr_t)stub;
+    golf_size=(volatile uint64_t *)(stub+4072); /* want, given, mode; 8-byte aligned */
+    golf_size[0]=golf_pack_size(height);
+    const uint64_t data=(uint64_t)(uintptr_t)golf_size, flag=(uint64_t)(uintptr_t)(image+0x2cea1d9),
+                   back=(uint64_t)(uintptr_t)(image+0xfb7919);
     /* Live here: dl the mode, rdi the game object, r14b changed; rsi free. Out: edx scale, ebx
-     * width, r13d height. */
-    *p++=0x48; *p++=0xbe; memcpy(p,&seen,8); p+=8;         /* mov rsi, last */
-    *p++=0x38; *p++=0x16;                                   /* cmp [rsi], dl */
-    *p++=0x74; *p++=0x03;                                   /* je same */
-    *p++=0x41; *p++=0xb6; *p++=0x01;                        /* mov r14b, 1 */
-    *p++=0x88; *p++=0x16;                                   /* same: mov [rsi], dl */
-    *p++=0x48; *p++=0xbe; memcpy(p,&flag,8); p+=8;         /* mov rsi, flag */
+     * width, r13d height. A new mode or a new size counts as a change (r14b), which rebuilds the
+     * scene targets and display buffers. */
+    static const unsigned char code[]={
+        0x38,0x56,0x10,                   /* cmp [rsi+16], dl: the mode last seen */
+        0x74,0x03,                        /* je same_mode */
+        0x41,0xb6,0x01,                   /* mov r14b, 1 */
+        0x88,0x56,0x10,                   /* same_mode: mov [rsi+16], dl */
+        0x48,0x8b,0x1e,                   /* mov rbx, [rsi]: the size wanted */
+        0x48,0x3b,0x5e,0x08,              /* cmp rbx, [rsi+8]: the size given */
+        0x74,0x07,                        /* je same_size */
+        0x48,0x89,0x5e,0x08,              /* mov [rsi+8], rbx */
+        0x41,0xb6,0x01,                   /* mov r14b, 1 */
+    };
+    *p++=0x48; *p++=0xbe; memcpy(p,&data,8); p+=8;          /* mov rsi, golf_size */
+    memcpy(p,code,sizeof code); p+=sizeof code;
+    *p++=0x48; *p++=0xbe; memcpy(p,&flag,8); p+=8;          /* same_size: mov rsi, flag */
     *p++=0x88; *p++=0x16;                                   /* mov [rsi], dl */
-    *p++=0xba; memcpy(p,&scale,4); p+=4;                    /* mov edx, scale */
-    *p++=0xbb; memcpy(p,&w,4); p+=4;                        /* mov ebx, width */
-    *p++=0x41; *p++=0xbd; memcpy(p,&h,4); p+=4;             /* mov r13d, height */
-    *p++=0xff; *p++=0x25; memset(p,0,4); p+=4;              /* jmp [rip]: back */
+    static const unsigned char pick[]={
+        0x48,0x85,0xdb,                   /* test rbx, rbx */
+        0x75,0x28,                        /* jnz chosen */
+        0x84,0xd2,                        /* test dl, dl */
+        0x74,0x12,                        /* jz pro */
+        0xba,0x00,0x10,0x00,0x00,         /* mov edx, 0x1000 */
+        0xbb,0x80,0x07,0x00,0x00,         /* mov ebx, 1920 */
+        0x41,0xbd,0x38,0x04,0x00,0x00,    /* mov r13d, 1080 */
+        0xeb,0x26,                        /* jmp out */
+        0xba,0xaa,0x1a,0x00,0x00,         /* pro: mov edx, 0x1aaa */
+        0xbb,0x80,0x0c,0x00,0x00,         /* mov ebx, 3200 */
+        0x41,0xbd,0x08,0x07,0x00,0x00,    /* mov r13d, 1800 */
+        0xeb,0x14,                        /* jmp out */
+        0x41,0x89,0xdd,                   /* chosen: mov r13d, ebx */
+        0x41,0x81,0xe5,0xff,0xff,0x00,0x00, /* and r13d, 0xffff */
+        0x48,0x89,0xda,                   /* mov rdx, rbx */
+        0x48,0xc1,0xea,0x20,              /* shr rdx, 32 */
+        0xc1,0xeb,0x10,                   /* shr ebx, 16 */
+    };
+    memcpy(p,pick,sizeof pick); p+=sizeof pick;
+    *p++=0xff; *p++=0x25; memset(p,0,4); p+=4;              /* out: jmp [rip]: back */
     memcpy(p,&back,8);
     image[0xfb7e9b]=0x90; image[0xfb7e9c]=0x90;             /* 0xfb7e9b: jg 0xfb7ef2 */
     image[0xfb78cd]=0x00;                                   /* 0xfb78cc: jmp 0xfb78ce */
+    const uint64_t to=(uint64_t)(uintptr_t)stub;
     unsigned char *site=image+0xfb78ce;
     site[0]=0xff; site[1]=0x25; memset(site+2,0,4);         /* jmp [rip]: the stub */
     memcpy(site+6,&to,8);
     /* The Pro's 5568 MiB of direct memory holds 3200x1800; at 2160 the first course load needed
-     * 5716 MiB, and with none left the loader (0xf8d090) asks for 0 bytes and retries forever. */
+     * 5716 MiB, and with none left the loader (0xf8d090) asks for 0 bytes and retries forever.
+     * The pool is set once, so the panel can go up to what it holds. */
+    const int h=height ? height : 1080;
     if (h>1800) runtime_memory_want_pool(h>2160 ? 8704 : 6592);
-    printf("Render size: %ux%u in either display mode (settings.ini render_height)\n",w,h);
+    golf_size_limit=h>2160 ? 2880 : h>1800 ? 2160 : 1800;
+    const char *test=getenv("RESOGUN_TEST_RENDER_HEIGHT");
+    pthread_t timer;
+    if (test && *test && !pthread_create(&timer,NULL,golf_size_test,(void *)test)) pthread_detach(timer);
+    if (height) printf("Render size: %dx%d in either display mode (settings.ini render_height)\n",height*16/9,height);
+    else puts("Render size: the game's own (settings.ini render_height=0)");
     return 1;
 }

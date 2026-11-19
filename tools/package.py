@@ -9,7 +9,8 @@ On Windows the folder also holds (nothing game-derived):
   tools/python/             embeddable Python with numpy, pillow, etcpak (cached in tools/python-embed/)
   tools/realesrgan/         Real-ESRGAN ncnn-vulkan, DLL, x4plus and animevideov3 models, licenses
   tools/scripts/            texture_pack.py
-  tools/server/             the local online service (server/*.py without tests)
+  tools/server/             the online title server (server/*.py without tests, the title URL map,
+                            OpenSSL's libcrypto for the fixtures' Blowfish, its license)
 --installer runs Inno Setup (tools/innosetup or PATH) on packaging/windows/installer.iss,
 writing <out>/EverybodysGolfPC-Setup-<version>.exe, a per-user installer for the folder.
 """
@@ -259,6 +260,12 @@ def add_windows_tools(out, ship):
     for script in sorted((ROOT / 'server').glob('*.py')):
         if not SERVER_SKIP.match(script.name):
             ship(script, f'tools/server/{script.name}')
+    ship(ROOT / 'analysis' / 'online' / 'title-url-map.tsv', 'tools/server/title-url-map.tsv')
+    # host.py builds the discovery fixture with OpenSSL's Blowfish (MSYS2 CLANG64's libcrypto, which
+    # needs only Windows' own DLLs).
+    clang64 = Path(os.environ.get('MSYS2_ROOT', r'C:\msys64')) / 'clang64'
+    ship(clang64 / 'bin' / 'libcrypto-4-x64.dll', 'tools/server/libcrypto-4-x64.dll')
+    ship(clang64 / 'share' / 'licenses' / 'openssl' / 'LICENSE', 'tools/server/LICENSE-openssl.txt')
 
 
 def build_installer(out, release):

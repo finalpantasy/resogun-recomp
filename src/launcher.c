@@ -488,7 +488,8 @@ static void usage(void) {
            "  --entitlements MODE  Built-in or installed-folder mode: builtin | original\n"
            "  --np-mode MODE      Synthetic local account or signed out: local | offline\n"
            "  --online-id NAME    Local account name (up to 16 bytes)\n"
-           "  --discovery-port N  Local replay port (0 disables replay)\n"
+           "  --discovery-port N  Title server port (0 disables replay)\n"
+           "  --server-host HOST  Title server name or IPv4 address (default 127.0.0.1)\n"
            "  --local-auth N      Synthetic login fixture, 0 or 1\n"
            "  --http-dump DIR     Save local replay request bodies (relative to DATA)\n"
            "  --ticket-grants N   Synthetic ticket fixture, 0 or 1\n"
@@ -568,6 +569,7 @@ static int parse(Options *o, int argc, char **argv) {
         if (!strcmp(flag, "--np-mode")) golf_env = "GOLF_NP";
         else if (!strcmp(flag, "--online-id")) golf_env = "GOLF_ONLINE_ID";
         else if (!strcmp(flag, "--discovery-port")) golf_env = "GOLF_DISCOVERY_PORT";
+        else if (!strcmp(flag, "--server-host")) golf_env = "GOLF_SERVER_HOST";
         else if (!strcmp(flag, "--local-auth")) golf_env = "GOLF_LOCAL_AUTH";
         else if (!strcmp(flag, "--ticket-grants")) golf_env = "GOLF_TICKET_GRANTS";
         else if (!strcmp(flag, "--tus")) golf_env = "GOLF_TUS";
@@ -579,11 +581,14 @@ static int parse(Options *o, int argc, char **argv) {
             char absolute[PATH_CHARS];
             if (!strcmp(golf_env, "GOLF_NP") && strcmp(value, "local") && strcmp(value, "offline"))
                 return option_error(flag, "expected local or offline");
+            if (!strcmp(golf_env, "GOLF_SERVER_HOST") && (strlen(value) > 253 || value[strspn(value,
+                    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-")]))
+                return option_error(flag, "expected a host name or IPv4 address");
             if (!strcmp(golf_env, "GOLF_ONLINE_ID") && strlen(value) > 16)
                 return option_error(flag, "expected a name of at most 16 bytes");
             if (!strcmp(golf_env, "GOLF_DISCOVERY_PORT")) {
                 if (strlen(value) > 5 || !number(value, 65535))
-                    return option_error(flag, "expected a loopback port from 0 through 65535");
+                    return option_error(flag, "expected a port from 0 through 65535");
                 if (value[strspn(value, "0")] == '\0') value = "";
             }
             if ((!strcmp(golf_env, "GOLF_LOCAL_AUTH") || !strcmp(golf_env, "GOLF_TICKET_GRANTS"))

@@ -149,7 +149,12 @@ int exit_focus = 0;
 std::atomic<bool> cheats_open{false};
 int cheat_row = 0;
 bool cheats_dirty = false;
-enum DisplayRow : int { RowAspect, RowMode, RowResolution, RowMonitor, RowVsync, RowFps, RowRender, RowSharpen, RowSmaa, RowHdr, RowCount };
+// Everybody's Golf has no aspect ratio or frame rate patch (Resogun's rows), so those are not listed.
+enum DisplayRow : int { RowMode, RowResolution, RowMonitor, RowVsync, RowRender, RowSixty, RowSharpen, RowSmaa, RowHd, RowHdr, RowCount };
+// The render heights the panel steps through (settings.ini render_height; 0 is the game's own).
+constexpr std::array<int, 6> kRenderHeights = {0, 1080, 1440, 1800, 2160, 2880};
+extern "C" int runtime_game_golf_set_render_height(int height);
+extern "C" int runtime_game_golf_render_height_limit(void);
 
 // The colours of the game's own menus (Main Menu, Options): teal bars on a dark, see-through
 // backdrop inside a thin cyan frame.
@@ -372,13 +377,6 @@ void ChangeDisplayRow(int row, int delta) {
     auto& s = ResogunSettings::Get();
     switch (row) {
     case RowMode: s.display_mode = (s.display_mode + delta + G::DisplayModeCount) % G::DisplayModeCount; break;
-    case RowAspect: { // the window moves to the new shape's size nearest in height
-        const int next = (ShownAspect() + delta + ResogunSettings::AspectRatioCount) % ResogunSettings::AspectRatioCount;
-        pending_aspect = next;
-        pending_resolution = ResogunSettings::NearestHeight(s.resolutions[next], ShownResolution().second);
-        pending_since = std::chrono::steady_clock::now();
-        break;
-    }
     case RowResolution: { // windowed only, listed largest first: right steps up to a larger size
         const auto& sizes = s.resolutions[ShownAspect()];
         if (sizes.empty() || s.display_mode != G::Windowed) return;
@@ -407,11 +405,16 @@ void ChangeDisplayRow(int row, int delta) {
         s.tearing = next == 2;
         break;
     }
-    case RowFps: s.frame_rate = StepValue(G::FrameRates, s.frame_rate.load(), delta); break;
-    case RowRender:
-        s.render_resolution = s.render_resolution == ResogunSettings::Render4k ? ResogunSettings::Render1080p
-                                                                                   : ResogunSettings::Render4k;
+    case RowRender: { // live when the memory pool holds it, else for the next start
+        const int i = ResogunGraphics::IndexOf(kRenderHeights, s.render_height.load(), 0);
+        const int next = kRenderHeights[(i + delta + int(kRenderHeights.size())) % int(kRenderHeights.size())];
+        s.render_height = next;
+        if (next) s.render_resolution = ResogunSettings::Render4k; // the size patch needs the Pro mode
+        runtime_game_golf_set_render_height(next);
         break;
+    }
+    case RowSixty: s.frame_rate_priority = !s.frame_rate_priority; break;
+    case RowHd: s.hd_textures = !s.hd_textures; break;
     case RowSharpen: s.sharpening = !s.sharpening; break;
     case RowSmaa: s.smaa = !s.smaa; break;
     case RowHdr: s.hdr = !s.hdr; break;
@@ -451,17 +454,6 @@ DisplayRowText DisplayRowAt(int row) {
         }
         return {"Window mode", names[std::clamp(s.display_mode.load(), 0, 2)], help};
     }
-    case RowAspect: {
-        const int ratio = ShownAspect();
-        std::string text(ResogunSettings::AspectRatioKeys[ratio]);
-        if (ratio == ResogunSettings::Aspect16x9) text += "  (PS4)";
-        if (ratio != s.startup_aspect_ratio) text += "  (after restart)";
-        return {"Aspect ratio", text,
-                "The picture's shape. 21:9 and 32:9 show more of the level to the sides, for ultrawide screens, "
-                "16:10 and 4:3 more above and below; "
-                "the menus stay 16:9. A window takes sizes of this shape; fullscreen picks one from the screen. "
-                "The game takes a new shape after a restart."};
-    }
     case RowResolution: {
         const auto [w, h] = ShownResolution();
         const bool windowed = s.display_mode == ResogunGraphics::Windowed;
@@ -480,28 +472,33 @@ DisplayRowText DisplayRowAt(int row) {
                 "On waits for the monitor: no tearing, slightly more input delay. Off shows the newest frame "
                 "at each refresh, still without tearing. Off, tearing allowed shows each frame at once: the "
                 "least delay, and the only way past twice the refresh rate."};
-    case RowFps: {
-        const int chosen = s.frame_rate.load(), runs = ResogunSettings::EffectiveFrameRate();
-        std::string value = std::to_string(chosen) + " FPS";
-        if (const char* env = std::getenv("RESOGUN_VBLANK_HZ"); env && env[0]) {
-            value += "  (RESOGUN_VBLANK_HZ overrides)";
-        } else if (runs != chosen) {
-            value += "  (display is " + std::to_string(int(ResogunSettings::DisplayRefresh() + 0.5)) +
-                     " Hz: runs at " + std::to_string(runs) + ")";
-        }
-        return {"Max FPS", value,
-                "The game's frame rate, at normal game speed: 60 is the PS4's, 30 for PCs that cannot hold it. "
-                "Applies at once. It is held "
-                "to what the display refreshes at, and the PC must keep up with it: when it cannot, the "
-                "game runs slower instead of skipping frames."};
-    }
     case RowRender: {
-        const int value = s.render_resolution;
-        std::string text = value == ResogunSettings::Render4k ? "4K (3840 x 2160)" : "1080p";
-        if (value != s.startup_render_resolution) text += "  (after restart)";
+        const int value = s.render_height.load(), limit = runtime_game_golf_render_height_limit();
+        std::string text = value ? std::to_string(value * 16 / 9) + " x " + std::to_string(value)
+                                 : std::string(s.frame_rate_priority ? "Game's own (1920 x 1080)" : "Game's own (3200 x 1800)");
+        if (value != s.startup_render_height && (!limit || value > limit)) text += "  (after restart)";
         return {"Render resolution", text,
-                "4K as on PS4 Pro, filtered down to the window: sharper. 1080p as on PS4: lighter on the GPU. "
-                "Applies after a restart."};
+                "The size the game draws its scenes at, scaled to the window: higher is sharper and needs a "
+                "faster GPU (at 2160 some courses drop below 60 FPS). Applies at once up to " +
+                    std::to_string(limit ? limit : 1800) +
+                    " lines; larger sizes need more memory, set up at the next start."};
+    }
+    case RowSixty: {
+        std::string text = s.frame_rate_priority ? "On" : "Off";
+        if (s.frame_rate_priority != s.startup_frame_rate_priority) text += "  (after restart)";
+        return {"60 FPS mode", text,
+                "The game's frame rate priority mode held on in every scene: 60 FPS at the tee, in shots and "
+                "flyovers. Off gives the game's own choice from its Options menu. Applies after a restart."};
+    }
+    case RowHd: {
+        const bool pack = !s.texture_pack.empty();
+        std::string text = !pack ? "No pack" : s.hd_textures ? "On" : "Off";
+        if (pack && s.hd_textures && !s.startup_hd_textures) text += "  (after restart)";
+        return {"HD textures", text,
+                pack ? "Draws the upscaled texture pack built in the launcher (HD textures tab) instead of the "
+                       "game's own textures. Switches at once."
+                     : "No texture pack is set up: build one in the launcher's HD textures tab.",
+                pack, pack};
     }
     case RowSharpen:
         return {"Sharpening", s.sharpening ? "On" : "Off",

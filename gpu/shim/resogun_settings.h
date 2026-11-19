@@ -157,12 +157,21 @@ struct Values {
     /// (src/loader.c); read once, before the game starts. On by default.
     bool skip_intro = true;
     /// Everybody's Golf: the game's display option reads as frame rate priority, its 60 FPS mode
-    /// (src/runtime_game.c); read once, before the game starts. On by default.
-    bool frame_rate_priority = true;
+    /// (src/runtime_game.c); read once, before the game starts (startup_frame_rate_priority). On by
+    /// default. The Display Settings panel saves a change for the next start.
+    bool startup_frame_rate_priority = true;
+    std::atomic<bool> frame_rate_priority{true};
     /// Everybody's Golf in PS4 Pro mode: the height the game renders its scene at, 16:9 (1080,
     /// 1440, 1800, 2160 or 2880), in either display mode (src/runtime_game.c); 0 leaves it to the
-    /// game: 3200x1800 in resolution priority, 1920x1080 in frame rate priority. Read once.
-    int render_height = 0;
+    /// game: 3200x1800 in resolution priority, 1920x1080 in frame rate priority. Read once at start
+    /// (startup_render_height); the Display Settings panel changes it live up to what the memory
+    /// pool set up at start holds (runtime_game_golf_set_render_height).
+    int startup_render_height = 0;
+    std::atomic<int> render_height{0};
+    /// Whether the texture pack is drawn (key hd_textures, on by default). With a pack indexed at
+    /// start the Display Settings panel switches it live; off at start, the pack is not read.
+    bool startup_hd_textures = true;
+    std::atomic<bool> hd_textures{true};
     /// Texture packs (gpu/shadps4/video_core/texture_cache/texture_pack.h): the folder of
     /// replacement PNGs, and a folder to dump the game's textures into; empty: off. Read once.
     std::string texture_pack, texture_dump;

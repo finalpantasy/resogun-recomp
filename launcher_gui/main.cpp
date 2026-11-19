@@ -6,22 +6,29 @@
 //     data\save\settings.ini          the game's settings (the Display page edits them)
 //     data\textures\dump, png, pack   textures collected while playing, and the HD pack built from them
 //     data\logs\launcher.log          what the jobs printed
-// Pages: Play, Game files (pick the dump, merge, prepare), Display, HD textures (collect, upscale
-// with tools\realesrgan through tools\python and tools\scripts\texture_pack.py, use).
+// Pages: Play, Display, Saves, HD textures (collect, upscale with tools\realesrgan through
+// tools\python and tools\scripts\texture_pack.py, use), Online (host the title server in
+// tools\server or join a friend's), Game files (pick the dump, merge, prepare).
 // Nothing is written outside the install folder: no registry, no AppData.
 
+#include <winsock2.h>
 #include <windows.h>
+#include <iphlpapi.h>
+#include <oleauto.h>
 #include <commctrl.h>
 #include <shellapi.h>
 #include <shobjidl.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cstdio>
+#include <cwctype>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <functional>
 #include <map>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
@@ -31,13 +38,18 @@ namespace fs = std::filesystem;
 namespace {
 
 constexpr wchar_t kTitle[] = L"Everybody's Golf";
-enum : UINT { WM_JOB_LINE = WM_APP + 1, WM_JOB_PROGRESS, WM_JOB_DONE, WM_GAME_EXIT };
+enum : UINT { WM_JOB_LINE = WM_APP + 1, WM_JOB_PROGRESS, WM_JOB_DONE, WM_GAME_EXIT, WM_SERVER_STATE };
 enum Id : int {
     ID_TABS = 100, ID_PLAY, ID_OPEN_FOLDER, ID_OPEN_LOGS, ID_STATUS,
     ID_BASE, ID_BASE_BROWSE, ID_UPDATE, ID_UPDATE_BROWSE, ID_DLC, ID_DLC_BROWSE, ID_SETUP, ID_SETUP_PROGRESS, ID_SETUP_STATUS,
     ID_WINDOW, ID_SIZE, ID_RENDER, ID_SIXTY, ID_SMAA, ID_SHARPEN, ID_VSYNC, ID_HDR, ID_INTRO,
     ID_COLLECT, ID_TEX_COUNT, ID_SCALE, ID_BUILD, ID_TEX_PROGRESS, ID_TEX_STATUS, ID_USE_PACK,
+    ID_PROFILES, ID_PROFILE_NAME, ID_PROFILE_USE, ID_PROFILE_NEW, ID_PROFILE_COPY, ID_PROFILE_RENAME,
+    ID_PROFILE_DELETE, ID_PROFILE_BACKUP, ID_PROFILE_OPEN, ID_PROFILE_STATUS,
+    ID_ONLINE_NAME, ID_ONLINE_MODE, ID_ONLINE_PORT, ID_ONLINE_HOST, ID_SERVER, ID_UPNP, ID_INVITE, ID_ONLINE_STATUS,
 };
+// The pages, in tab order.
+enum Page : int { PagePlay, PageDisplay, PageSaves, PageTextures, PageOnline, PageFiles, PageCount };
 
 // --- paths ------------------------------------------------------------------------------------------
 
@@ -128,6 +140,81 @@ void set_setting(const char* key, const std::string& value) {
     settings.set(key, value);
     settings.save(ini_path);
 }
+
+// The launcher's own choices (data\launcher.ini): which save the game uses.
+Ini prefs;
+fs::path prefs_path;
+void set_pref(const char* key, const std::string& value) {
+    prefs.set(key, value);
+    prefs.save(prefs_path);
+}
+
+// --- saves: each is a folder the game keeps its savedata in. "Main" is data\save (where the game
+// has always saved); the others are data\saves\<name>. settings.ini stays in data\save for all.
+
+const std::wstring kMainSave = L"Main";
+fs::path save_dir(const std::wstring& name) { return name == kMainSave ? save : data / L"saves" / name; }
+std::wstring current_save() {
+    std::wstring name = wide(prefs.get("save"));
+    std::error_code ec;
+    return name.empty() || !fs::is_directory(save_dir(name), ec) ? kMainSave : name;
+}
+std::vector<std::wstring> list_saves() {
+    std::vector<std::wstring> names{kMainSave};
+    std::error_code ec;
+    std::vector<std::wstring> others;
+    for (auto it = fs::directory_iterator(data / L"saves", ec); !ec && it != fs::directory_iterator(); it.increment(ec))
+        if (it->is_directory(ec)) others.push_back(it->path().filename().wstring());
+    std::sort(others.begin(), others.end(), [](const std::wstring& a, const std::wstring& b) { return _wcsicmp(a.c_str(), b.c_str()) < 0; });
+    names.insert(names.end(), others.begin(), others.end());
+    return names;
+}
+// The newest file time under a save's savedata folder; false when it holds no game save yet.
+bool last_saved(const std::wstring& name, SYSTEMTIME& local) {
+    std::error_code ec;
+    FILETIME newest{};
+    bool any = false;
+    for (auto it = fs::recursive_directory_iterator(save_dir(name) / L"savedata", ec); !ec && it != fs::recursive_directory_iterator(); it.increment(ec)) {
+        WIN32_FILE_ATTRIBUTE_DATA info;
+        if (!it->is_regular_file(ec) || !GetFileAttributesExW(it->path().c_str(), GetFileExInfoStandard, &info)) continue;
+        if (!any || CompareFileTime(&info.ftLastWriteTime, &newest) > 0) { newest = info.ftLastWriteTime; any = true; }
+    }
+    FILETIME lt;
+    return any && FileTimeToLocalFileTime(&newest, &lt) && FileTimeToSystemTime(&lt, &local);
+}
+// A save name the folder can take: 1 to 32 characters, none of \ / : * ? " < > |, no dot or space at
+// the end, not a reserved device name.
+bool valid_save_name(const std::wstring& name) {
+    if (name.empty() || name.size() > 32 || name.find_first_of(L"\\/:*?\"<>|") != std::wstring::npos) return false;
+    if (name.back() == L'.' || name.back() == L' ' || name.front() == L' ') return false;
+    for (wchar_t c : name) if (c < 32) return false;
+    std::wstring upper = name;
+    for (auto& c : upper) c = towupper(c);
+    for (const wchar_t* bad : {L"CON", L"PRN", L"AUX", L"NUL", L"COM1", L"COM2", L"COM3", L"LPT1", L"LPT2", L"LPT3"})
+        if (upper == bad) return false;
+    return _wcsicmp(name.c_str(), kMainSave.c_str()) != 0;
+}
+bool copy_tree(const fs::path& from, const fs::path& to) {
+    std::error_code ec;
+    fs::create_directories(to, ec);
+    if (fs::exists(from, ec)) fs::copy(from, to, fs::copy_options::recursive | fs::copy_options::overwrite_existing, ec);
+    return !ec;
+}
+// Moves a folder to the Recycle Bin, so a deleted save can still be brought back.
+bool recycle(const fs::path& folder) {
+    std::wstring from = folder.wstring();
+    from.push_back(L'\0');
+    SHFILEOPSTRUCTW op{};
+    op.hwnd = nullptr;
+    op.wFunc = FO_DELETE;
+    op.pFrom = from.c_str();
+    op.fFlags = FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT | FOF_NOERRORUI;
+    return SHFileOperationW(&op) == 0 && !op.fAnyOperationsAborted;
+}
+
+std::atomic<bool> game_running{false};
+void refresh_saves();
+void refresh_online();
 
 // --- jobs: one at a time on a worker thread; their output goes to the page and to launcher.log -------
 
@@ -357,12 +444,13 @@ void refresh_status() {
     std::wstring s;
     Paths p = saved_paths();
     s += game_ready() ? L"Game files: ready (" + p.game + L")" : L"Game files: not set up yet. Open Game files to choose your dump.";
+    s += L"\r\nSave in use: " + current_save();
     s += L"\r\n\r\nRender size: ";
     std::string h = settings.get("render_height", "0");
     for (const auto& r : renders) if (h == r.value) s += r.label;
     size_t packed = count_files(data / L"textures" / L"pack", nullptr);
     s += L"\r\nHD textures: ";
-    s += settings.get("texture_pack").empty() ? L"off" : L"on, " + std::to_wstring(packed) + L" textures";
+    s += settings.get("texture_pack").empty() || settings.get("hd_textures", "1") == "0" ? L"off" : L"on, " + std::to_wstring(packed) + L" textures";
     s += L"\r\n\r\nEverything the game writes stays in " + data.wstring();
     SetWindowTextW(status_text, s.c_str());
     EnableWindow(controls[ID_PLAY], game_ready() && !busy);
@@ -374,6 +462,8 @@ void refresh_status() {
 void show_page(int page) {
     for (size_t i = 0; i < pages.size(); ++i)
         for (HWND c : pages[i]) ShowWindow(c, (int)i == page ? SW_SHOW : SW_HIDE);
+    if (page == PageSaves) refresh_saves();
+    if (page == PageOnline) refresh_online();
     refresh_status();
 }
 
@@ -489,8 +579,379 @@ void build_textures() {
     });
 }
 
+
+// --- the Online page ----------------------------------------------------------------------------------
+// Off plays offline. Host runs the bundled title server (tools\server\host.py) on this PC and the
+// game uses it; Join uses a friend's. Players on one server share its rankings; each round is still
+// played alone, since the game's matchmaking runs inside each PC.
+
+const std::vector<Choice> online_modes = {{L"Off (play offline)", "off"}, {L"Host a server on this PC", "host"},
+                                          {L"Join a friend's server", "join"}};
+const char* const kDefaultPort = "48765";
+HANDLE server_process = nullptr, server_job = nullptr;
+std::atomic<bool> server_ready{false};
+std::mutex upnp_lock;
+std::wstring upnp_note;     // the router's answer, shown on the page (under upnp_lock)
+std::wstring upnp_address;  // the router's public address, once a mapping is made (under upnp_lock)
+long upnp_port = 0;         // the mapped port, removed again when the server stops (under upnp_lock)
+
+std::string online_mode() {
+    std::string mode = prefs.get("online", "off");
+    return mode == "host" || mode == "join" ? mode : "off";
+}
+// The port in launcher.ini when it is 1 to 65535, else 48765.
+std::string online_port() {
+    std::string port = prefs.get("online_port", kDefaultPort);
+    if (port.empty() || port.size() > 5 || port.find_first_not_of("0123456789") != std::string::npos) return kDefaultPort;
+    long n = std::stol(port);
+    return n >= 1 && n <= 65535 ? std::to_string(n) : kDefaultPort;
+}
+// A PSN-style online ID: 3 to 16 letters, digits, - or _.
+bool valid_online_name(const std::string& name) {
+    return name.size() >= 3 && name.size() <= 16 &&
+           name.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_") == std::string::npos;
+}
+// A host name or IPv4 address: letters, digits, dots and dashes.
+bool valid_host(const std::string& host) {
+    return !host.empty() && host.size() <= 253 &&
+           host.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-") == std::string::npos;
+}
+bool server_running() { return server_process && WaitForSingleObject(server_process, 0) == WAIT_TIMEOUT; }
+
+// IPv4 addresses of this PC's adapters that are up (a VPN such as Tailscale or ZeroTier shows here
+// too), with the adapter's name; the one with a default gateway (the home network) first.
+struct LocalAddress { std::wstring address, adapter; bool gateway; };
+std::vector<LocalAddress> local_addresses() {
+    std::vector<LocalAddress> out;
+    ULONG size = 32768;
+    std::vector<BYTE> buffer(size);
+    const ULONG flags = GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER | GAA_FLAG_INCLUDE_GATEWAYS;
+    ULONG result = GetAdaptersAddresses(AF_INET, flags, nullptr, (IP_ADAPTER_ADDRESSES*)buffer.data(), &size);
+    if (result == ERROR_BUFFER_OVERFLOW) {
+        buffer.resize(size);
+        result = GetAdaptersAddresses(AF_INET, flags, nullptr, (IP_ADAPTER_ADDRESSES*)buffer.data(), &size);
+    }
+    if (result != NO_ERROR) return out;
+    for (auto* a = (IP_ADAPTER_ADDRESSES*)buffer.data(); a; a = a->Next) {
+        if (a->OperStatus != IfOperStatusUp || a->IfType == IF_TYPE_SOFTWARE_LOOPBACK) continue;
+        // Hyper-V's and WSL's virtual switches reach only this PC's own virtual machines.
+        if ((a->FriendlyName && !wcsncmp(a->FriendlyName, L"vEthernet", 9)) || (a->Description && wcsstr(a->Description, L"Hyper-V")))
+            continue;
+        for (auto* u = a->FirstUnicastAddress; u; u = u->Next) {
+            if (u->Address.lpSockaddr->sa_family != AF_INET) continue;
+            const auto* b = (const unsigned char*)&((const sockaddr_in*)u->Address.lpSockaddr)->sin_addr;
+            if (b[0] == 169 && b[1] == 254) continue; // no DHCP answer: nobody can reach it
+            wchar_t text[16];
+            swprintf(text, 16, L"%u.%u.%u.%u", b[0], b[1], b[2], b[3]);
+            out.push_back({text, a->FriendlyName ? a->FriendlyName : L"", a->FirstGatewayAddress != nullptr});
+        }
+    }
+    std::stable_sort(out.begin(), out.end(), [](const LocalAddress& x, const LocalAddress& y) { return x.gateway > y.gateway; });
+    return out;
+}
+
+// UPnP port mappings on the router, through Windows' NAT traversal objects (hnetcfg.dll). MinGW has
+// no natupnp.h, so the three interfaces are declared here, in natupnp.idl's order, up to the
+// methods used.
+struct IStaticPortMapping : IDispatch {
+    virtual HRESULT STDMETHODCALLTYPE get_ExternalIPAddress(BSTR* address) = 0;
+};
+struct IStaticPortMappingCollection : IDispatch {
+    virtual HRESULT STDMETHODCALLTYPE get__NewEnum(IUnknown** items) = 0;
+    virtual HRESULT STDMETHODCALLTYPE get_Item(long port, BSTR protocol, IStaticPortMapping** mapping) = 0;
+    virtual HRESULT STDMETHODCALLTYPE get_Count(long* count) = 0;
+    virtual HRESULT STDMETHODCALLTYPE Remove(long port, BSTR protocol) = 0;
+    virtual HRESULT STDMETHODCALLTYPE Add(long external_port, BSTR protocol, long internal_port, BSTR client,
+                                          VARIANT_BOOL enabled, BSTR description, IStaticPortMapping** mapping) = 0;
+};
+struct IUPnPNAT : IDispatch {
+    virtual HRESULT STDMETHODCALLTYPE get_StaticPortMappingCollection(IStaticPortMappingCollection** mappings) = 0;
+};
+const CLSID kUPnPNAT = {0xae1e00aa, 0x3fd5, 0x403c, {0x8a, 0x27, 0x2b, 0xbd, 0xc3, 0x0c, 0xd0, 0xe1}};
+const IID kIUPnPNAT = {0xb171c812, 0xcc76, 0x485a, {0x94, 0xd8, 0xb6, 0xb3, 0xa2, 0x79, 0x4e, 0x99}};
+
+// The router's port mapping list, or null with the reason in note. Runs on its own thread (the
+// router can take seconds to answer).
+IStaticPortMappingCollection* upnp_mappings(std::wstring& note) {
+    IUPnPNAT* nat = nullptr;
+    if (FAILED(CoCreateInstance(kUPnPNAT, nullptr, CLSCTX_INPROC_SERVER, kIUPnPNAT, (void**)&nat)) || !nat) {
+        note = L"Windows' UPnP support is not available.";
+        return nullptr;
+    }
+    IStaticPortMappingCollection* mappings = nullptr;
+    HRESULT hr = nat->get_StaticPortMappingCollection(&mappings);
+    nat->Release();
+    if (FAILED(hr) || !mappings) note = L"No UPnP router answered (it may be off in the router's settings).";
+    return mappings;
+}
+void upnp_map(long port, std::wstring client) {
+    std::thread([port, client] {
+        CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+        std::wstring note, address;
+        if (IStaticPortMappingCollection* mappings = upnp_mappings(note)) {
+            BSTR tcp = SysAllocString(L"TCP"), host = SysAllocString(client.c_str()),
+                 what = SysAllocString(L"Everybody's Golf server");
+            IStaticPortMapping* mapping = nullptr;
+            HRESULT hr = mappings->Add(port, tcp, port, host, VARIANT_TRUE, what, &mapping);
+            if (SUCCEEDED(hr) && mapping) {
+                BSTR external = nullptr;
+                if (SUCCEEDED(mapping->get_ExternalIPAddress(&external)) && external) address = external;
+                SysFreeString(external);
+                mapping->Release();
+                note = L"The router forwards port " + std::to_wstring(port) + L" to this PC.";
+                std::lock_guard<std::mutex> hold(upnp_lock);
+                upnp_port = port;
+            } else {
+                note = L"The router refused the port mapping; forward TCP port " + std::to_wstring(port) + L" to " + client + L" in its settings.";
+            }
+            SysFreeString(tcp); SysFreeString(host); SysFreeString(what);
+            mappings->Release();
+        }
+        {
+            std::lock_guard<std::mutex> hold(upnp_lock);
+            upnp_note = note;
+            upnp_address = address;
+        }
+        CoUninitialize();
+        PostMessageW(window, WM_SERVER_STATE, 0, 0);
+    }).detach();
+}
+// Removes this launcher's mapping, waiting for the router (used when the server stops).
+void upnp_unmap() {
+    long port;
+    {
+        std::lock_guard<std::mutex> hold(upnp_lock);
+        port = upnp_port;
+        upnp_port = 0;
+        upnp_address.clear();
+        upnp_note.clear();
+    }
+    if (!port) return;
+    std::thread([port] {
+        CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+        std::wstring note;
+        if (IStaticPortMappingCollection* mappings = upnp_mappings(note)) {
+            BSTR tcp = SysAllocString(L"TCP");
+            mappings->Remove(port, tcp);
+            SysFreeString(tcp);
+            mappings->Release();
+        }
+        CoUninitialize();
+    }).join();
+}
+
+void stop_server() {
+    if (server_process) {
+        TerminateProcess(server_process, 0);
+        WaitForSingleObject(server_process, 5000);
+        CloseHandle(server_process);
+        server_process = nullptr;
+    }
+    server_ready = false;
+    upnp_unmap();
+}
+
+// Starts tools\server\host.py on every network adapter of this PC; its output goes to
+// data\logs\server.log. The process is in a job that ends it when the launcher closes.
+bool start_server(std::wstring& error) {
+    if (server_running()) return true;
+    stop_server();
+    Paths p = saved_paths();
+    const fs::path eboot = data / L"game" / p.image / L"eboot.elf", tools = root / L"tools";
+    const fs::path python = tools / L"python" / L"python.exe", host = tools / L"server" / L"host.py",
+                   crypto = tools / L"server" / L"libcrypto-4-x64.dll";
+    std::error_code ec;
+    if (p.image.empty() || !fs::exists(eboot, ec)) { error = L"Set up the game files first (Game files page)."; return false; }
+    if (!fs::exists(python, ec) || !fs::exists(host, ec) || !fs::exists(crypto, ec)) {
+        error = L"The server files in tools\\ are missing. Reinstall the game.";
+        return false;
+    }
+    fs::create_directories(logs, ec);
+    fs::create_directories(data / L"server", ec);
+    const std::wstring port = wide(online_port());
+    // server_bind in launcher.ini: one adapter's address only (say a VPN's); every adapter by default.
+    std::string bind = prefs.get("server_bind", "0.0.0.0");
+    if (bind.empty() || bind.size() > 15 || bind.find_first_not_of("0123456789.") != std::string::npos) bind = "0.0.0.0";
+    std::wstring command = quote(python.wstring()) + L" -I " + quote(host.wstring()) + L" --eboot " + quote(eboot.wstring()) +
+                           L" --libcrypto " + quote(crypto.wstring()) + L" --state " + quote((data / L"server").wstring()) +
+                           L" --port " + port + L" --bind " + wide(bind);
+    SECURITY_ATTRIBUTES sa{sizeof sa, nullptr, TRUE};
+    const fs::path log = logs / L"server.log";
+    HANDLE out = CreateFileW(log.c_str(), GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, &sa,
+                             CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (out == INVALID_HANDLE_VALUE) { error = L"Cannot write " + log.wstring(); return false; }
+    STARTUPINFOW si{sizeof si};
+    si.dwFlags = STARTF_USESTDHANDLES;
+    si.hStdOutput = si.hStdError = out;
+    si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+    PROCESS_INFORMATION pi{};
+    BOOL ok = CreateProcessW(nullptr, command.data(), nullptr, nullptr, TRUE,
+                             CREATE_NO_WINDOW | BELOW_NORMAL_PRIORITY_CLASS | CREATE_SUSPENDED, nullptr, root.c_str(), &si, &pi);
+    CloseHandle(out);
+    if (!ok) { error = L"Cannot start the server (" + python.wstring() + L")."; return false; }
+    if (!server_job) {
+        server_job = CreateJobObjectW(nullptr, nullptr);
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        if (server_job) SetInformationJobObject(server_job, JobObjectExtendedLimitInformation, &limits, sizeof limits);
+    }
+    if (server_job) AssignProcessToJobObject(server_job, pi.hProcess);
+    ResumeThread(pi.hThread);
+    CloseHandle(pi.hThread);
+    server_process = pi.hProcess;
+    // Ready once the log holds "ready ADDRESS:PORT" (the first start also builds the fixtures).
+    HANDLE watched = server_process;
+    std::thread([watched, log] {
+        for (int i = 0; i < 600; ++i) {
+            if (WaitForSingleObject(watched, 100) != WAIT_TIMEOUT) break;
+            std::ifstream f(log, std::ios::binary);
+            std::string text((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+            if (text.find("ready ") != std::string::npos) { server_ready = true; break; }
+        }
+        PostMessageW(window, WM_SERVER_STATE, 1, 0);
+    }).detach();
+    return true;
+}
+
+// The text a host sends to friends: where to connect, and how.
+std::wstring invite_text() {
+    std::wstring port = wide(online_port()), where;
+    {
+        std::lock_guard<std::mutex> hold(upnp_lock);
+        if (!upnp_address.empty()) where += L"  " + upnp_address + L" (over the internet)\r\n";
+    }
+    for (const auto& a : local_addresses())
+        where += L"  " + a.address + L" (" + (a.gateway ? L"on my home network" : L"on my " + a.adapter) + L")\r\n";
+    return L"Join my Everybody's Golf PC server.\r\n"
+           L"In the launcher, open Online, choose \"Join a friend's server\", enter the address and port, then press Play.\r\n"
+           L"Address, the first one that works for you:\r\n" + where +
+           L"Port: " + port + L"\r\n";
+}
+void copy_text(const std::wstring& text) {
+    if (!OpenClipboard(window)) return;
+    EmptyClipboard();
+    const size_t bytes = (text.size() + 1) * sizeof(wchar_t);
+    if (HGLOBAL memory = GlobalAlloc(GMEM_MOVEABLE, bytes)) {
+        memcpy(GlobalLock(memory), text.c_str(), bytes);
+        GlobalUnlock(memory);
+        if (!SetClipboardData(CF_UNICODETEXT, memory)) GlobalFree(memory);
+    }
+    CloseClipboard();
+}
+
+void refresh_online() {
+    const std::string mode = online_mode();
+    const bool host = mode == "host", join = mode == "join", running = server_running();
+    EnableWindow(controls[ID_ONLINE_HOST], join);
+    EnableWindow(controls[ID_SERVER], host);
+    EnableWindow(controls[ID_UPNP], host);
+    EnableWindow(controls[ID_INVITE], host);
+    SetWindowTextW(controls[ID_SERVER], running ? L"Stop server" : L"Start server");
+    std::wstring s;
+    const std::wstring port = wide(online_port());
+    if (host) {
+        s += !running ? L"Server: stopped. Play starts it." : server_ready ? L"Server: running on port " + port + L"." : L"Server: starting...";
+        if (!running && fs::exists(logs / L"server.log")) s += L" Its output is in data\\logs\\server.log.";
+        s += L"\r\nFriends connect to: ";
+        auto addresses = local_addresses();
+        for (size_t i = 0; i < addresses.size() && i < 3; ++i)
+            s += (i ? L", " : L"") + addresses[i].address + L" (" + addresses[i].adapter + L")";
+        {
+            std::lock_guard<std::mutex> hold(upnp_lock);
+            if (!upnp_address.empty()) s += L", " + upnp_address + L" (internet)";
+            if (!upnp_note.empty()) s += L"\r\n" + upnp_note;
+        }
+        s += L"\r\nFriends outside your home network need the port open on your router (the box above, or forward TCP "
+             + port + L" to this PC by hand) or a shared VPN such as Tailscale or ZeroTier. Windows may ask once to let "
+               L"Python through the firewall: allow it.";
+    } else if (join) {
+        s += L"Play connects to your friend's server at the address and port above (their invite has both).";
+    } else {
+        s += L"Play runs offline: the game's online menus cannot connect.";
+    }
+    s += L"\r\n\r\nPlayers on one server share its rankings (the Open Course hole scores). Each round is still "
+         L"played alone: the game's matchmaking runs inside each PC, so friends do not appear on your course.";
+    SetWindowTextW(controls[ID_ONLINE_STATUS], s.c_str());
+}
+
+// Command line options for the game, or false (with a message shown) when the Online page is not filled in.
+bool online_arguments(std::wstring& command) {
+    const std::string mode = online_mode();
+    if (mode == "off") return true;
+    const std::string name = prefs.get("online_name", "Golfer"), friend_host = prefs.get("online_host");
+    if (!valid_online_name(name)) {
+        MessageBoxW(window, L"On the Online page, enter a name of 3 to 16 letters, digits, - or _.", kTitle, MB_ICONWARNING);
+        return false;
+    }
+    if (mode == "join" && !valid_host(friend_host)) {
+        MessageBoxW(window, L"On the Online page, enter your friend's server address (from their invite).", kTitle, MB_ICONWARNING);
+        return false;
+    }
+    if (mode == "host") {
+        std::wstring error;
+        if (!start_server(error)) { MessageBoxW(window, error.c_str(), kTitle, MB_ICONWARNING); return false; }
+    }
+    command += L" --online-id " + wide(name) + L" --local-auth 1 --discovery-port " + wide(online_port());
+    if (mode == "join") command += L" --server-host " + wide(friend_host);
+    return true;
+}
+
+void online_command(int id, int code) {
+    switch (id) {
+    case ID_ONLINE_MODE:
+        if (code != CBN_SELCHANGE) return;
+        set_pref("online", combo_value(ID_ONLINE_MODE, online_modes));
+        break;
+    case ID_ONLINE_NAME: if (code == EN_KILLFOCUS) set_pref("online_name", utf8(text_of(ID_ONLINE_NAME))); return;
+    case ID_ONLINE_HOST: if (code == EN_KILLFOCUS) set_pref("online_host", utf8(text_of(ID_ONLINE_HOST))); return;
+    case ID_ONLINE_PORT:
+        if (code != EN_KILLFOCUS) return;
+        set_pref("online_port", utf8(text_of(ID_ONLINE_PORT)));
+        SetWindowTextW(controls[ID_ONLINE_PORT], wide(online_port()).c_str());
+        if (server_running()) stop_server(); // the next Start or Play uses the new port
+        break;
+    case ID_UPNP: set_pref("upnp", checked(ID_UPNP) ? "1" : "0"); break;
+    case ID_SERVER:
+        if (server_running()) {
+            stop_server();
+        } else {
+            std::wstring error;
+            if (!start_server(error)) MessageBoxW(window, error.c_str(), kTitle, MB_ICONWARNING);
+        }
+        break;
+    case ID_INVITE:
+        copy_text(invite_text());
+        MessageBoxW(window, (L"Copied to the clipboard; paste it to your friends:\r\n\r\n" + invite_text()).c_str(), kTitle, MB_ICONINFORMATION);
+        break;
+    }
+    refresh_online();
+}
+// The server became ready or stopped: open the router port when asked, and show the state.
+void on_server_state() {
+    if (server_ready && prefs.get("upnp", "0") == "1") {
+        bool mapped;
+        {
+            std::lock_guard<std::mutex> hold(upnp_lock);
+            mapped = upnp_port != 0 || !upnp_note.empty();
+        }
+        auto addresses = local_addresses();
+        if (!mapped && !addresses.empty() && addresses[0].gateway) {
+            {
+                std::lock_guard<std::mutex> hold(upnp_lock);
+                upnp_note = L"Asking the router to open the port...";
+            }
+            upnp_map(std::stol(online_port()), addresses[0].address);
+        }
+    }
+    refresh_online();
+}
+
 void play() {
     std::wstring command = quote(runtime_exe.wstring()) + L" --data-dir " + quote(data.wstring());
+    const std::wstring chosen = current_save();
+    if (chosen != kMainSave) // another save folder; the one settings.ini for every save
+        command += L" --save " + quote(save_dir(chosen).wstring()) + L" --config " + quote(ini_path.wstring());
+    if (!online_arguments(command)) return;
     STARTUPINFOW si{sizeof si};
     PROCESS_INFORMATION pi{};
     if (!CreateProcessW(nullptr, command.data(), nullptr, nullptr, FALSE, 0, nullptr, root.c_str(), &si, &pi)) {
@@ -498,6 +959,8 @@ void play() {
         return;
     }
     CloseHandle(pi.hThread);
+    game_running = true;
+    refresh_saves();
     ShowWindow(window, SW_MINIMIZE);
     std::thread([process = pi.hProcess] {
         WaitForSingleObject(process, INFINITE);
@@ -506,70 +969,239 @@ void play() {
     }).detach();
 }
 
+// --- the Saves page ---------------------------------------------------------------------------------
+
+std::vector<std::wstring> shown_saves;
+
+void refresh_saves() {
+    HWND list = controls[ID_PROFILES];
+    if (!list) return;
+    int keep = (int)SendMessageW(list, LB_GETCURSEL, 0, 0);
+    SendMessageW(list, LB_RESETCONTENT, 0, 0);
+    shown_saves = list_saves();
+    const std::wstring chosen = current_save();
+    for (size_t i = 0; i < shown_saves.size(); ++i) {
+        std::wstring line = shown_saves[i];
+        SYSTEMTIME t;
+        wchar_t when[64];
+        if (last_saved(shown_saves[i], t)) {
+            swprintf(when, 64, L"   last saved %04u-%02u-%02u %02u:%02u", t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute);
+            line += when;
+        } else {
+            line += L"   (new: the game starts from the beginning)";
+        }
+        if (shown_saves[i] == chosen) line += L"   [in use]";
+        SendMessageW(list, LB_ADDSTRING, 0, (LPARAM)line.c_str());
+        if (keep < 0 && shown_saves[i] == chosen) keep = (int)i;
+    }
+    SendMessageW(list, LB_SETCURSEL, std::clamp(keep, 0, (int)shown_saves.size() - 1), 0);
+    const bool idle = !game_running;
+    for (int id : {ID_PROFILE_USE, ID_PROFILE_NEW, ID_PROFILE_COPY, ID_PROFILE_RENAME, ID_PROFILE_DELETE})
+        EnableWindow(controls[id], idle);
+    std::wstring status = L"The game uses \"" + chosen + L"\". Every save keeps its own progress; display "
+                          L"and texture settings are shared.";
+    if (game_running) status = L"The game is running: saves can be changed after it closes.";
+    SetWindowTextW(controls[ID_PROFILE_STATUS], status.c_str());
+}
+
+std::wstring selected_save() {
+    int i = (int)SendMessageW(controls[ID_PROFILES], LB_GETCURSEL, 0, 0);
+    return i >= 0 && i < (int)shown_saves.size() ? shown_saves[i] : kMainSave;
+}
+
+// New, Copy and Rename take the name typed in the box; a bad or taken name is refused with why.
+std::wstring typed_save_name() {
+    std::wstring name = text_of(ID_PROFILE_NAME);
+    while (!name.empty() && name.back() == L' ') name.pop_back();
+    std::error_code ec;
+    if (!valid_save_name(name)) {
+        MessageBoxW(window, L"Type a name for the save in the box first: up to 32 characters, without \\ / : * ? \" < > |.", kTitle, MB_ICONINFORMATION);
+        return {};
+    }
+    if (fs::exists(save_dir(name), ec)) {
+        MessageBoxW(window, (L"There is already a save called \"" + name + L"\".").c_str(), kTitle, MB_ICONINFORMATION);
+        return {};
+    }
+    return name;
+}
+
+void save_action(int id) {
+    if (game_running && id != ID_PROFILE_BACKUP && id != ID_PROFILE_OPEN) return;
+    const std::wstring picked = selected_save();
+    std::error_code ec;
+    switch (id) {
+    case ID_PROFILE_USE: set_pref("save", picked == kMainSave ? "" : utf8(picked)); break;
+    case ID_PROFILE_NEW: {
+        std::wstring name = typed_save_name();
+        if (name.empty()) return;
+        fs::create_directories(save_dir(name), ec);
+        set_pref("save", utf8(name));
+        SetWindowTextW(controls[ID_PROFILE_NAME], L"");
+        break;
+    }
+    case ID_PROFILE_COPY: {
+        std::wstring name = typed_save_name();
+        if (name.empty()) return;
+        if (!copy_tree(save_dir(picked) / L"savedata", save_dir(name) / L"savedata")) {
+            MessageBoxW(window, L"Copying the save failed.", kTitle, MB_ICONERROR);
+            return;
+        }
+        SetWindowTextW(controls[ID_PROFILE_NAME], L"");
+        break;
+    }
+    case ID_PROFILE_RENAME: {
+        if (picked == kMainSave) {
+            MessageBoxW(window, L"Main is the game's own save folder and keeps its name. Copy it to a save with another name instead.", kTitle, MB_ICONINFORMATION);
+            return;
+        }
+        std::wstring name = typed_save_name();
+        if (name.empty()) return;
+        fs::rename(save_dir(picked), save_dir(name), ec);
+        if (ec) { MessageBoxW(window, L"Renaming failed: is a file of that save open?", kTitle, MB_ICONERROR); return; }
+        if (wide(prefs.get("save")) == picked) set_pref("save", utf8(name));
+        SetWindowTextW(controls[ID_PROFILE_NAME], L"");
+        break;
+    }
+    case ID_PROFILE_DELETE: {
+        if (picked == kMainSave) {
+            MessageBoxW(window, L"Main is the game's own save folder and is not deleted from here.", kTitle, MB_ICONINFORMATION);
+            return;
+        }
+        std::wstring ask = L"Move the save \"" + picked + L"\" to the Recycle Bin? It can be restored from there.";
+        if (MessageBoxW(window, ask.c_str(), kTitle, MB_YESNO | MB_ICONQUESTION) != IDYES) return;
+        if (!recycle(save_dir(picked))) { MessageBoxW(window, L"The save could not be moved to the Recycle Bin.", kTitle, MB_ICONERROR); return; }
+        if (wide(prefs.get("save")) == picked) set_pref("save", "");
+        break;
+    }
+    case ID_PROFILE_BACKUP: {
+        SYSTEMTIME t;
+        GetLocalTime(&t);
+        wchar_t stamp[32];
+        swprintf(stamp, 32, L"%04u%02u%02u-%02u%02u%02u", t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond);
+        fs::path to = data / L"backups" / (picked + L"-" + stamp);
+        if (!copy_tree(save_dir(picked) / L"savedata", to / L"savedata")) {
+            MessageBoxW(window, L"The backup failed.", kTitle, MB_ICONERROR);
+            return;
+        }
+        SetWindowTextW(controls[ID_PROFILE_STATUS], (L"Backed up to " + to.wstring()).c_str());
+        return; // keep the message
+    }
+    case ID_PROFILE_OPEN:
+        fs::create_directories(save_dir(picked), ec);
+        ShellExecuteW(window, L"open", save_dir(picked).c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+        return;
+    }
+    SendMessageW(controls[ID_PROFILES], LB_SETCURSEL, (WPARAM)-1, 0);
+    refresh_saves();
+}
+
 void create_controls() {
-    pages.assign(4, {});
+    pages.assign(PageCount, {});
     // Only the tab strip: the pages draw on the window's own background, under it.
     tabs = add(-1, WC_TABCONTROLW, L"", WS_VISIBLE | WS_CLIPSIBLINGS, 10, 8, 620, 30, ID_TABS);
-    const wchar_t* names[] = {L"Play", L"Game files", L"Display", L"HD textures"};
-    for (int i = 0; i < 4; ++i) {
+    const wchar_t* names[PageCount] = {L"Play", L"Display", L"Saves", L"HD textures", L"Online", L"Game files"};
+    for (int i = 0; i < PageCount; ++i) {
         TCITEMW item{TCIF_TEXT};
         item.pszText = (LPWSTR)names[i];
         TabCtrl_InsertItem(tabs, i, &item);
     }
     // Play
-    add(0, L"STATIC", L"Everybody's Golf", SS_LEFT, 30, 50, 580, 40, 0, big_font);
-    status_text = add(0, L"STATIC", L"", SS_LEFT, 30, 100, 580, 140, ID_STATUS);
-    add(0, L"BUTTON", L"Play", BS_DEFPUSHBUTTON | WS_TABSTOP, 30, 260, 200, 60, ID_PLAY, big_font);
-    add(0, L"BUTTON", L"Open install folder", BS_PUSHBUTTON | WS_TABSTOP, 30, 370, 170, 30, ID_OPEN_FOLDER);
-    add(0, L"BUTTON", L"Open logs", BS_PUSHBUTTON | WS_TABSTOP, 210, 370, 120, 30, ID_OPEN_LOGS);
-    // Game files
-    add(1, L"STATIC", L"Your decrypted dump of Everybody's Golf (CUSA04687): the folder with eboot.bin and sce_sys.",
+    add(PagePlay, L"STATIC", L"Everybody's Golf", SS_LEFT, 30, 50, 580, 40, 0, big_font);
+    status_text = add(PagePlay, L"STATIC", L"", SS_LEFT, 30, 100, 580, 140, ID_STATUS);
+    add(PagePlay, L"BUTTON", L"Play", BS_DEFPUSHBUTTON | WS_TABSTOP, 30, 260, 200, 60, ID_PLAY, big_font);
+    add(PagePlay, L"BUTTON", L"Open install folder", BS_PUSHBUTTON | WS_TABSTOP, 30, 370, 170, 30, ID_OPEN_FOLDER);
+    add(PagePlay, L"BUTTON", L"Open logs", BS_PUSHBUTTON | WS_TABSTOP, 210, 370, 120, 30, ID_OPEN_LOGS);
+    // Saves
+    add(PageSaves, L"STATIC", L"Saves: each has its own golfer and progress. The game uses the one marked [in use].",
         SS_LEFT, 30, 50, 580, 20);
-    add(1, L"EDIT", L"", WS_BORDER | ES_AUTOHSCROLL | WS_TABSTOP, 30, 72, 470, 24, ID_BASE);
-    add(1, L"BUTTON", L"Browse...", BS_PUSHBUTTON | WS_TABSTOP, 510, 71, 100, 26, ID_BASE_BROWSE);
-    add(1, L"STATIC", L"Update 1.17, when your dump has it in its own folder (else leave empty):", SS_LEFT, 30, 110, 580, 20);
-    add(1, L"EDIT", L"", WS_BORDER | ES_AUTOHSCROLL | WS_TABSTOP, 30, 132, 470, 24, ID_UPDATE);
-    add(1, L"BUTTON", L"Browse...", BS_PUSHBUTTON | WS_TABSTOP, 510, 131, 100, 26, ID_UPDATE_BROWSE);
-    add(1, L"STATIC", L"DLC: a folder of extracted add-ons (optional; the game's own content is unlocked anyway):", SS_LEFT, 30, 170, 580, 20);
-    add(1, L"EDIT", L"", WS_BORDER | ES_AUTOHSCROLL | WS_TABSTOP, 30, 192, 470, 24, ID_DLC);
-    add(1, L"BUTTON", L"Browse...", BS_PUSHBUTTON | WS_TABSTOP, 510, 191, 100, 26, ID_DLC_BROWSE);
-    add(1, L"BUTTON", L"Set up game files", BS_PUSHBUTTON | WS_TABSTOP, 30, 240, 180, 32, ID_SETUP);
-    setup_progress = add(1, PROGRESS_CLASSW, L"", 0, 30, 290, 580, 18, ID_SETUP_PROGRESS);
-    setup_status = add(1, L"STATIC", L"Your dump is only read. With the update in its own folder, the two are merged into data\\dump "
+    add(PageSaves, L"LISTBOX", L"", WS_BORDER | WS_VSCROLL | LBS_NOTIFY | LBS_NOINTEGRALHEIGHT | WS_TABSTOP, 30, 74, 440, 170, ID_PROFILES);
+    add(PageSaves, L"BUTTON", L"Use this save", BS_PUSHBUTTON | WS_TABSTOP, 480, 74, 130, 30, ID_PROFILE_USE);
+    add(PageSaves, L"BUTTON", L"Back up", BS_PUSHBUTTON | WS_TABSTOP, 480, 112, 130, 30, ID_PROFILE_BACKUP);
+    add(PageSaves, L"BUTTON", L"Move to Recycle Bin", BS_PUSHBUTTON | WS_TABSTOP, 480, 150, 130, 30, ID_PROFILE_DELETE);
+    add(PageSaves, L"BUTTON", L"Open folder", BS_PUSHBUTTON | WS_TABSTOP, 480, 188, 130, 30, ID_PROFILE_OPEN);
+    add(PageSaves, L"STATIC", L"Name:", SS_LEFT, 30, 262, 50, 22);
+    add(PageSaves, L"EDIT", L"", WS_BORDER | ES_AUTOHSCROLL | WS_TABSTOP, 80, 258, 190, 24, ID_PROFILE_NAME);
+    SendMessageW(controls[ID_PROFILE_NAME], EM_SETLIMITTEXT, 32, 0);
+    add(PageSaves, L"BUTTON", L"New empty save", BS_PUSHBUTTON | WS_TABSTOP, 280, 256, 120, 28, ID_PROFILE_NEW);
+    add(PageSaves, L"BUTTON", L"Copy selected", BS_PUSHBUTTON | WS_TABSTOP, 406, 256, 100, 28, ID_PROFILE_COPY);
+    add(PageSaves, L"BUTTON", L"Rename", BS_PUSHBUTTON | WS_TABSTOP, 512, 256, 98, 28, ID_PROFILE_RENAME);
+    add(PageSaves, L"STATIC", L"", SS_LEFT, 30, 300, 580, 40, ID_PROFILE_STATUS);
+    add(PageSaves, L"STATIC", L"Back up copies a save to data\\backups. Saves stay in data\\save (Main) and data\\saves.",
+        SS_LEFT, 30, 350, 580, 40);
+    // Game files
+    add(PageFiles, L"STATIC", L"Your decrypted dump of Everybody's Golf (CUSA04687): the folder with eboot.bin and sce_sys.",
+        SS_LEFT, 30, 50, 580, 20);
+    add(PageFiles, L"EDIT", L"", WS_BORDER | ES_AUTOHSCROLL | WS_TABSTOP, 30, 72, 470, 24, ID_BASE);
+    add(PageFiles, L"BUTTON", L"Browse...", BS_PUSHBUTTON | WS_TABSTOP, 510, 71, 100, 26, ID_BASE_BROWSE);
+    add(PageFiles, L"STATIC", L"Update 1.17, when your dump has it in its own folder (else leave empty):", SS_LEFT, 30, 110, 580, 20);
+    add(PageFiles, L"EDIT", L"", WS_BORDER | ES_AUTOHSCROLL | WS_TABSTOP, 30, 132, 470, 24, ID_UPDATE);
+    add(PageFiles, L"BUTTON", L"Browse...", BS_PUSHBUTTON | WS_TABSTOP, 510, 131, 100, 26, ID_UPDATE_BROWSE);
+    add(PageFiles, L"STATIC", L"DLC: a folder of extracted add-ons (optional; the game's own content is unlocked anyway):", SS_LEFT, 30, 170, 580, 20);
+    add(PageFiles, L"EDIT", L"", WS_BORDER | ES_AUTOHSCROLL | WS_TABSTOP, 30, 192, 470, 24, ID_DLC);
+    add(PageFiles, L"BUTTON", L"Browse...", BS_PUSHBUTTON | WS_TABSTOP, 510, 191, 100, 26, ID_DLC_BROWSE);
+    add(PageFiles, L"BUTTON", L"Set up game files", BS_PUSHBUTTON | WS_TABSTOP, 30, 240, 180, 32, ID_SETUP);
+    setup_progress = add(PageFiles, PROGRESS_CLASSW, L"", 0, 30, 290, 580, 18, ID_SETUP_PROGRESS);
+    setup_status = add(PageFiles, L"STATIC", L"Your dump is only read. With the update in its own folder, the two are merged into data\\dump "
                                      L"(hard links on the same drive, so no extra space; a copy otherwise).",
                        SS_LEFT, 30, 316, 580, 80, ID_SETUP_STATUS);
     // Display
-    add(2, L"STATIC", L"Window", SS_LEFT, 30, 56, 160, 22);
-    add(2, WC_COMBOBOXW, L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 200, 52, 300, 200, ID_WINDOW);
-    add(2, L"STATIC", L"Window size", SS_LEFT, 30, 92, 160, 22);
-    add(2, WC_COMBOBOXW, L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 200, 88, 300, 200, ID_SIZE);
-    add(2, L"STATIC", L"Render resolution", SS_LEFT, 30, 128, 160, 22);
-    add(2, WC_COMBOBOXW, L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 200, 124, 300, 200, ID_RENDER);
-    add(2, L"STATIC", L"Higher render resolutions are sharper and need a fast GPU; at 4K some courses drop below 60 FPS.",
+    add(PageDisplay, L"STATIC", L"Window", SS_LEFT, 30, 56, 160, 22);
+    add(PageDisplay, WC_COMBOBOXW, L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 200, 52, 300, 200, ID_WINDOW);
+    add(PageDisplay, L"STATIC", L"Window size", SS_LEFT, 30, 92, 160, 22);
+    add(PageDisplay, WC_COMBOBOXW, L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 200, 88, 300, 200, ID_SIZE);
+    add(PageDisplay, L"STATIC", L"Render resolution", SS_LEFT, 30, 128, 160, 22);
+    add(PageDisplay, WC_COMBOBOXW, L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 200, 124, 300, 200, ID_RENDER);
+    add(PageDisplay, L"STATIC", L"Higher render resolutions are sharper and need a fast GPU; at 4K some courses drop below 60 FPS.",
         SS_LEFT, 200, 152, 410, 34);
-    add(2, L"BUTTON", L"60 FPS mode (the game's frame rate priority option)", BS_AUTOCHECKBOX | WS_TABSTOP, 30, 196, 560, 22, ID_SIXTY);
-    add(2, L"BUTTON", L"Anti-aliasing (SMAA)", BS_AUTOCHECKBOX | WS_TABSTOP, 30, 224, 560, 22, ID_SMAA);
-    add(2, L"BUTTON", L"Sharpening and upscaling to the window (AMD FSR 1)", BS_AUTOCHECKBOX | WS_TABSTOP, 30, 252, 560, 22, ID_SHARPEN);
-    add(2, L"BUTTON", L"VSync", BS_AUTOCHECKBOX | WS_TABSTOP, 30, 280, 560, 22, ID_VSYNC);
-    add(2, L"BUTTON", L"HDR (needs Windows HDR on)", BS_AUTOCHECKBOX | WS_TABSTOP, 30, 308, 560, 22, ID_HDR);
-    add(2, L"BUTTON", L"Skip the start-up logos", BS_AUTOCHECKBOX | WS_TABSTOP, 30, 336, 560, 22, ID_INTRO);
-    add(2, L"STATIC", L"Changes are saved at once and used from the next start. F10 in the game changes the window settings too.",
-        SS_LEFT, 30, 372, 580, 34);
+    add(PageDisplay, L"BUTTON", L"60 FPS mode (the game's frame rate priority option)", BS_AUTOCHECKBOX | WS_TABSTOP, 30, 196, 560, 22, ID_SIXTY);
+    add(PageDisplay, L"BUTTON", L"Anti-aliasing (SMAA)", BS_AUTOCHECKBOX | WS_TABSTOP, 30, 224, 560, 22, ID_SMAA);
+    add(PageDisplay, L"BUTTON", L"Sharpening and upscaling to the window (AMD FSR 1)", BS_AUTOCHECKBOX | WS_TABSTOP, 30, 252, 560, 22, ID_SHARPEN);
+    add(PageDisplay, L"BUTTON", L"VSync", BS_AUTOCHECKBOX | WS_TABSTOP, 30, 280, 560, 22, ID_VSYNC);
+    add(PageDisplay, L"BUTTON", L"HDR (needs Windows HDR on)", BS_AUTOCHECKBOX | WS_TABSTOP, 30, 308, 560, 22, ID_HDR);
+    add(PageDisplay, L"BUTTON", L"Skip the start-up logos", BS_AUTOCHECKBOX | WS_TABSTOP, 30, 336, 560, 22, ID_INTRO);
+    add(PageDisplay, L"STATIC", L"Changes are saved at once. In the game, press F10 or hold Options for 2 seconds for Display Settings: window, "
+        L"vsync, render resolution (up to 1800 lines), SMAA, sharpening and HD textures change at once; 60 FPS mode and HDR "
+        L"take effect at the next start.",
+        SS_LEFT, 30, 368, 580, 52);
     // HD textures
-    add(3, L"STATIC", L"HD textures are made on this PC from your own game: the game saves each texture it uses while you play, "
+    add(PageTextures, L"STATIC", L"HD textures are made on this PC from your own game: the game saves each texture it uses while you play, "
                       L"then Real-ESRGAN upscales them on your GPU into a pack the game loads instead.",
         SS_LEFT, 30, 50, 580, 50);
-    add(3, L"BUTTON", L"1. Collect textures while playing", BS_AUTOCHECKBOX | WS_TABSTOP, 30, 108, 560, 22, ID_COLLECT);
-    tex_count = add(3, L"STATIC", L"", SS_LEFT, 52, 132, 560, 20, ID_TEX_COUNT);
-    add(3, L"STATIC", L"2. Upscale", SS_LEFT, 30, 166, 100, 22);
-    add(3, WC_COMBOBOXW, L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 130, 162, 280, 200, ID_SCALE);
-    add(3, L"BUTTON", L"Build HD texture pack", BS_PUSHBUTTON | WS_TABSTOP, 420, 160, 190, 30, ID_BUILD);
-    tex_progress = add(3, PROGRESS_CLASSW, L"", 0, 30, 204, 580, 18, ID_TEX_PROGRESS);
-    tex_status = add(3, L"STATIC", L"Building takes a few seconds per texture; it can run again later to add new ones.",
+    add(PageTextures, L"BUTTON", L"1. Collect textures while playing", BS_AUTOCHECKBOX | WS_TABSTOP, 30, 108, 560, 22, ID_COLLECT);
+    tex_count = add(PageTextures, L"STATIC", L"", SS_LEFT, 52, 132, 560, 20, ID_TEX_COUNT);
+    add(PageTextures, L"STATIC", L"2. Upscale", SS_LEFT, 30, 166, 100, 22);
+    add(PageTextures, WC_COMBOBOXW, L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 130, 162, 280, 200, ID_SCALE);
+    add(PageTextures, L"BUTTON", L"Build HD texture pack", BS_PUSHBUTTON | WS_TABSTOP, 420, 160, 190, 30, ID_BUILD);
+    tex_progress = add(PageTextures, PROGRESS_CLASSW, L"", 0, 30, 204, 580, 18, ID_TEX_PROGRESS);
+    tex_status = add(PageTextures, L"STATIC", L"Building takes a few seconds per texture; it can run again later to add new ones.",
                      SS_LEFT, 30, 228, 580, 60, ID_TEX_STATUS);
-    add(3, L"BUTTON", L"3. Use the HD texture pack", BS_AUTOCHECKBOX | WS_TABSTOP, 30, 300, 560, 22, ID_USE_PACK);
-    add(3, L"STATIC", L"Packs are made from your copy of the game: they stay on this PC and are never shared.",
+    add(PageTextures, L"BUTTON", L"3. Use the HD texture pack", BS_AUTOCHECKBOX | WS_TABSTOP, 30, 300, 560, 22, ID_USE_PACK);
+    add(PageTextures, L"STATIC", L"Packs are made from your copy of the game: they stay on this PC and are never shared.",
         SS_LEFT, 30, 336, 580, 40);
+
+    // Online
+    add(PageOnline, L"STATIC", L"Play against one title server with friends: host it on this PC, or join a friend's.",
+        SS_LEFT, 30, 50, 580, 20);
+    add(PageOnline, L"STATIC", L"Your name", SS_LEFT, 30, 82, 160, 22);
+    add(PageOnline, L"EDIT", L"", WS_BORDER | ES_AUTOHSCROLL | WS_TABSTOP, 200, 78, 200, 24, ID_ONLINE_NAME);
+    SendMessageW(controls[ID_ONLINE_NAME], EM_SETLIMITTEXT, 16, 0);
+    add(PageOnline, L"STATIC", L"Online", SS_LEFT, 30, 116, 160, 22);
+    add(PageOnline, WC_COMBOBOXW, L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 200, 112, 300, 200, ID_ONLINE_MODE);
+    add(PageOnline, L"STATIC", L"Port", SS_LEFT, 30, 150, 160, 22);
+    add(PageOnline, L"EDIT", L"", WS_BORDER | ES_NUMBER | WS_TABSTOP, 200, 146, 80, 24, ID_ONLINE_PORT);
+    SendMessageW(controls[ID_ONLINE_PORT], EM_SETLIMITTEXT, 5, 0);
+    add(PageOnline, L"STATIC", L"Friend's address", SS_LEFT, 300, 150, 110, 22);
+    add(PageOnline, L"EDIT", L"", WS_BORDER | ES_AUTOHSCROLL | WS_TABSTOP, 410, 146, 200, 24, ID_ONLINE_HOST);
+    SendMessageW(controls[ID_ONLINE_HOST], EM_SETLIMITTEXT, 253, 0);
+    add(PageOnline, L"BUTTON", L"Start server", BS_PUSHBUTTON | WS_TABSTOP, 30, 184, 130, 28, ID_SERVER);
+    add(PageOnline, L"BUTTON", L"Copy invite for friends", BS_PUSHBUTTON | WS_TABSTOP, 170, 184, 170, 28, ID_INVITE);
+    add(PageOnline, L"BUTTON", L"Open the port on my router (UPnP)", BS_AUTOCHECKBOX | WS_TABSTOP, 350, 188, 260, 22, ID_UPNP);
+    add(PageOnline, L"STATIC", L"", SS_LEFT, 30, 224, 580, 196, ID_ONLINE_STATUS);
+    fill_combo(ID_ONLINE_MODE, online_modes, online_mode());
+    SetWindowTextW(controls[ID_ONLINE_NAME], wide(prefs.get("online_name", "Golfer")).c_str());
+    SetWindowTextW(controls[ID_ONLINE_PORT], wide(online_port()).c_str());
+    SetWindowTextW(controls[ID_ONLINE_HOST], wide(prefs.get("online_host")).c_str());
+    check(ID_UPNP, prefs.get("upnp", "0") == "1");
 
     fill_combo(ID_WINDOW, window_modes, settings.get("display_mode", "borderless"));
     fill_combo(ID_SIZE, sizes, settings.get("output_resolution", "1920x1080"));
@@ -582,15 +1214,15 @@ void create_controls() {
     check(ID_HDR, settings.get("hdr", "0") == "1");
     check(ID_INTRO, settings.get("skip_intro", "1") != "0");
     check(ID_COLLECT, !settings.get("texture_dump").empty());
-    check(ID_USE_PACK, !settings.get("texture_pack").empty());
+    check(ID_USE_PACK, !settings.get("texture_pack").empty() && settings.get("hd_textures", "1") != "0");
     Paths p = saved_paths();
     SetWindowTextW(controls[ID_BASE], p.game.c_str());
     SetWindowTextW(controls[ID_DLC], p.dlc.c_str());
 }
 
-// The first page: Game files until the game is set up, else Play; --page N (0-3) picks one.
+// The first page: Game files until the game is set up, else Play; --page N picks one.
 void open_first_page(int page) {
-    if (page < 0 || page > 3) page = game_ready() ? 0 : 1;
+    if (page < 0 || page >= PageCount) page = game_ready() ? PagePlay : PageFiles;
     TabCtrl_SetCurSel(tabs, page);
     show_page(page);
 }
@@ -608,7 +1240,16 @@ void on_command(int id, int code) {
         break;
     }
     case ID_SETUP: set_up_game(); break;
+    case ID_PROFILE_USE: case ID_PROFILE_NEW: case ID_PROFILE_COPY: case ID_PROFILE_RENAME:
+    case ID_PROFILE_DELETE: case ID_PROFILE_BACKUP: case ID_PROFILE_OPEN:
+        save_action(id);
+        break;
+    case ID_PROFILES: if (code == LBN_DBLCLK) save_action(ID_PROFILE_USE); return;
     case ID_BUILD: build_textures(); break;
+    case ID_ONLINE_NAME: case ID_ONLINE_MODE: case ID_ONLINE_PORT: case ID_ONLINE_HOST: case ID_SERVER: case ID_UPNP:
+    case ID_INVITE:
+        online_command(id, code);
+        return;
     case ID_WINDOW: if (code == CBN_SELCHANGE) set_setting("display_mode", combo_value(ID_WINDOW, window_modes)); break;
     case ID_SIZE: if (code == CBN_SELCHANGE) set_setting("output_resolution", combo_value(ID_SIZE, sizes)); break;
     case ID_RENDER:
@@ -637,7 +1278,9 @@ void on_command(int id, int code) {
             check(ID_USE_PACK, false);
             break;
         }
-        set_setting("texture_pack", checked(ID_USE_PACK) ? utf8(pack.wstring()) : "");
+        // The pack stays named while off, so Display Settings in the game can turn it back on.
+        if (count_files(pack, nullptr)) set_setting("texture_pack", utf8(pack.wstring()));
+        set_setting("hd_textures", checked(ID_USE_PACK) ? "1" : "0");
         break;
     }
     }
@@ -685,17 +1328,25 @@ LRESULT CALLBACK proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         if (wp && progress_target == tex_progress) {  // a new pack is wanted in game: step 3 on
             check(ID_USE_PACK, true);
             set_setting("texture_pack", utf8((data / L"textures" / L"pack").wstring()));
+            set_setting("hd_textures", "1");
         }
         refresh_status();
         return 0;
     case WM_GAME_EXIT:
+        game_running = false;
+        refresh_saves();
         ShowWindow(hwnd, SW_RESTORE);
         SetForegroundWindow(hwnd);
         refresh_status();
         return 0;
+    case WM_SERVER_STATE: on_server_state(); return 0;
     case WM_CLOSE:
         if (busy && MessageBoxW(hwnd, L"A job is still running. Close anyway? It stops where it is.", kTitle, MB_YESNO | MB_ICONQUESTION) != IDYES)
             return 0;
+        if (server_running() && MessageBoxW(hwnd, L"Closing the launcher stops your server for your friends. Close anyway?", kTitle,
+                                            MB_YESNO | MB_ICONQUESTION) != IDYES)
+            return 0;
+        stop_server();
         DestroyWindow(hwnd);
         return 0;
     case WM_DESTROY: PostQuitMessage(0); return 0;
@@ -711,6 +1362,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
     save = data / L"save";
     ini_path = save / L"settings.ini";
     logs = data / L"logs";
+    prefs_path = data / L"launcher.ini";
     runtime_exe = root / L"everybodys-golf.exe";
     // One launcher per install folder.
     std::wstring mutex_name = L"EverybodysGolfLauncher-" + std::to_wstring(std::hash<std::wstring>{}(root.wstring()));
@@ -723,6 +1375,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
     INITCOMMONCONTROLSEX icc{sizeof icc, ICC_TAB_CLASSES | ICC_PROGRESS_CLASS | ICC_STANDARD_CLASSES};
     InitCommonControlsEx(&icc);
     load_settings();
+    prefs.load(prefs_path);
 
     HDC screen = GetDC(nullptr);
     dpi = GetDeviceCaps(screen, LOGPIXELSY);

@@ -66,13 +66,15 @@ void Set(Values& v, const std::string& key, const std::string& value) {
     } else if (key == "skip_intro") {
         v.skip_intro = Truthy(value);
     } else if (key == "frame_rate_priority") {
-        v.frame_rate_priority = Truthy(value);
+        v.startup_frame_rate_priority = v.frame_rate_priority = Truthy(value);
     } else if (key == "render_height") {
         const bool listed = i == 0 || i == 1080 || i == 1440 || i == 1800 || i == 2160 || i == 2880;
-        v.render_height = listed ? i : 0;
+        v.startup_render_height = v.render_height = listed ? i : 0;
         if (!value.empty() && !listed) {
             std::printf("Settings: render_height=%s is not 0, 1080, 1440, 1800, 2160 or 2880; using 0\n", value.c_str());
         }
+    } else if (key == "hd_textures") {
+        v.startup_hd_textures = v.hd_textures = Truthy(value);
     } else if (key == "texture_pack") {
         v.texture_pack = value;
     } else if (key == "texture_dump") {
@@ -124,6 +126,9 @@ std::vector<std::pair<std::string, std::string>> DisplayKeys() {
         {"sharpening", v.sharpening ? "1" : "0"},
         {"smaa", v.smaa ? "1" : "0"},
         {"hdr", v.hdr ? "1" : "0"},
+        {"render_height", std::to_string(v.render_height.load())},
+        {"frame_rate_priority", v.frame_rate_priority ? "1" : "0"},
+        {"hd_textures", v.hd_textures ? "1" : "0"},
     };
     const int cheats = v.cheats;
     for (int c = 0; c < CheatCount; ++c) keys.emplace_back(CheatKeys[c], (cheats >> c) & 1 ? "1" : "0");
@@ -300,7 +305,7 @@ extern "C" int resogun_skip_intro(void) {
 }
 
 extern "C" int resogun_frame_rate_priority(void) {
-    return ResogunSettings::Get().frame_rate_priority ? 1 : 0;
+    return ResogunSettings::Get().startup_frame_rate_priority ? 1 : 0;
 }
 
 extern "C" int resogun_title_back_exits(void) {
@@ -332,7 +337,7 @@ extern "C" int resogun_cheats(void) {
 }
 
 extern "C" int resogun_render_height(void) {
-    return ResogunSettings::Get().render_height;
+    return ResogunSettings::Get().startup_render_height;
 }
 
 extern "C" int resogun_render_4k(void) {
