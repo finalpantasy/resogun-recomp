@@ -25,7 +25,6 @@
 #include <stdatomic.h>
 #include <time.h>
 #include <SDL3/SDL.h>
-#include <sys/stat.h>
 
 #define ERR_INVALID_ARG ((int32_t)0x80920001)
 #define ERR_INVALID_HANDLE ((int32_t)0x80920003)
@@ -82,6 +81,10 @@ static int slot_of(int32_t handle) { return handle>=1 && handle<=PADS && opened[
  * millisecond and a read copies the latest sample, so the game's threads make no gamepad calls. */
 static pthread_mutex_t host_lock=PTHREAD_MUTEX_INITIALIZER;
 static PadData host_sample[PADS];     /* under host_lock */
+typedef struct { uint32_t buttons; int stick[4]; } PadInjection;
+static PadInjection injected[PADS]={{0,{-1,-1,-1,-1}},{0,{-1,-1,-1,-1}}}; /* under host_lock */
+static uint32_t replay_revision;      /* under host_lock */
+static void read_inject(void);
 static char gamepad_name[PADS][64]={"none","none"}; /* under host_lock */
 static struct { uint8_t large, small; uint32_t serial; } rumble[PADS]; /* under host_lock */
 static struct { uint8_t r, g, b; uint32_t serial; } light[PADS];       /* under host_lock */
@@ -398,6 +401,7 @@ static void *host_thread(void *arg) {
     uint8_t connected_count[PADS]={0};
     for (;;) {
         const uint64_t start=now_us();
+        read_inject();
         if (!sdl_ready) sdl_ready = SDL_WasInit(SDL_INIT_GAMEPAD) ? 1 : SDL_InitSubSystem(SDL_INIT_GAMEPAD) ? 1 : -1;
         if (sdl_ready>0) host_gamepads(g,start,&next_scan,connected_count);
         speaker_update(g[0],&speaker_pad);
@@ -434,49 +438,47 @@ static void *host_thread(void *arg) {
  * the sticks; either prefixed with p2: (p2:cross, p2:lx=0) is user 2's; reconnect closes the
  * gamepads once per edit and the host thread opens them again, as after a real reconnect. An empty
  * file releases everything. */
-static struct { uint32_t buttons; int stick[4]; } injected[PADS]={{0,{-1,-1,-1,-1}},{0,{-1,-1,-1,-1}}};
 static int replay_armed;      /* 1 while a RESOGUN_PAD_REPLAY recording plays, 2 once it ended */
 static uint64_t replay_start; /* 0: (re)start at the next sample */
 static void read_inject(void) {
-    static const char *path; static int checked; static uint64_t last_check; static struct timespec mtime;
+    static const char *path; static int checked; static uint64_t last_check;
+    static bool have_stamp; static SDL_PathInfo stamp;
     if (!checked) { path=getenv("RESOGUN_PAD_FILE"); checked=1; }
     if (!path || !*path) return;
     uint64_t now=now_us();
     if (now-last_check<20000) return;
     last_check=now;
-    struct stat st;
-    if (stat(path,&st)!=0) return;
-#ifdef _WIN32
-    /* Whole-second mtimes: the size tells two edits within a second apart. */
-    if (st.st_mtime==mtime.tv_sec && st.st_size==mtime.tv_nsec) return;
-    mtime=(struct timespec){st.st_mtime,(long)st.st_size};
-#else
-    if (st.st_mtim.tv_sec==mtime.tv_sec && st.st_mtim.tv_nsec==mtime.tv_nsec) return;
-    mtime=st.st_mtim;
-#endif
+    SDL_PathInfo info;
+    if (!SDL_GetPathInfo(path,&info) || info.type!=SDL_PATHTYPE_FILE) return;
+    if (have_stamp && info.modify_time==stamp.modify_time &&
+        info.create_time==stamp.create_time && info.size==stamp.size) return;
     FILE *f=fopen(path,"r");
     if (!f) return;
     static const char *sticks[]={"lx=","ly=","rx=","ry="};
-    for (int u=0;u<PADS;++u) {
-        injected[u].buttons=0;
-        for (int i=0;i<4;++i) injected[u].stick[i]=-1;
-    }
+    PadInjection next[PADS]={{0,{-1,-1,-1,-1}},{0,{-1,-1,-1,-1}}};
     char token[64];
-    int reconnect=0;
+    bool reconnect=false, replay=false;
     while (fscanf(f,"%63s",token)==1) {
-        if (!strcmp(token,"replay") && replay_armed!=1) { replay_armed=1; replay_start=0; } /* RESOGUN_PAD_REPLAY */
-        if (!strcmp(token,"reconnect")) reconnect=1;
+        if (!strcmp(token,"replay")) replay=true;
+        if (!strcmp(token,"reconnect")) reconnect=true;
         const int u=!strncmp(token,"p2:",3);
         const char *t=token+(u ? 3 : 0);
-        for (size_t i=0;i<sizeof(ps_names)/sizeof(*ps_names);++i) if (!strcmp(t,ps_names[i].name)) injected[u].buttons|=ps_names[i].ps;
-        for (int i=0;i<4;++i) if (!strncmp(t,sticks[i],3)) { int v=atoi(t+3); injected[u].stick[i]=v<0 ? 0 : v>255 ? 255 : v; }
+        for (size_t i=0;i<sizeof(ps_names)/sizeof(*ps_names);++i) if (!strcmp(t,ps_names[i].name)) next[u].buttons|=ps_names[i].ps;
+        for (int i=0;i<4;++i) if (!strncmp(t,sticks[i],3)) { int v=atoi(t+3); next[u].stick[i]=v<0 ? 0 : v>255 ? 255 : v; }
     }
-    fclose(f);
+    const int failed=ferror(f);
+    if (fclose(f)!=0 || failed) return; /* retry this edit on the next poll */
+    stamp=info;
+    have_stamp=true;
+    pthread_mutex_lock(&host_lock);
+    memcpy(injected,next,sizeof(next));
+    if (replay) ++replay_revision;
+    pthread_mutex_unlock(&host_lock);
     if (reconnect) __atomic_store_n(&reconnect_wanted,1,__ATOMIC_RELEASE); /* host_gamepads closes them */
     for (int u=0;u<PADS;++u) {
-        const int *k=injected[u].stick;
-        if (!u || injected[u].buttons || k[0]>=0 || k[1]>=0 || k[2]>=0 || k[3]>=0)
-            printf("Runtime: pad file: user %d buttons 0x%x sticks %d %d %d %d\n",u+1,injected[u].buttons,k[0],k[1],k[2],k[3]);
+        const int *k=next[u].stick;
+        if (!u || next[u].buttons || k[0]>=0 || k[1]>=0 || k[2]>=0 || k[3]>=0)
+            printf("Runtime: pad file: user %d buttons 0x%x sticks %d %d %d %d\n",u+1,next[u].buttons,k[0],k[1],k[2],k[3]);
     }
 }
 /* RESOGUN_PAD_RECORD=<file>: F9 starts and stops recording the pad state (gamepad or keyboard) with
@@ -596,6 +598,8 @@ static int hold_after_capture[PADS];
 static void sample(PadData *d, int slot) {
     pthread_mutex_lock(&host_lock);
     *d=host_sample[slot];
+    const PadInjection injection=injected[slot];
+    const uint32_t revision=replay_revision;
     pthread_mutex_unlock(&host_lock);
     if (!d->connected_count) { /* before the host thread's first sample */
         d->left_x=d->left_y=d->right_x=d->right_y=128;
@@ -610,18 +614,22 @@ static void sample(PadData *d, int slot) {
         return;
     }
     if (!slot) record_sample(d); /* the click sources as they are: a replay plays them again */
-    read_inject();
+    static uint32_t consumed_revision;
+    if (consumed_revision!=revision) {
+        consumed_revision=revision;
+        if (replay_armed!=1) { replay_armed=1; replay_start=0; }
+    }
     if (!slot) replay_sample(d);
-    const uint32_t inj=injected[slot].buttons;
+    const uint32_t inj=injection.buttons;
     d->buttons|=inj & ~STICK_DIRECTIONS;
     if (inj & (LSTICK_LEFT|LSTICK_RIGHT)) key_axis(&d->left_x,inj & LSTICK_LEFT,inj & LSTICK_RIGHT);
     if (inj & (LSTICK_UP|LSTICK_DOWN)) key_axis(&d->left_y,inj & LSTICK_UP,inj & LSTICK_DOWN);
     if (inj & (RSTICK_LEFT|RSTICK_RIGHT)) key_axis(&d->right_x,inj & RSTICK_LEFT,inj & RSTICK_RIGHT);
     if (inj & (RSTICK_UP|RSTICK_DOWN)) key_axis(&d->right_y,inj & RSTICK_UP,inj & RSTICK_DOWN);
-    if (injected[slot].buttons & BTN_L2) d->l2=255;
-    if (injected[slot].buttons & BTN_R2) d->r2=255;
+    if (inj & BTN_L2) d->l2=255;
+    if (inj & BTN_R2) d->r2=255;
     uint8_t *axes[4]={&d->left_x,&d->left_y,&d->right_x,&d->right_y};
-    for (int i=0;i<4;++i) if (injected[slot].stick[i]>=0) *axes[i]=(uint8_t)injected[slot].stick[i];
+    for (int i=0;i<4;++i) if (injection.stick[i]>=0) *axes[i]=(uint8_t)injection.stick[i];
     cheat_chord(d,slot,false);
     if (!slot) title_back(d);
     play_click(d,&clicks[slot]);

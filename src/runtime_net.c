@@ -38,9 +38,13 @@ static _Atomic int32_t http_next=0x10000;
 #define NATIONAL_BOARD_PATH "/nmg-us/replay-probe/gameapi_getboardlistnational"
 #define NATIONAL_OWN_SCORE_PATH "/nmg-us/replay-probe/gameapi_getmyscorenational"
 #define NATIONAL_GAME_DATA_PATH "/nmg-us/replay-probe/gameapi_getnationalgamedata"
+#define NATIONAL_JOIN_PATH "/nmg-us/replay-probe/gameapi_noticejoinnational"
 #define NATIONAL_BOARD_DOWNLOAD_PATH "/nmg-us/replay-probe/gamedata-down/local-national-board.bin"
 #define NATIONAL_GAME_DOWNLOAD_PATH "/nmg-us/replay-probe/gamedata-down/local-tournament.xb"
+#define NATIONAL_DISTRIBUTION_PATH "/nmg-us/replay-probe/gameapi_getscoredistributionnational"
+#define NATIONAL_DISTRIBUTION_DOWNLOAD_PATH "/nmg-us/replay-probe/gamedata-down/local-national-distribution.json"
 #define CHARACTER_COUNT_PATH "/nmg-us/replay-probe/gameapi_getcountcharactordownload"
+#define NATIONAL_SCORE_LIST_PATH "/nmg-us/replay-probe/gameapi_getscorelistnational"
 #define PROPERTY_INFO_PATH "/nmg-us/replay-probe/gameapi_getgamepropertyinfo"
 #define TELEMETRY_PATH "/nmg-us/replay-probe/analytics/19d916d7-6a01-4371-9e6c-c91b2ff386bb/telemetry"
 #define SESSION_QUERY "?account=5932163534510096385&n="
@@ -84,7 +88,7 @@ static const ReplayRoute replay_routes[]={
     {"https://127.0.0.1:8765" SCORE_BOARD_PATH "5932163534510096385&n=", NULL, 418, 1450, 16, 0xa2800, 4, NULL},
     {"https://127.0.0.1:8765" OWN_SCORE_PATH, OWN_SCORE_PATH, 402, 1434, 16, 0xa2800, 4, NULL},
     {"https://127.0.0.1:8765" TOP_PLAYER_PATH, TOP_PLAYER_PATH, 410, 1410, 36, 36, 4, NULL},
-    {"https://127.0.0.1:8765" SCORE_DISTRIBUTION_PATH, SCORE_DISTRIBUTION_PATH, 402, 1414, 36, 36, 4, NULL},
+    {"https://127.0.0.1:8765" SCORE_DISTRIBUTION_PATH, SCORE_DISTRIBUTION_PATH, 402, 1414, 36, 68, 4, NULL},
     {"https://127.0.0.1:8765" USER_STATUS_PATH, USER_STATUS_PATH, 526, 1526, 16, 0x1000, 4, NULL},
     {"https://127.0.0.1:8765" COURSE_ASSIGNMENT_PATH SESSION_QUERY, NULL, 370, 1370, 16, 16, 4, NULL},
     /* Character assignment (slot 0x3d); the lower bound is kept loose until the request size is logged. */
@@ -93,15 +97,19 @@ static const ReplayRoute replay_routes[]={
     {"https://127.0.0.1:8765" REGIST_PREFIX SESSION_QUERY, NULL, 610, 5298, 16, 0x1000, 4, NULL},
     {"https://127.0.0.1:8765" REGIST_PREFIX "daily" SESSION_QUERY, NULL, 606, 5286, 16, 0x1000, 4, NULL},
     {"https://127.0.0.1:8765" REGIST_PREFIX "longdrivecontest" SESSION_QUERY, NULL, 582, 4514, 16, 0x1000, 4, NULL},
+    {"https://127.0.0.1:8765" REGIST_PREFIX "national" SESSION_QUERY, NULL, 590, 5134, 40, 40, 4, NULL},
     /* Action 0x26 of the login run (slot 0x2f). Over plain http the game encrypts the payload and drops
      * it (eboot 0xec97d0), so the discovery fixture must list this key as https. */
     {"https://127.0.0.1:8765" NATIONAL_BOARD_PATH, NATIONAL_BOARD_PATH, 378, 1378, 28, 0x8000, 4, NULL},
-    /* Entering the International Tournament: the player's national score, over plain http (66-byte body seen). */
-    {"http://127.0.0.1:8765" NATIONAL_OWN_SCORE_PATH, NATIONAL_OWN_SCORE_PATH, 66, 1570, 16, 0x8000, 4, NULL},
     {"http://127.0.0.1:8765" NATIONAL_BOARD_DOWNLOAD_PATH, NATIONAL_BOARD_DOWNLOAD_PATH, 0, 0, 136, 136, 4, NULL},
+    {"https://127.0.0.1:8765" NATIONAL_OWN_SCORE_PATH, NATIONAL_OWN_SCORE_PATH, 570, 1570, 16, 84, 4, NULL},
     {"https://127.0.0.1:8765" NATIONAL_GAME_DATA_PATH, NATIONAL_GAME_DATA_PATH, 406, 1406, 72, 72, 4, NULL},
+    {"https://127.0.0.1:8765" NATIONAL_JOIN_PATH, NATIONAL_JOIN_PATH, 422, 1422, 36, 36, 4, NULL},
     {"http://127.0.0.1:8765" NATIONAL_GAME_DOWNLOAD_PATH, NATIONAL_GAME_DOWNLOAD_PATH, 0, 0, 16, 8192, 1, NULL},
+    {"https://127.0.0.1:8765" NATIONAL_DISTRIBUTION_PATH, NATIONAL_DISTRIBUTION_PATH, 398, 1398, 68, 68, 4, NULL},
+    {"http://127.0.0.1:8765" NATIONAL_DISTRIBUTION_DOWNLOAD_PATH, NATIONAL_DISTRIBUTION_DOWNLOAD_PATH, 0, 0, 2, 35, 1, NULL},
     {"https://127.0.0.1:8765" PROPERTY_INFO_PATH, PROPERTY_INFO_PATH, 118, 118, 24, 24, 4, NULL},
+    {"https://127.0.0.1:8765" NATIONAL_SCORE_LIST_PATH, NATIONAL_SCORE_LIST_PATH, 438, 1698, 44, 132, 4, NULL},
     {"https://127.0.0.1:8765" CHARACTER_COUNT_PATH "?account=", CHARACTER_COUNT_PATH "?account=", 394, 1394, 44, 44, 4, NULL},
     {"https://127.0.0.1:8765" CHARACTER_COUNT_PATH SESSION_QUERY, NULL, 394, 1394, 44, 44, 4, NULL},
     {"http://127.0.0.1:8765" TELEMETRY_PATH, TELEMETRY_PATH, 1, 8192, 0, 0, 1, "application/json"},
@@ -256,6 +264,68 @@ done:
     WSACleanup();
 #endif
     return ok;
+}
+
+/* These routes originate in the runtime's workers. */
+static int golf_local_exchange(const ReplayRoute *route,const uint8_t *request,size_t size,
+                               uint8_t *response,size_t *length) {
+    ReplayRequest exchange={.route=route,.port=discovery_port()};
+    if (!exchange.port || !discovery_exchange(&exchange,request,(int)size)) return 0;
+    *length=exchange.length;
+    memcpy(response,exchange.body,exchange.length);
+    free(exchange.body);
+    return exchange.status;
+}
+
+int runtime_golf_lobby_exchange(const uint8_t *request,uint8_t *response,size_t *length) {
+    static const ReplayRoute route={
+        .path="/nmg-us/local-lobby/v1",.response_min=20,.response_max=GOLF_LOBBY_RESPONSE_BYTES,
+        .response_alignment=1,.content_type="application/octet-stream"
+    };
+    return golf_local_exchange(&route,request,GOLF_LOBBY_REQUEST_BYTES,response,length);
+}
+
+int runtime_golf_peer_exchange(const uint8_t *request,size_t size,uint8_t *response,size_t *length) {
+    static const ReplayRoute route={
+        .path="/nmg-us/local-lobby/v1/packets",.response_min=12,.response_max=GOLF_PEER_RESPONSE_MAX,
+        .response_alignment=1,.content_type="application/octet-stream"
+    };
+    if (size<GOLF_PEER_REQUEST_MIN || size>GOLF_PEER_REQUEST_MAX) return 0;
+    return golf_local_exchange(&route,request,size,response,length);
+}
+
+int runtime_golf_channel_exchange(const uint8_t *request,uint8_t *response,size_t *length) {
+    static const ReplayRoute route={
+        .path="/nmg-us/local-lobby/v1/channels",.response_min=GOLF_CHANNEL_RESPONSE_BYTES,
+        .response_max=GOLF_CHANNEL_RESPONSE_MAX,.response_alignment=1,.content_type="application/octet-stream"
+    };
+    return golf_local_exchange(&route,request,GOLF_CHANNEL_REQUEST_BYTES,response,length);
+}
+
+int runtime_golf_transport_exchange(const uint8_t *request,uint8_t *response,size_t *length) {
+    static const ReplayRoute route={
+        .path="/nmg-us/local-lobby/v1/transport",.response_min=GOLF_TRANSPORT_RESPONSE_BYTES,
+        .response_max=GOLF_TRANSPORT_RESPONSE_BYTES,.response_alignment=1,.content_type="application/octet-stream"
+    };
+    return golf_local_exchange(&route,request,GOLF_TRANSPORT_REQUEST_BYTES,response,length);
+}
+
+int runtime_golf_room_message_exchange(const uint8_t *request,size_t size,uint8_t *response,size_t *length) {
+    static const ReplayRoute route={
+        .path="/nmg-us/local-lobby/v1/room-messages",.response_max=GOLF_ROOM_MESSAGE_RESPONSE_MAX,
+        .response_alignment=1,.content_type="application/octet-stream"
+    };
+    if (size<36 || size>GOLF_ROOM_MESSAGE_REQUEST_MAX) return 0;
+    return golf_local_exchange(&route,request,size,response,length);
+}
+
+int runtime_golf_room_exchange(const uint8_t *request,size_t size,uint8_t *response,size_t *length) {
+    static const ReplayRoute route={
+        .path="/nmg-us/local-lobby/v1/rooms",.response_max=GOLF_ROOM_RESPONSE_MAX,
+        .response_alignment=1,.content_type="application/octet-stream"
+    };
+    if (size<28 || size>GOLF_ROOM_REQUEST_MAX) return 0;
+    return golf_local_exchange(&route,request,size,response,length);
 }
 
 static ABI int32_t http_send(int32_t id,const void *data,uint64_t length) {
