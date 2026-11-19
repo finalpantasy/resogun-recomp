@@ -331,6 +331,48 @@ namespace {
 std::atomic<u64> binary_hits{}, binary_misses{}, binary_rejected{}, binary_saved{}, binary_errors{};
 std::atomic<u64> binary_rejected_handles{}, binary_rejected_create{}, binary_key_shared{};
 std::atomic<u64> binary_rejected_from[3]{};
+// Hits and rejections split by whether the pipeline has a binary over 1 MiB (NVIDIA gives some
+// pipelines one of exactly 2 MiB), and RESOGUN_BINARY_SELFTEST's same-process restores.
+std::atomic<u64> binary_hits_big{}, binary_rejected_big{}, selftest_ok{}, selftest_rejected{},
+    selftest_rejected_big{};
+bool HasBigBinary(const std::vector<PipelineBinaryCache::Binary>& binaries) {
+    return std::ranges::any_of(binaries, [](const PipelineBinaryCache::Binary& b) { return b.data.size() > (1u << 20); });
+}
+// NVIDIA adds a ~2 MiB compression dictionary to some pipelines' binaries. Its key holds
+// "NVDICT_" and is the same in every process while its contents differ from run to run (newer
+// ones do not contain older ones), and a later process rejects most pipelines that use one, so
+// those compile again on every load. The device turns the driver's internal cache off
+// (vk_instance.cpp), which leaves fewer pipelines with a dictionary. Restores and captures are
+// counted per dictionary (by content hash).
+u64 DictionaryHash(const std::vector<PipelineBinaryCache::Binary>& binaries) {
+    static constexpr std::string_view tag{"NVDICT_"};
+    for (const auto& b : binaries) {
+        const std::string_view key{reinterpret_cast<const char*>(b.key.data()), b.key.size()};
+        if (key.find(tag) != std::string_view::npos) {
+            return XXH3_64bits(b.data.data(), b.data.size());
+        }
+    }
+    return 0;
+}
+struct DictionaryCounts {
+    u64 hits = 0, rejected = 0, captured = 0;
+};
+std::mutex dictionary_mutex;
+std::map<u64, DictionaryCounts> dictionary_counts;
+void CountDictionary(u64 hash, u64 DictionaryCounts::* field) {
+    if (!hash) {
+        return;
+    }
+    std::scoped_lock lock{dictionary_mutex};
+    ++(dictionary_counts[hash].*field);
+}
+bool SelftestEnabled() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("RESOGUN_BINARY_SELFTEST");
+        return value && value[0] == '1';
+    }();
+    return enabled;
+}
 std::atomic<u64> binary_restore_ns{}, binary_compile_ns{};
 std::atomic<u64> binary_restore_calls{}, binary_compile_calls{};
 std::atomic<u64> binary_key_ns{}, binary_load_ns{}, binary_handles_ns{};
@@ -605,6 +647,27 @@ std::optional<std::vector<PipelineBinaryCache::Binary>> LoadLegacyBinary(
 } // namespace
 
 void ReportPipelineBinaryCache() {
+    std::printf("Pipeline binaries over 1 MiB: %llu hits, %llu rejected",
+                static_cast<unsigned long long>(binary_hits_big.load()),
+                static_cast<unsigned long long>(binary_rejected_big.load()));
+    if (SelftestEnabled()) {
+        std::printf("; self-test restores: %llu ok, %llu rejected (%llu over 1 MiB)",
+                    static_cast<unsigned long long>(selftest_ok.load()),
+                    static_cast<unsigned long long>(selftest_rejected.load()),
+                    static_cast<unsigned long long>(selftest_rejected_big.load()));
+    }
+    std::printf("\n");
+    {
+        std::scoped_lock lock{dictionary_mutex};
+        std::string line;
+        for (const auto& [hash, c] : dictionary_counts) {
+            line += fmt::format(" {:04x}: {} hits, {} rejected, {} captured;", hash >> 48, c.hits,
+                                c.rejected, c.captured);
+        }
+        if (!line.empty()) {
+            std::printf("Pipeline binary dictionaries:%s\n", line.c_str());
+        }
+    }
     const auto hits = binary_hits.load();
     const auto misses = binary_misses.load();
     std::printf("Pipeline binary cache: %llu hits, %llu compiled, %llu rejected, %llu saved, "
@@ -656,7 +719,7 @@ vk::ResultValue<vk::UniquePipeline> CreateCachedGraphicsPipeline(
     }
     SCOPE_EXIT {
         const auto count = binary_hits.load() + binary_misses.load();
-        if (count && count % 256 == 0) {
+        if (count && count % 128 == 0) {
             ReportPipelineBinaryCache();
         }
     };
@@ -716,6 +779,44 @@ vk::ResultValue<vk::UniquePipeline> CreateCachedGraphicsPipeline(
         handles.clear();
     };
     SCOPE_EXIT { destroy(); };
+    // Creates the pipeline from binaries; nullopt when the driver refuses the binaries themselves.
+    const auto restore = [&](const std::vector<Binary>& binaries, VkResult& handles_result)
+        -> std::optional<vk::ResultValue<vk::UniquePipeline>> {
+        std::vector<VkPipelineBinaryKeyKHR> keys(binaries.size());
+        std::vector<VkPipelineBinaryDataKHR> data(binaries.size());
+        for (size_t i = 0; i < binaries.size(); ++i) {
+            keys[i].sType = VK_STRUCTURE_TYPE_PIPELINE_BINARY_KEY_KHR;
+            keys[i].keySize = u32(binaries[i].key.size());
+            std::ranges::copy(binaries[i].key, keys[i].key);
+            data[i] = {binaries[i].data.size(), const_cast<u8*>(binaries[i].data.data())};
+        }
+        VkPipelineBinaryKeysAndDataKHR stored{u32(keys.size()), keys.data(), data.data()};
+        VkPipelineBinaryCreateInfoKHR binary_info{VK_STRUCTURE_TYPE_PIPELINE_BINARY_CREATE_INFO_KHR};
+        binary_info.pKeysAndDataInfo = &stored;
+        destroy();
+        handles.resize(keys.size());
+        VkPipelineBinaryHandlesInfoKHR output{VK_STRUCTURE_TYPE_PIPELINE_BINARY_HANDLES_INFO_KHR};
+        output.pipelineBinaryCount = u32(handles.size());
+        output.pPipelineBinaries = handles.data();
+        const auto handles_started = std::chrono::steady_clock::now();
+        handles_result = dispatch.vkCreatePipelineBinariesKHR(device, &binary_info, nullptr, &output);
+        binary_handles_ns += ElapsedNs(handles_started);
+        if (handles_result != VK_SUCCESS) {
+            return std::nullopt;
+        }
+        VkPipelineBinaryInfoKHR restored{VK_STRUCTURE_TYPE_PIPELINE_BINARY_INFO_KHR};
+        // CAPTURE_DATA is only for compilation, never for binary-backed creation.
+        vk::PipelineCreateFlags2CreateInfoKHR plain{
+            .pNext = info.pNext,
+            .flags = vk::PipelineCreateFlags2{static_cast<VkPipelineCreateFlags>(info.flags)},
+        };
+        restored.pNext = &plain;
+        restored.binaryCount = u32(handles.size());
+        restored.pPipelineBinaries = handles.data();
+        auto restored_info = info;
+        restored_info.pNext = &restored;
+        return create(nullptr, restored_info, true);
+    };
     try {
         const auto load_started = std::chrono::steady_clock::now();
         int source = 0; // the state-named file, the driver-key-only file, a legacy file
@@ -733,50 +834,35 @@ vk::ResultValue<vk::UniquePipeline> CreateCachedGraphicsPipeline(
         }
         binary_load_ns += ElapsedNs(load_started);
         if (binaries) {
-            std::vector<VkPipelineBinaryKeyKHR> keys(binaries->size());
-            std::vector<VkPipelineBinaryDataKHR> data(binaries->size());
-            for (size_t i = 0; i < binaries->size(); ++i) {
-                keys[i].sType = VK_STRUCTURE_TYPE_PIPELINE_BINARY_KEY_KHR;
-                keys[i].keySize = u32((*binaries)[i].key.size());
-                std::ranges::copy((*binaries)[i].key, keys[i].key);
-                data[i] = {(*binaries)[i].data.size(), (*binaries)[i].data.data()};
-            }
-            VkPipelineBinaryKeysAndDataKHR stored{u32(keys.size()), keys.data(), data.data()};
-            VkPipelineBinaryCreateInfoKHR binary_info{
-                VK_STRUCTURE_TYPE_PIPELINE_BINARY_CREATE_INFO_KHR};
-            binary_info.pKeysAndDataInfo = &stored;
-            handles.resize(keys.size());
-            VkPipelineBinaryHandlesInfoKHR output{
-                VK_STRUCTURE_TYPE_PIPELINE_BINARY_HANDLES_INFO_KHR};
-            output.pipelineBinaryCount = u32(handles.size());
-            output.pPipelineBinaries = handles.data();
-            const auto handles_started = std::chrono::steady_clock::now();
-            const auto handles_result =
-                dispatch.vkCreatePipelineBinariesKHR(device, &binary_info, nullptr, &output);
-            binary_handles_ns += ElapsedNs(handles_started);
-            if (handles_result == VK_SUCCESS) {
-                VkPipelineBinaryInfoKHR restored{VK_STRUCTURE_TYPE_PIPELINE_BINARY_INFO_KHR};
-                restored.pNext = &flags;
-                restored.binaryCount = u32(handles.size());
-                restored.pPipelineBinaries = handles.data();
-                // CAPTURE_DATA is only for compilation, never for binary-backed creation.
-                flags.flags =
-                    vk::PipelineCreateFlags2{static_cast<VkPipelineCreateFlags>(info.flags)};
-                auto restored_info = info;
-                restored_info.pNext = &restored;
-                auto result = create(nullptr, restored_info, true);
+            VkResult handles_result = VK_SUCCESS;
+            if (auto restored = restore(*binaries, handles_result)) {
+                auto& result = *restored;
                 if (result.result == vk::Result::eSuccess) {
                     ++binary_hits;
-                    return result;
+                    if (HasBigBinary(*binaries)) ++binary_hits_big;
+                    CountDictionary(DictionaryHash(*binaries), &DictionaryCounts::hits);
+                    return std::move(result);
                 }
                 ++binary_rejected_create;
+                if (HasBigBinary(*binaries)) ++binary_rejected_big;
+                CountDictionary(DictionaryHash(*binaries), &DictionaryCounts::rejected);
                 ++binary_rejected_from[source];
                 if (source == 0 && FingerprintEnabled()) {
                     ReportFingerprint(file, MakeFingerprint(info));
                 }
-                if (binary_rejected_create.load() <= 6) {
-                    std::printf("Pipeline binary rejected at pipeline creation: %s (%zu binaries)\n",
-                                vk::to_string(result.result).c_str(), handles.size());
+                if (binary_rejected_create.load() <= 12) {
+                    std::string sizes;
+                    for (const auto& b : *binaries) {
+                        sizes += fmt::format(" {}", b.data.size());
+                    }
+                    u32 stage_mask = 0;
+                    for (u32 i = 0; i < info.stageCount; ++i) {
+                        stage_mask |= u32(info.pStages[i].stage);
+                    }
+                    std::printf("Pipeline binary rejected at pipeline creation: %s (%zu binaries:%s; "
+                                "stages %#x; %s)\n",
+                                vk::to_string(result.result).c_str(), handles.size(),
+                                sizes.c_str(), stage_mask, file.filename().string().c_str());
                 }
             } else {
                 ++binary_rejected_handles;
@@ -852,6 +938,25 @@ vk::ResultValue<vk::UniquePipeline> CreateCachedGraphicsPipeline(
             binary.key = BinaryKey(binary_key);
             binary.data.resize(size);
             binaries.push_back(std::move(binary));
+        }
+        CountDictionary(DictionaryHash(binaries), &DictionaryCounts::captured);
+        if (SelftestEnabled()) {
+            VkResult handles_result = VK_SUCCESS;
+            const auto again = restore(binaries, handles_result);
+            if (again && again->result == vk::Result::eSuccess) {
+                ++selftest_ok;
+            } else {
+                ++selftest_rejected;
+                if (HasBigBinary(binaries)) ++selftest_rejected_big;
+                if (selftest_rejected.load() <= 8) {
+                    std::printf("Pipeline binary self-test: rejected (%s), %zu binaries of",
+                                again ? vk::to_string(again->result).c_str() : "at binary creation",
+                                binaries.size());
+                    for (const auto& b : binaries) std::printf(" %zu", b.data.size());
+                    std::printf(" bytes\n");
+                }
+            }
+            destroy();
         }
         if (Store(file, global, pipeline_id, 0, binaries)) {
             ++binary_saved;
