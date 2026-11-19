@@ -65,10 +65,18 @@ void Set(Values& v, const std::string& key, const std::string& value) {
         v.startup_aspect_ratio = v.aspect_ratio = ratio;
     } else if (key == "skip_intro") {
         v.skip_intro = Truthy(value);
+    } else if (key == "frame_rate_priority") {
+        v.frame_rate_priority = Truthy(value);
+    } else if (key == "texture_pack") {
+        v.texture_pack = value;
+    } else if (key == "texture_dump") {
+        v.texture_dump = value;
     } else if (key == "title_back_exits") {
         v.title_back_exits = Truthy(value);
     } else if (key == "sharpening") {
         v.sharpening = Truthy(value);
+    } else if (key == "smaa") {
+        v.smaa = Truthy(value);
     } else if (key == "hdr") {
         v.startup_hdr = v.hdr = Truthy(value);
     } else if (key == "frame_rate") {
@@ -108,6 +116,7 @@ std::vector<std::pair<std::string, std::string>> DisplayKeys() {
         {"frame_rate", std::to_string(v.frame_rate.load())},
         {"render_resolution", std::string(RenderResolutionKeys[std::clamp(v.render_resolution.load(), 0, RenderResolutionCount - 1)])},
         {"sharpening", v.sharpening ? "1" : "0"},
+        {"smaa", v.smaa ? "1" : "0"},
         {"hdr", v.hdr ? "1" : "0"},
     };
     const int cheats = v.cheats;
@@ -224,9 +233,12 @@ void Load() {
         {"RESOGUN_AUDIO_CHANNELS", "audio_channels"},
         {"RESOGUN_SKIP_INTRO", "skip_intro"},     {"RESOGUN_FRAME_RATE", "frame_rate"},
         {"RESOGUN_TITLE_BACK_EXITS", "title_back_exits"},
+        {"RESOGUN_FRAME_RATE_PRIORITY", "frame_rate_priority"},
+        {"RESOGUN_TEXTURE_PACK", "texture_pack"}, {"RESOGUN_TEXTURE_DUMP", "texture_dump"},
         {"RESOGUN_RENDER_RESOLUTION", "render_resolution"},
         {"RESOGUN_HDR", "hdr"},
         {"RESOGUN_SHARPENING", "sharpening"},
+        {"RESOGUN_SMAA", "smaa"},
     };
     for (const auto& [env, key] : env_keys) {
         if (const char* value = std::getenv(env); value && value[0]) {
@@ -278,6 +290,10 @@ int EffectiveFrameRate() {
 
 extern "C" int resogun_skip_intro(void) {
     return ResogunSettings::Get().skip_intro ? 1 : 0;
+}
+
+extern "C" int resogun_frame_rate_priority(void) {
+    return ResogunSettings::Get().frame_rate_priority ? 1 : 0;
 }
 
 extern "C" int resogun_title_back_exits(void) {

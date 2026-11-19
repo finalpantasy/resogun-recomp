@@ -36,6 +36,7 @@ struct ImageViewInfo {
     vk::ComponentMapping mapping{};
     u32 min_lod = 0;
     bool is_storage = false;
+    bool is_cube = false; // resogun: Shader::ImageResource::IsCubeSampled
 
     auto operator<=>(const ImageViewInfo&) const = default;
 };

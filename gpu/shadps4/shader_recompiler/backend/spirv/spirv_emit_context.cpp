@@ -1,9 +1,11 @@
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <cstdio>
 #include "common/assert.h"
 #include "common/div_ceil.h"
 #include "shader_recompiler/backend/spirv/spirv_emit_context.h"
+#include "shader_recompiler/specialization.h"
 #include "shader_recompiler/frontend/fetch_shader.h"
 #include "shader_recompiler/ir/attribute.h"
 #include "shader_recompiler/ir/microinstruction.h"
@@ -11,6 +13,8 @@
 
 #include <boost/container/static_vector.hpp>
 #include <fmt/format.h>
+#include <cstdlib>
+#include <string>
 #include <spirv/unified1/spirv.hpp11>
 
 #include <numbers>
@@ -86,6 +90,218 @@ EmitContext::EmitContext(const Profile& profile_, const RuntimeInfo& runtime_inf
     DefineBuffers();
     DefineImagesAndSamplers();
     DefineFunctions();
+    GolfDebugSetup();
+}
+
+// resogun: RESOGUN_PS_DEBUG=<hash>[,<hash>...]:<view>[/<view>...][;<next group>...] makes those
+// pixel shaders write debug values to render target 0 instead of their color; each shader uses
+// the first group that lists it. Views: s<n> the n-th texture sample emitted, c<n> fract(4 * its
+// coordinates), w<n> its alpha as gray, a<n> input parameter n (x * 0.5 + 0.5), z<n> its z and
+// w in red and green, f<n> fract(16 * its xyz), o the shader's own color, kA-B the own color
+// with samples A..B read as 1.0 (nA-B: as 0.0), d<n> the n-th depth-compare result, l the own
+// color with every depth-compare result read as 1.0, x the own color with every implicit-LOD
+// sample taken at LOD 0. With several views, pixel column x shows view x % count; unreached
+// ones stay magenta. q is not a view: quad broadcasts return the lane's own value (zero
+// derivatives). Diagnostic only: use an empty RESOGUN_SHADER_DIR so the shaders are rebuilt.
+void EmitContext::GolfDebugSetup() {
+    if (hw_stage != HwStage::Fragment) {
+        return;
+    }
+    static const std::string groups = [] {
+        const char* env = std::getenv("RESOGUN_PS_DEBUG");
+        return std::string{env ? env : ""};
+    }();
+    std::string config;
+    size_t colon = std::string::npos;
+    for (size_t start = 0; start < groups.size() && config.empty();) {
+        size_t stop = groups.find(';', start);
+        if (stop == std::string::npos) {
+            stop = groups.size();
+        }
+        const std::string group = groups.substr(start, stop - start);
+        start = stop + 1;
+        const auto group_colon = group.find(':');
+        for (size_t pos = 0; pos < group_colon && group_colon != std::string::npos;) {
+            size_t end = group.find(',', pos);
+            if (end == std::string::npos || end > group_colon) {
+                end = group_colon;
+            }
+            if (std::strtoull(group.substr(pos, end - pos).c_str(), nullptr, 16) == info.pgm_hash) {
+                config = group;
+                colon = group_colon;
+                break;
+            }
+            pos = end + 1;
+        }
+    }
+    if (config.empty()) {
+        return;
+    }
+    for (u32 i = 0; i < images.size(); ++i) {
+        std::printf("PS debug %016llx: img%u single_mip %d\n",
+                    static_cast<unsigned long long>(info.pgm_hash), i, images[i].single_mip);
+    }
+    for (u32 i = 0; i < info.samplers.size(); ++i) {
+        const auto sharp = info.samplers[i].GetSharp(info);
+        std::printf("PS debug %016llx: samp%u mag %u min %u mip %u aniso %u same %d raw "
+                    "%016llx %016llx\n",
+                    static_cast<unsigned long long>(info.pgm_hash), i,
+                    static_cast<u32>(sharp.xy_mag_filter.Value()),
+                    static_cast<u32>(sharp.xy_min_filter.Value()),
+                    static_cast<u32>(sharp.mip_filter.Value()),
+                    static_cast<u32>(sharp.max_aniso.Value()),
+                    i < sampler_same_minmag.size() && sampler_same_minmag[i],
+                    static_cast<unsigned long long>(sharp.raw0),
+                    static_cast<unsigned long long>(sharp.raw1));
+    }
+    std::fflush(stdout);
+    const Id magenta = ConstantComposite(F32[4], ConstF32(1.0f), ConstF32(0.0f), ConstF32(1.0f),
+                                         ConstF32(1.0f));
+    for (size_t pos = colon + 1; pos < config.size();) {
+        size_t end = config.find('/', pos);
+        if (end == std::string::npos) {
+            end = config.size();
+        }
+        const char kind = config[pos];
+        if (kind == 'q') {
+            // Not a view: quad broadcasts return the lane's own value (zero derivatives).
+            golf_noquad = true;
+            pos = end + 1;
+            continue;
+        }
+        char* next = nullptr;
+        const u32 n = static_cast<u32>(std::strtoul(config.c_str() + pos + 1, &next, 10));
+        // kA-B: samples A..B read as 1.0 in this view's columns (B defaults to A).
+        const u32 m = *next == '-' ? static_cast<u32>(std::strtoul(next + 1, nullptr, 10)) : n;
+        const Id var = AddGlobalVariable(TypePointer(spv::StorageClass::Private, F32[4]),
+                                         spv::StorageClass::Private, magenta);
+        if (profile.supported_spirv >= 0x00010400) {
+            interfaces.push_back(var);
+        }
+        golf_dbg.push_back({var, kind, n, m});
+        pos = end + 1;
+    }
+    // Several views alternate by pixel column, which needs FragCoord even in shaders that
+    // never read it.
+    if (golf_dbg.size() > 1 && frag_coord.value == 0) {
+        frag_coord = DefineVariable(F32[4], spv::BuiltIn::FragCoord, spv::StorageClass::Input);
+    }
+}
+
+Id EmitContext::GolfDebugSample(Id sample, Id coords, Id type) {
+    const u32 seen = golf_dbg_seen++;
+    for (u32 i = 0; i < golf_dbg.size(); ++i) {
+        const auto& view = golf_dbg[i];
+        if ((view.kind == 'k' || view.kind == 'n') && view.n <= seen && seen <= view.m &&
+            type.value == F32[4].value) {
+            const float fill = view.kind == 'k' ? 1.0f : 0.0f;
+            const Id one = ConstantComposite(F32[4], ConstF32(fill), ConstF32(fill),
+                                             ConstF32(fill), ConstF32(fill));
+            if (golf_dbg.size() == 1 || frag_coord.value == 0) {
+                sample = one;
+                continue;
+            }
+            const Id x = OpConvertFToU(
+                U32[1], OpLoad(F32[1], OpAccessChain(input_f32, frag_coord, ConstU32(0u))));
+            const Id slot = OpUMod(U32[1], x, ConstU32(static_cast<u32>(golf_dbg.size())));
+            const Id mine = OpIEqual(U1[1], slot, ConstU32(i));
+            sample = OpSelect(F32[4], mine, one, sample); // scalar condition: SPIR-V 1.4+
+            continue;
+        }
+        if (view.n != seen || (view.kind != 's' && view.kind != 'c' && view.kind != 'w')) {
+            continue;
+        }
+        if (view.kind == 's') {
+            OpStore(view.var, sample);
+            continue;
+        }
+        if (view.kind == 'w') {
+            if (type.value == F32[4].value) {
+                const Id alpha = OpCompositeExtract(F32[1], sample, 3);
+                OpStore(view.var,
+                        OpCompositeConstruct(F32[4], alpha, alpha, alpha, ConstF32(1.0f)));
+            }
+            continue;
+        }
+        const Id x = OpCompositeExtract(F32[1], coords, 0);
+        const Id y = OpCompositeExtract(F32[1], coords, 1);
+        const Id frac_x = OpFract(F32[1], OpFMul(F32[1], x, ConstF32(4.0f)));
+        const Id frac_y = OpFract(F32[1], OpFMul(F32[1], y, ConstF32(4.0f)));
+        OpStore(view.var,
+                OpCompositeConstruct(F32[4], frac_x, frac_y, ConstF32(0.0f), ConstF32(1.0f)));
+    }
+    return sample;
+}
+
+// d<n>: the n-th depth-compare result as gray; l: the own color with every depth-compare result
+// read as 1.0 (fully lit), in this view's columns.
+Id EmitContext::GolfDebugDref(Id result) {
+    const u32 seen = golf_dref_seen++;
+    for (u32 i = 0; i < golf_dbg.size(); ++i) {
+        const auto& view = golf_dbg[i];
+        if (view.kind == 'd' && view.n == seen) {
+            OpStore(view.var, OpCompositeConstruct(F32[4], result, result, result, ConstF32(1.0f)));
+        } else if (view.kind == 'l') {
+            if (golf_dbg.size() == 1 || frag_coord.value == 0) {
+                result = ConstF32(1.0f);
+                continue;
+            }
+            const Id x = OpConvertFToU(
+                U32[1], OpLoad(F32[1], OpAccessChain(input_f32, frag_coord, ConstU32(0u))));
+            const Id slot = OpUMod(U32[1], x, ConstU32(static_cast<u32>(golf_dbg.size())));
+            result = OpSelect(F32[1], OpIEqual(U1[1], slot, ConstU32(i)), ConstF32(1.0f), result);
+        }
+    }
+    return result;
+}
+
+// mine in the pixel columns of view `view`, other elsewhere (mine alone with a single view).
+Id EmitContext::GolfDebugColumn(u32 view, Id mine, Id other, Id type) {
+    if (golf_dbg.size() == 1 || frag_coord.value == 0) {
+        return mine;
+    }
+    const Id x = OpConvertFToU(
+        U32[1], OpLoad(F32[1], OpAccessChain(input_f32, frag_coord, ConstU32(0u))));
+    const Id slot = OpUMod(U32[1], x, ConstU32(static_cast<u32>(golf_dbg.size())));
+    return OpSelect(type, OpIEqual(U1[1], slot, ConstU32(view)), mine, other);
+}
+
+void EmitContext::GolfDebugAttribute(u32 param, u32 comp, Id value) {
+    for (const auto& view : golf_dbg) {
+        // a<n>: xyzw in rgba; z<n>: zw in rg, so the second pair and w are visible; f<n>:
+        // fract(16 * xyz), whose contour lines break where the value jumps.
+        const bool zw = view.kind == 'z' && comp >= 2 && comp < 4;
+        const bool contour = view.kind == 'f' && comp < 3;
+        if (view.n == param && ((view.kind == 'a' && comp < 4) || zw || contour)) {
+            const Id scaled =
+                contour ? OpFract(F32[1], OpFMul(F32[1], value, ConstF32(16.0f)))
+                        : OpFma(F32[1], value, ConstF32(0.5f), ConstF32(0.5f));
+            OpStore(OpAccessChain(TypePointer(spv::StorageClass::Private, F32[1]), view.var,
+                                  ConstU32(zw ? comp - 2 : comp)),
+                    scaled);
+        }
+    }
+}
+
+Id EmitContext::GolfDebugOutput(u32 element, Id original) {
+    const auto view_value = [&](const GolfDebugView& view) {
+        return view.kind == 'o' || view.kind == 'k' || view.kind == 'n' || view.kind == 'l' ||
+                       view.kind == 'x'
+                   ? original
+                   : OpCompositeExtract(F32[1], OpLoad(F32[4], view.var), element);
+    };
+    Id result = view_value(golf_dbg[0]);
+    if (golf_dbg.size() == 1 || frag_coord.value == 0) {
+        return result;
+    }
+    const Id x = OpConvertFToU(U32[1], OpLoad(F32[1], OpAccessChain(input_f32, frag_coord,
+                                                                   ConstU32(0u))));
+    const Id slot = OpUMod(U32[1], x, ConstU32(static_cast<u32>(golf_dbg.size())));
+    for (u32 i = 1; i < golf_dbg.size(); ++i) {
+        const Id other = view_value(golf_dbg[i]);
+        result = OpSelect(F32[1], OpIEqual(U1[1], slot, ConstU32(i)), other, result);
+    }
+    return result;
 }
 
 EmitContext::~EmitContext() = default;
@@ -973,6 +1189,11 @@ Id ImageType(EmitContext& ctx, const ImageResource& desc, Id sampled_type) {
     const auto format = desc.is_atomic ? GetFormat(image) : spv::ImageFormat::Unknown;
     const auto type = image.GetViewType(desc.is_array);
     const u32 sampled = desc.is_written ? 2 : 1;
+    if (desc.IsCubeSampled(image)) {
+        // resogun: see ImageResource::IsCubeSampled.
+        ctx.AddCapability(spv::Capability::SampledCubeArray);
+        return ctx.TypeImage(sampled_type, spv::Dim::Cube, false, true, false, sampled, format);
+    }
     switch (type) {
     case AmdGpu::ImageType::Color1D:
         return ctx.TypeImage(sampled_type, spv::Dim::Dim1D, false, false, false, sampled, format);
@@ -1023,6 +1244,7 @@ void EmitContext::DefineImagesAndSamplers() {
             .view_type = sharp.GetViewType(image_desc.is_array),
             .is_integer = is_integer,
             .is_storage = is_storage,
+            .single_mip = !is_storage && sharp.NumViewLevels(image_desc.is_array) == 1,
             .mip_fallback_mode = mip_fallback_mode,
         });
         interfaces.push_back(id);
@@ -1043,6 +1265,7 @@ void EmitContext::DefineImagesAndSamplers() {
         Decorate(id, spv::Decoration::DescriptorSet, 0U);
         Name(id, fmt::format("{}_{}{}", hw_stage, "samp", samplers.size()));
         samplers.push_back(id);
+        sampler_same_minmag.push_back(GolfSameMinMag(samp_desc.GetSharp(info)));
         interfaces.push_back(id);
     }
 }

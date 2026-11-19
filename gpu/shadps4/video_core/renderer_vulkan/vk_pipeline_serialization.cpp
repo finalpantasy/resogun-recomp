@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <array>
+#include <type_traits>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -41,7 +43,7 @@
 namespace Serialization {
 /* You should increment versions below once corresponding serialization scheme is changed. */
 static constexpr u32 ShaderBinaryVersion = 8u; // resogun: v_writelane and spilled SGPR reloads (golf-fix v41)
-static constexpr u32 ShaderMetaVersion = 8u; // resogun: larger image and sampler lists
+static constexpr u32 ShaderMetaVersion = 10u; // resogun: images and samplers specialize on golf-fix v22's LOD 0 sampling
 static constexpr u32 PipelineKeyVersion = 6u; // resogun: Info layout (larger image and sampler lists)
 } // namespace Serialization
 
@@ -327,12 +329,231 @@ std::pair<u64, s64> ConvertToShared(const std::filesystem::path& directory,
 
 namespace {
 std::atomic<u64> binary_hits{}, binary_misses{}, binary_rejected{}, binary_saved{}, binary_errors{};
+std::atomic<u64> binary_rejected_handles{}, binary_rejected_create{}, binary_key_shared{};
+std::atomic<u64> binary_rejected_from[3]{};
 std::atomic<u64> binary_restore_ns{}, binary_compile_ns{};
 std::atomic<u64> binary_restore_calls{}, binary_compile_calls{};
 std::atomic<u64> binary_key_ns{}, binary_load_ns{}, binary_handles_ns{};
 u64 ElapsedNs(std::chrono::steady_clock::time_point started) {
     return u64(std::chrono::duration_cast<std::chrono::nanoseconds>(
                    std::chrono::steady_clock::now() - started).count());
+}
+// resogun: RESOGUN_PIPELINE_FINGERPRINT=1 (diagnostic). Each saved binary gets a .fp file with a
+// hash of each part of the pipeline's create info; when a binary is rejected, the parts that hash
+// differently now are printed, to find what changes between runs. Fields are hashed one by one
+// (struct padding is not), and of the pNext chains the structures this renderer links.
+constexpr std::array<const char*, 12> kFingerprintParts{
+    "flags",         "shaders",      "specialization", "vertex input",
+    "input assembly and tessellation", "viewport",     "rasterization", "multisample",
+    "depth stencil", "color blend",  "dynamic states", "rendering formats"};
+using Fingerprint = std::array<u64, kFingerprintParts.size()>;
+bool FingerprintEnabled() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("RESOGUN_PIPELINE_FINGERPRINT");
+        return value && value[0] == '1';
+    }();
+    return enabled;
+}
+struct FieldHash {
+    std::vector<u8> bytes;
+    template <typename T>
+    void Add(const T& value) {
+        static_assert(std::is_trivially_copyable_v<T>);
+        const auto* p = reinterpret_cast<const u8*>(&value);
+        bytes.insert(bytes.end(), p, p + sizeof(T));
+    }
+    void AddBytes(const void* data, size_t size) {
+        const auto* p = static_cast<const u8*>(data);
+        bytes.insert(bytes.end(), p, p + size);
+    }
+    void AddChain(const void* next) {
+        for (auto* node = static_cast<const VkBaseInStructure*>(next); node; node = node->pNext) {
+            Add(node->sType);
+            switch (node->sType) {
+            case VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_PROVOKING_VERTEX_STATE_CREATE_INFO_EXT:
+                Add(reinterpret_cast<const VkPipelineRasterizationProvokingVertexStateCreateInfoEXT*>(node)
+                        ->provokingVertexMode);
+                break;
+            case VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_DEPTH_CLIP_STATE_CREATE_INFO_EXT: {
+                const auto* s = reinterpret_cast<const VkPipelineRasterizationDepthClipStateCreateInfoEXT*>(node);
+                Add(s->flags);
+                Add(s->depthClipEnable);
+                break;
+            }
+            case VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_DEPTH_CLIP_CONTROL_CREATE_INFO_EXT:
+                Add(reinterpret_cast<const VkPipelineViewportDepthClipControlCreateInfoEXT*>(node)
+                        ->negativeOneToOne);
+                break;
+            case VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_DIVISOR_STATE_CREATE_INFO: {
+                const auto* s = reinterpret_cast<const VkPipelineVertexInputDivisorStateCreateInfo*>(node);
+                Add(s->vertexBindingDivisorCount);
+                AddBytes(s->pVertexBindingDivisors,
+                         s->vertexBindingDivisorCount * sizeof(*s->pVertexBindingDivisors));
+                break;
+            }
+            case VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_REQUIRED_SUBGROUP_SIZE_CREATE_INFO:
+                Add(reinterpret_cast<const VkPipelineShaderStageRequiredSubgroupSizeCreateInfo*>(node)
+                        ->requiredSubgroupSize);
+                break;
+            case VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO: {
+                const auto* s = reinterpret_cast<const VkPipelineRenderingCreateInfo*>(node);
+                Add(s->viewMask);
+                Add(s->colorAttachmentCount);
+                AddBytes(s->pColorAttachmentFormats,
+                         s->colorAttachmentCount * sizeof(*s->pColorAttachmentFormats));
+                Add(s->depthAttachmentFormat);
+                Add(s->stencilAttachmentFormat);
+                break;
+            }
+            case VK_STRUCTURE_TYPE_ATTACHMENT_SAMPLE_COUNT_INFO_AMD: {
+                const auto* s = reinterpret_cast<const VkAttachmentSampleCountInfoAMD*>(node);
+                Add(s->colorAttachmentCount);
+                AddBytes(s->pColorAttachmentSamples,
+                         s->colorAttachmentCount * sizeof(*s->pColorAttachmentSamples));
+                Add(s->depthStencilAttachmentSamples);
+                break;
+            }
+            default:
+                break;
+            }
+        }
+    }
+    u64 Take() {
+        const u64 hash = XXH3_64bits(bytes.data(), bytes.size());
+        bytes.clear();
+        return hash;
+    }
+};
+Fingerprint MakeFingerprint(const vk::GraphicsPipelineCreateInfo& info) {
+    Fingerprint out{};
+    FieldHash h;
+    h.Add(info.flags);
+    out[0] = h.Take();
+    for (u32 i = 0; i < info.stageCount; ++i) {
+        const auto& stage = info.pStages[i];
+        h.Add(stage.flags);
+        h.Add(stage.stage);
+        h.Add(Vulkan::ShaderModuleHash(stage.module));
+        h.AddBytes(stage.pName, std::strlen(stage.pName));
+        h.AddChain(stage.pNext);
+    }
+    out[1] = h.Take();
+    for (u32 i = 0; i < info.stageCount; ++i) {
+        if (const auto* spec = info.pStages[i].pSpecializationInfo) {
+            h.Add(spec->mapEntryCount);
+            for (u32 e = 0; e < spec->mapEntryCount; ++e) {
+                h.Add(spec->pMapEntries[e].constantID);
+                h.Add(spec->pMapEntries[e].offset);
+                h.Add(u64(spec->pMapEntries[e].size));
+            }
+            h.AddBytes(spec->pData, spec->dataSize);
+        }
+    }
+    out[2] = h.Take();
+    if (const auto* s = info.pVertexInputState) {
+        h.Add(s->flags);
+        for (u32 i = 0; i < s->vertexBindingDescriptionCount; ++i) {
+            h.Add(s->pVertexBindingDescriptions[i]);
+        }
+        for (u32 i = 0; i < s->vertexAttributeDescriptionCount; ++i) {
+            h.Add(s->pVertexAttributeDescriptions[i]);
+        }
+        h.AddChain(s->pNext);
+    }
+    out[3] = h.Take();
+    if (const auto* s = info.pInputAssemblyState) {
+        h.Add(s->topology);
+        h.Add(s->primitiveRestartEnable);
+    }
+    if (const auto* s = info.pTessellationState) {
+        h.Add(s->patchControlPoints);
+    }
+    out[4] = h.Take();
+    if (const auto* s = info.pViewportState) {
+        h.Add(s->viewportCount);
+        h.Add(s->scissorCount);
+        h.AddChain(s->pNext);
+    }
+    out[5] = h.Take();
+    if (const auto* s = info.pRasterizationState) {
+        h.Add(s->depthClampEnable);
+        h.Add(s->rasterizerDiscardEnable);
+        h.Add(s->polygonMode);
+        h.Add(s->cullMode);
+        h.Add(s->frontFace);
+        h.Add(s->depthBiasEnable);
+        h.Add(s->depthBiasConstantFactor);
+        h.Add(s->depthBiasClamp);
+        h.Add(s->depthBiasSlopeFactor);
+        h.Add(s->lineWidth);
+        h.AddChain(s->pNext);
+    }
+    out[6] = h.Take();
+    if (const auto* s = info.pMultisampleState) {
+        h.Add(s->rasterizationSamples);
+        h.Add(s->sampleShadingEnable);
+        h.Add(s->minSampleShading);
+        if (s->pSampleMask) {
+            h.Add(s->pSampleMask[0]);
+        }
+        h.Add(s->alphaToCoverageEnable);
+        h.Add(s->alphaToOneEnable);
+    }
+    out[7] = h.Take();
+    if (const auto* s = info.pDepthStencilState) {
+        h.Add(s->depthTestEnable);
+        h.Add(s->depthWriteEnable);
+        h.Add(s->depthCompareOp);
+        h.Add(s->depthBoundsTestEnable);
+        h.Add(s->stencilTestEnable);
+        h.Add(s->front);
+        h.Add(s->back);
+        h.Add(s->minDepthBounds);
+        h.Add(s->maxDepthBounds);
+    }
+    out[8] = h.Take();
+    if (const auto* s = info.pColorBlendState) {
+        h.Add(s->logicOpEnable);
+        h.Add(s->logicOp);
+        for (u32 i = 0; i < s->attachmentCount; ++i) {
+            h.Add(s->pAttachments[i]);
+        }
+        h.Add(s->blendConstants);
+    }
+    out[9] = h.Take();
+    if (const auto* s = info.pDynamicState) {
+        h.AddBytes(s->pDynamicStates, s->dynamicStateCount * sizeof(*s->pDynamicStates));
+    }
+    out[10] = h.Take();
+    h.AddChain(info.pNext);
+    out[11] = h.Take();
+    return out;
+}
+void StoreFingerprint(const std::filesystem::path& file, const Fingerprint& fingerprint) {
+    std::ofstream out(file.string() + ".fp", std::ios::binary | std::ios::trunc);
+    out.write(reinterpret_cast<const char*>(fingerprint.data()), sizeof(fingerprint));
+}
+void ReportFingerprint(const std::filesystem::path& file, const Fingerprint& now) {
+    static std::atomic<u32> reported{};
+    if (reported++ >= 40) {
+        return;
+    }
+    Fingerprint saved{};
+    std::ifstream in(file.string() + ".fp", std::ios::binary);
+    if (!in.read(reinterpret_cast<char*>(saved.data()), sizeof(saved))) {
+        std::printf("Pipeline fingerprint: %s rejected, no fingerprint saved with it\n",
+                    file.filename().string().c_str());
+        return;
+    }
+    std::string parts;
+    for (size_t i = 0; i < now.size(); ++i) {
+        if (saved[i] != now[i]) {
+            parts += parts.empty() ? "" : ", ";
+            parts += kFingerprintParts[i];
+        }
+    }
+    std::printf("Pipeline fingerprint: %s rejected; differs in: %s\n",
+                file.filename().string().c_str(), parts.empty() ? "nothing hashed" : parts.c_str());
 }
 PipelineBinaryCache::Key BinaryKey(const vk::PipelineBinaryKeyKHR& key) {
     if (!key.keySize || key.keySize > VK_MAX_PIPELINE_BINARY_KEY_SIZE_KHR) {
@@ -397,6 +618,16 @@ void ReportPipelineBinaryCache() {
     std::printf("Pipeline binaries: %llu shared binaries written, %llu already shared\n",
                 static_cast<unsigned long long>(PipelineBinaryCache::shared_written.load()),
                 static_cast<unsigned long long>(PipelineBinaryCache::shared_reused.load()));
+    std::printf("Pipeline binary rejections: %llu at binary creation, %llu at pipeline creation; "
+                "%llu driver keys shared by different draw states\n",
+                static_cast<unsigned long long>(binary_rejected_handles.load()),
+                static_cast<unsigned long long>(binary_rejected_create.load()),
+                static_cast<unsigned long long>(binary_key_shared.load()));
+    std::printf("Pipeline binary rejections by file: %llu state-named, %llu driver-key-only, "
+                "%llu legacy\n",
+                static_cast<unsigned long long>(binary_rejected_from[0].load()),
+                static_cast<unsigned long long>(binary_rejected_from[1].load()),
+                static_cast<unsigned long long>(binary_rejected_from[2].load()));
 }
 
 vk::ResultValue<vk::UniquePipeline> CreateCachedGraphicsPipeline(
@@ -453,8 +684,28 @@ vk::ResultValue<vk::UniquePipeline> CreateCachedGraphicsPipeline(
     for (const auto byte : pipeline_id) {
         name += fmt::format("{:02x}", byte);
     }
-    // The driver key identifies the pipeline independently of emulator draw-state keys.
-    const auto file = directory / (name + ".bin");
+    // resogun: NVIDIA gives pipelines that differ in draw state (such as a squaring pass's blend)
+    // the same driver key, and restoring one's binaries for the other returns
+    // VK_PIPELINE_COMPILE_REQUIRED. The two then overwrote one file every run and both compiled
+    // again. The file is named by the driver key and a hash of the emulator key and blend state;
+    // the binaries stay shared through shared/. A file under the older driver-key-only name is
+    // still tried once.
+    u64 state = XXH3_64bits(&key, sizeof(key));
+    if (const auto* blend = info.pColorBlendState) {
+        state = XXH3_64bits_withSeed(blend->pAttachments,
+                                     blend->attachmentCount * sizeof(*blend->pAttachments),
+                                     state ^ (u64(blend->logicOpEnable) << 32 | u64(blend->logicOp)));
+    }
+    {
+        static std::mutex seen_mutex;
+        static std::unordered_map<std::string, u64> seen;
+        std::scoped_lock lock{seen_mutex};
+        if (const auto [it, inserted] = seen.try_emplace(name, state); !inserted && it->second != state) {
+            ++binary_key_shared;
+        }
+    }
+    const auto file = directory / fmt::format("{}-{:016x}.bin", name, state);
+    const auto old_file = directory / (name + ".bin");
     std::vector<VkPipelineBinaryKHR> handles;
     const auto destroy = [&] {
         for (auto handle : handles) {
@@ -467,9 +718,15 @@ vk::ResultValue<vk::UniquePipeline> CreateCachedGraphicsPipeline(
     SCOPE_EXIT { destroy(); };
     try {
         const auto load_started = std::chrono::steady_clock::now();
+        int source = 0; // the state-named file, the driver-key-only file, a legacy file
         auto binaries = Load(file, global, pipeline_id, 0);
         if (!binaries) {
-            binaries = LoadLegacyBinary(directory, name, global, pipeline_id);
+            source = 1;
+            binaries = Load(old_file, global, pipeline_id, 0);
+            if (!binaries) {
+                source = 2;
+                binaries = LoadLegacyBinary(directory, name, global, pipeline_id);
+            }
             if (binaries) {
                 Store(file, global, pipeline_id, 0, *binaries);
             }
@@ -511,6 +768,21 @@ vk::ResultValue<vk::UniquePipeline> CreateCachedGraphicsPipeline(
                 if (result.result == vk::Result::eSuccess) {
                     ++binary_hits;
                     return result;
+                }
+                ++binary_rejected_create;
+                ++binary_rejected_from[source];
+                if (source == 0 && FingerprintEnabled()) {
+                    ReportFingerprint(file, MakeFingerprint(info));
+                }
+                if (binary_rejected_create.load() <= 6) {
+                    std::printf("Pipeline binary rejected at pipeline creation: %s (%zu binaries)\n",
+                                vk::to_string(result.result).c_str(), handles.size());
+                }
+            } else {
+                ++binary_rejected_handles;
+                if (binary_rejected_handles.load() <= 6) {
+                    std::printf("Pipeline binary rejected at binary creation: %d (%zu binaries)\n",
+                                int(handles_result), handles.size());
                 }
             }
             ++binary_rejected;
@@ -583,6 +855,9 @@ vk::ResultValue<vk::UniquePipeline> CreateCachedGraphicsPipeline(
         }
         if (Store(file, global, pipeline_id, 0, binaries)) {
             ++binary_saved;
+            if (FingerprintEnabled()) {
+                StoreFingerprint(file, MakeFingerprint(info));
+            }
         } else {
             ++binary_errors;
         }

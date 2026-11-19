@@ -255,6 +255,22 @@ public:
     Id base_vertex{};
     Id base_instance{};
     Id frag_coord{};
+    // resogun: RESOGUN_PS_DEBUG output override (GolfDebugSetup).
+    struct GolfDebugView {
+        Id var;
+        char kind;
+        u32 n;
+        u32 m;
+    };
+    std::vector<GolfDebugView> golf_dbg;
+    u32 golf_dbg_seen{};
+    u32 golf_dref_seen{};
+    bool golf_noquad{};
+    Id GolfDebugSample(Id sample, Id coords, Id type);
+    Id GolfDebugDref(Id result);
+    Id GolfDebugColumn(u32 view, Id mine, Id other, Id type);
+    void GolfDebugAttribute(u32 param, u32 comp, Id value);
+    Id GolfDebugOutput(u32 element, Id original);
     Id front_facing{};
     Id frag_depth{};
     Id stencil_ref{};
@@ -306,6 +322,7 @@ public:
         AmdGpu::ImageType view_type;
         bool is_integer = false;
         bool is_storage = false;
+        bool single_mip = false; // resogun: golf-fix v22
         MipStorageFallbackMode mip_fallback_mode{};
     };
 
@@ -354,6 +371,7 @@ public:
     boost::container::small_vector<BufferDefinition, 16> buffers;
     boost::container::small_vector<TextureDefinition, 8> images;
     boost::container::small_vector<Id, 4> samplers;
+    boost::container::small_vector<bool, 4> sampler_same_minmag; // resogun: golf-fix v22
     std::unordered_map<u32, Id> first_to_last_label_map;
 
     size_t flatbuf_index{};
@@ -403,6 +421,7 @@ private:
     void DefineImagesAndSamplers();
     void DefineSharedMemory();
     void DefineFunctions();
+    void GolfDebugSetup();
 
     SpirvAttribute GetAttributeInfo(AmdGpu::NumberFormat fmt, Id id, u32 num_components,
                                     bool output, bool loaded = false, bool array = false);

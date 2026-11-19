@@ -261,6 +261,8 @@ private:
         vk::ImageView view;
         const void* backing = nullptr;
         VideoCore::SubresourceRange range;
+        vk::ImageView replacement; ///< texture pack view, while the image keeps this key
+        u64 replacement_key = 0;
     };
     struct TextureSet {
         u64 key = 0;
@@ -298,10 +300,13 @@ private:
     /// noting its targets as used. Such a draw (an offscreen texture rendered once, as for
     /// Texture2D.ReadPixels) waits for its pipeline instead of being skipped while it builds,
     /// since nothing draws it again. Command processor thread.
+    /// resogun: the viewport size counts too: Everybody's Golf draws each hole's overhead map
+    /// once, into the corner of its every-frame scene buffers through a 1024x1024 viewport.
     bool DrawsFreshTarget();
     struct RecentTarget {
         VAddr address;
         u32 extent;
+        u64 view; ///< viewport 0 x and y scale bits
         u64 frame; ///< GPU frame of the last draw
         u64 since; ///< GPU frame the current run of draws started
     };

@@ -144,6 +144,15 @@ Image::Image(const Vulkan::Instance& instance, Vulkan::Runtime& runtime_,
     if (info.props.is_block && instance.IsBlockTexelViewSupported()) {
         flags |= vk::ImageCreateFlagBits::eBlockTexelViewCompatible;
     }
+    // resogun: square 2D images of six or more layers may be guest cube maps; Vulkan needs this
+    // flag at creation to view them as cubes (Shader::ImageResource::IsCubeSampled).
+    cube_compatible = !info.props.is_volume && info.num_samples == 1 &&
+                      info.size.width == info.size.height && info.resources.layers >= 6 &&
+                      (info.type == AmdGpu::ImageType::Color2D ||
+                       info.type == AmdGpu::ImageType::Color2DArray);
+    if (cube_compatible) {
+        flags |= vk::ImageCreateFlagBits::eCubeCompatible;
+    }
 
     usage_flags = ImageUsageFlags(instance, info);
     format_features = FormatFeatureFlags(usage_flags);

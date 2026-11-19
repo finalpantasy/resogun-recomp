@@ -7,6 +7,7 @@
 
 #include <atomic>
 #include <cstdio>
+#include <cstdlib>
 #include <string>
 #include <vector>
 
@@ -30,7 +31,8 @@ public:
 
     /// GPU thread: whether passes are being looked at (armed or recording; cheap).
     static bool Active() {
-        return state.load(std::memory_order_relaxed) != Idle;
+        return state.load(std::memory_order_relaxed) != Idle ||
+               target_pending.load(std::memory_order_relaxed);
     }
     /// GPU thread: whether a frame is being recorded right now.
     static bool IsRecording() {
@@ -72,6 +74,8 @@ private:
     static inline std::atomic<u64> flips{0};
     static inline std::atomic<VAddr> last_presented{0};
     static inline std::atomic<bool> requested{false};
+    /// RESOGUN_CAPTURE_TARGET set and its pass not recorded yet.
+    static inline std::atomic<bool> target_pending{std::getenv("RESOGUN_CAPTURE_TARGET") != nullptr};
 };
 
 } // namespace Vulkan

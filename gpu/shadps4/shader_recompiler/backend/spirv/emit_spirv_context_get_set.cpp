@@ -106,7 +106,11 @@ Id EmitGetAttribute(EmitContext& ctx, IR::Attribute attr, u32 comp, u32 index) {
                 }
             }
         }();
-        return param.is_integer ? ctx.OpBitcast(ctx.F32[1], value) : value;
+        const Id result = param.is_integer ? ctx.OpBitcast(ctx.F32[1], value) : value;
+        if (!ctx.golf_dbg.empty() && (!param.is_array || index == 0)) {
+            ctx.GolfDebugAttribute(param_index, comp, result);
+        }
+        return result;
     }
     if (IR::IsBarycentricCoord(attr) && attr != IR::Attribute::BaryCoordPullModel &&
         ctx.profile.supports_fragment_shader_barycentric) {
@@ -288,6 +292,9 @@ void EmitSetAttribute(EmitContext& ctx, IR::Attribute attr, Id value, u32 elemen
     if (IR::IsMrt(attr)) {
         const u32 index{u32(attr) - u32(IR::Attribute::RenderTarget0)};
         const auto& info{ctx.frag_outputs.at(index)};
+        if (!ctx.golf_dbg.empty() && index == 0 && info.num_components > 1 && !info.is_integer) {
+            value = ctx.GolfDebugOutput(element, value);
+        }
         if (info.num_components == 1) {
             return op_store(info.id);
         } else {

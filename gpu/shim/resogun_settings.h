@@ -156,6 +156,12 @@ struct Values {
     /// Skip the start-up logos and notices: the game starts with its own -nosplash switch
     /// (src/loader.c); read once, before the game starts. On by default.
     bool skip_intro = true;
+    /// Everybody's Golf: the game's display option reads as frame rate priority, its 60 FPS mode
+    /// (src/runtime_game.c); read once, before the game starts. On by default.
+    bool frame_rate_priority = true;
+    /// Texture packs (gpu/shadps4/video_core/texture_cache/texture_pack.h): the folder of
+    /// replacement PNGs, and a folder to dump the game's textures into; empty: off. Read once.
+    std::string texture_pack, texture_dump;
     /// Back (Circle) on the title screen asks whether to close the game (src/runtime_pad.c and
     /// the overlay's exit prompt); read at each press. On by default.
     std::atomic<bool> title_back_exits{true};
@@ -172,6 +178,9 @@ struct Values {
     /// FSR 1 RCAS sharpening of the picture as the window shows it (key sharpening,
     /// RESOGUN_SHARPENING; on by default): the presenter reads it at each frame.
     std::atomic<bool> sharpening{true};
+    /// SMAA 1x anti-aliasing of the game's picture at its render size (key smaa, RESOGUN_SMAA;
+    /// off by default, the game's own look): the presenter reads it at each frame.
+    std::atomic<bool> smaa{false};
     /// HDR output (key hdr, RESOGUN_HDR; off by default): the game is told the display takes
     /// BT.2020 PQ and switches its own output to HDR. Read once, before the game starts.
     bool startup_hdr = false;
@@ -190,7 +199,7 @@ Values& Get();
 void Load();
 
 /// Writes the display keys (display_mode, monitor, aspect_ratio, window, vsync, tearing, frame_rate,
-/// render_resolution, sharpening, hdr) and the cheat_* keys into Path() in place: their lines are replaced, missing ones
+/// render_resolution, sharpening, smaa, hdr) and the cheat_* keys into Path() in place: their lines are replaced, missing ones
 /// appended, the rest kept (from the default file until Path() exists).
 void SaveDisplay();
 

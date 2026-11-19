@@ -3,6 +3,7 @@
 
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <mutex>
 #include <set>
 #include <format>
@@ -1358,6 +1359,7 @@ void Rasterizer::OnSubmit() {
         buffer_cache.ProcessFaultBuffer();
     }
     texture_cache.ProcessDownloadImages();
+    texture_cache.TickTexturePack();
     texture_cache.RunGarbageCollector();
     runtime.TickFrame();
 }
@@ -1792,6 +1794,15 @@ void Rasterizer::ResolveVertexBuffers(const GraphicsPipeline* pipeline,
 
     if (FrameCapture::IsRecording()) {
         CaptureVertices(guest_buffers.empty() ? AmdGpu::Buffer{} : guest_buffers[0]);
+        // resogun: every attribute's guest format (data/number) and the Vulkan format it reads as.
+        for (size_t i = 0; i < attributes.size() && i < guest_buffers.size(); ++i) {
+            const auto& g = guest_buffers[i];
+            capture_vertices += std::format(" | a{} {}/{} {} +{:#x} s{} n{}", attributes[i].location,
+                                            u32(g.GetDataFmt()), u32(g.GetNumberFmt()),
+                                            vk::to_string(attributes[i].format),
+                                            u64(g.base_address) & 0xffff, g.GetStride(),
+                                            g.num_records);
+        }
     }
     if (bindings.empty()) {
         // If there are no bindings, there is nothing further to do.
@@ -2447,12 +2458,22 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
                                       u32(desc.view_info.format));
             }
 
-            image_infos.emplace_back(VK_NULL_HANDLE, *image_view.image_view,
-                                     image.backing->state.layout);
+            // resogun: texture packs (texture_pack.h) swap in their own image, always readable.
+            const vk::ImageView replacement =
+                is_storage || binding.force_general || binding.is_target
+                    ? vk::ImageView{}
+                    : texture_cache.ReplacementView(image, image_view);
+            image_infos.emplace_back(VK_NULL_HANDLE,
+                                     replacement ? replacement : *image_view.image_view,
+                                     replacement ? vk::ImageLayout::eShaderReadOnlyOptimal
+                                                 : image.backing->state.layout);
             if (set_ok && binding_index < resolved.size()) {
                 resolved[binding_index] = {image_id, *image_view.image_view, image.backing,
-                                           desc.view_info.range};
+                                           desc.view_info.range, replacement,
+                                           replacement ? image.replacement_key : 0};
                 set_ok = !is_storage && !binding.force_general && !binding.is_target;
+                // A replacement still loading: bind this set again until it is in.
+                set_ok &= !(image.replacement_key && !replacement);
             }
         }
     }
@@ -2596,6 +2617,12 @@ bool Rasterizer::BindTexturesFromSet(const Shader::Info& stage, const PreparedSt
                                     : vk::ImageLayout::eShaderReadOnlyOptimal;
         barrier |= runtime.Transit(&image, new_layout, vk::PipelineStageFlagBits2::eAllCommands,
                                    vk::AccessFlagBits2::eShaderRead, entry.range);
+        if (entry.replacement && image.replacement_key == entry.replacement_key &&
+            False(image.flags & VideoCore::ImageFlagBits::GpuModified)) {
+            image_infos.emplace_back(VK_NULL_HANDLE, entry.replacement,
+                                     vk::ImageLayout::eShaderReadOnlyOptimal);
+            continue;
+        }
         image_infos.emplace_back(VK_NULL_HANDLE, entry.view, image.backing->state.layout);
     }
     (void)first_image_idx;
@@ -3443,10 +3470,14 @@ bool Rasterizer::DrawsFreshTarget() {
     const auto& regs = Regs();
     const u64 frame = ResogunStats::gpu_frames.load(std::memory_order_relaxed);
     bool fresh = false;
+    u32 xscale, yscale;
+    std::memcpy(&xscale, &regs.viewports[0].xscale, sizeof(xscale));
+    std::memcpy(&yscale, &regs.viewports[0].yscale, sizeof(yscale));
+    const u64 view = u64(xscale) << 32 | yscale;
     // Every draw in the first frame of a target's (re)use is fresh, not only the first one.
     const auto note = [&](VAddr address, u32 extent) {
         for (auto& target : recent_targets) {
-            if (target.address == address && target.extent == extent) {
+            if (target.address == address && target.extent == extent && target.view == view) {
                 if (frame - target.frame > RecentFrames) {
                     target.since = frame;
                 }
@@ -3456,7 +3487,7 @@ bool Rasterizer::DrawsFreshTarget() {
             }
         }
         fresh = true;
-        recent_targets.push_back({address, extent, frame, frame});
+        recent_targets.push_back({address, extent, view, frame, frame});
     };
     bool has_color = false;
     for (u32 cb = 0; cb < AmdGpu::NUM_COLOR_BUFFERS; ++cb) {

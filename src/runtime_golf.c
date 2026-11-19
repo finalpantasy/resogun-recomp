@@ -1509,6 +1509,24 @@ static void m2_room_complete(M2LocalSession *session,M2Event *event) {
     uint8_t response[GOLF_ROOM_RESPONSE_MAX];
     size_t length=0;
     int status=404;
+    /* Game Room calls CreateJoinRoomA straight after GetWorldInfoList, with no JoinLobby, so no
+       roster holds this member yet: enter the request's world (world 1 when it names none) here.
+       ready stays 0, so this roster sends no lobby member events the game never asked for. */
+    if (!session->world && job->world<=255) {
+        const uint8_t world=job->world ? (uint8_t)job->world : 1;
+        M2LocalRoster roster;
+        const int joined=m2_lobby_snapshot(M2_LOCAL_JOIN,world,NULL,&roster);
+        fprintf(stderr,"Runtime: NpMatching2 room request entered world %u: status %d\n",world,joined);
+        if (joined==200) {
+            session->world=world;
+            session->ctx=event->ctx;
+            session->generation=event->generation;
+            session->ready=0;
+            session->roster=roster;
+            m2_publish_peer_roster(session,&roster);
+            m2_lobby_deadline(session);
+        }
+    }
     if (session->world && session->generation==event->generation &&
         (!job->world || job->world==session->world)) {
         job->request[1]=session->world;

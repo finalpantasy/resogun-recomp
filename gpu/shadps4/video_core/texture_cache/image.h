@@ -174,6 +174,7 @@ public:
 
     vk::ImageUsageFlags usage_flags;
     vk::FormatFeatureFlags2 format_features;
+    bool cube_compatible{}; // resogun: can take the cube views of ImageViewInfo::is_cube
     struct State {
         vk::PipelineStageFlags2 pl_stage = vk::PipelineStageFlagBits2::eAllCommands;
         vk::AccessFlags2 access_mask = vk::AccessFlagBits2::eNone;
@@ -192,6 +193,8 @@ public:
     boost::container::static_vector<u64, 16> mip_hashes{};
     u64 lru_id{};
     u64 hash{};
+    /// resogun: the texture pack key of this image's contents (texture_pack.h); 0: none
+    u64 replacement_key = 0;
 
 private:
     static Common::IncrementalIdProvider<u64> global_image_uid;

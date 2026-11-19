@@ -22,6 +22,8 @@ void runtime_restart(void);
  * runtime_wait_begin() returns 0 when it is off; runtime_wait_end() then does nothing. */
 uint64_t runtime_wait_begin(void);
 void runtime_wait_end(const char *what,uint64_t start,const char *detail,long long arg);
+/* The calling guest thread's name ("host" off guest threads), for diagnostics. */
+const char *runtime_current_thread_name(void);
 /* The floating-point state a PS4 gives its threads (runtime_thread.c). */
 void runtime_orbis_fpu(void);
 #define ABI __attribute__((sysv_abi))
@@ -60,6 +62,9 @@ int runtime_game_widen(unsigned char *image, uint32_t width_4k);
 /* The Cheats page's hooks (runtime_game.c): at load, before the image is protected. 0, with a log
  * line, when the image is not eboot 01.10 as expected. Which cheats are on is read at each flip. */
 int runtime_game_cheats(unsigned char *image);
+/* Everybody's Golf 1.17: the game's 60 FPS option applies in every scene (runtime_game.c). At
+ * load, before the image is protected; 0, with a log line, when the eboot is not 1.17. */
+int runtime_game_golf_sixty(unsigned char *image);
 uint32_t runtime_game_wide_width(const char *name, uint32_t width, uint32_t height, uint32_t width_4k);
 const char *runtime_import_name(const char *name);
 uintptr_t runtime_rwlock_resolve(const char *name);

@@ -12,12 +12,12 @@ extern "C" {
 namespace ResogunPng {
 
 namespace {
-constexpr int kMaxSide = 4096; // save icons are 228x128; anything far larger is not one
+constexpr int kMaxSide = 8192; // save icons are 228x128; texture pack PNGs (texture_pack.h) up to 8K
 }
 
 bool DecodeRgba(const unsigned char* data, size_t size, Image& out) {
     out = {};
-    if (!data || !size || size > 64u << 20) {
+    if (!data || !size || size > 256u << 20) {
         return false;
     }
     const AVCodec* codec = avcodec_find_decoder(AV_CODEC_ID_PNG);
@@ -66,7 +66,7 @@ bool LoadRgba(const char* path, Image& out) {
     std::vector<unsigned char> bytes;
     unsigned char chunk[65536];
     size_t n;
-    while ((n = std::fread(chunk, 1, sizeof(chunk), file)) > 0 && bytes.size() <= (64u << 20)) {
+    while ((n = std::fread(chunk, 1, sizeof(chunk), file)) > 0 && bytes.size() <= (256u << 20)) {
         bytes.insert(bytes.end(), chunk, chunk + n);
     }
     std::fclose(file);

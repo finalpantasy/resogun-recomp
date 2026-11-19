@@ -31,6 +31,7 @@
 #include "video_core/texture_cache/image_view.h"
 #include "video_core/texture_cache/sampler.h"
 #include "video_core/texture_cache/tile_manager.h"
+#include "video_core/texture_cache/texture_pack.h"
 
 namespace AmdGpu {
 struct Liverpool;
@@ -162,6 +163,17 @@ public:
     /// Retrieves an image view with the properties of the specified image id.
     /// `refresh` false: an image found out of date is used as is (the texture binding helper
     /// checked it beforehand; only a guest write racing with the draw can make it so).
+    /// resogun: the texture pack view to sample in place of `view` (texture_pack.h), or null.
+    [[nodiscard]] vk::ImageView ReplacementView(const Image& image, const ImageView& view) {
+        return image.replacement_key ? texture_pack.ViewFor(image, view) : vk::ImageView{};
+    }
+    /// resogun: uploads texture pack images decoded since the last call. Main thread.
+    void TickTexturePack() {
+        if (texture_pack.Active()) {
+            texture_pack.Tick();
+        }
+    }
+
     [[nodiscard]] ImageView& FindTexture(ImageId image_id, const ImageDesc& desc,
                                          ViewMemo* memo = nullptr, bool refresh = true);
 
@@ -455,6 +467,7 @@ private:
     PageManager& tracker;
     BlitHelper blit_helper;
     TileManager tile_manager;
+    TexturePack texture_pack;
     Common::SlotVector<Image> slot_images;
     Common::SlotVector<ImageView> slot_image_views;
     tsl::robin_map<u64, Sampler> samplers;

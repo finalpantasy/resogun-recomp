@@ -25,6 +25,7 @@ int runtime_memory_write_backing(uintptr_t, const void*, uint64_t) { std::abort(
 void runtime_memory_read_backing(uintptr_t, void*, uint64_t) { std::abort(); }
 uint64_t runtime_wait_begin() { return 0; }
 void runtime_wait_end(const char*, uint64_t, const char*, long long) {}
+const char* runtime_current_thread_name() { return "host"; }
 void runtime_report() {}
 int runtime_memory_is_mapped(uintptr_t, uint64_t) { return 0; }
 void runtime_game_frame_rate() {}

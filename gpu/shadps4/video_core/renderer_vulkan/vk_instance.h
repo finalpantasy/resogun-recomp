@@ -155,6 +155,11 @@ public:
         return custom_border_color;
     }
 
+    /// Returns true when samplers may take min/max filter reduction (GCN FILTER_MODE).
+    bool IsSamplerFilterMinmaxSupported() const {
+        return vk12_features.samplerFilterMinmax;
+    }
+
     /// Returns true when VK_EXT_shader_stencil_export is supported
     bool IsShaderStencilExportSupported() const {
         return shader_stencil_export;

@@ -34,7 +34,8 @@ game does not import is not kept. `python run.py check` lists any that are missi
 The renderer draws at the game's own resolution (`render_resolution=4k`, the default: PS4 Pro mode,
 `sceKernelIsNeoMode` returns 1 and the video out is 3840x2160; or 1080p) and scales the picture to the
 window in `post_process.frag`. With `sharpening=1` (the default) that pass draws into an image of the
-window's size and FSR 1 RCAS (`rcas.frag`, `host_passes/rcas_pass.cpp`) sharpens it into the frame.
+window's size, upscaling with FSR 1 EASU (`easu()` in `post_process.frag`) when the window is larger
+than the frame, and FSR 1 RCAS (`rcas.frag`, `host_passes/rcas_pass.cpp`) sharpens it into the frame.
 The only overlay is the PS4's system UI (save list, text entry, trophy notices), the Display Settings
 panel, the Cheats page and the exit prompt (`gpu/shim/resogun_overlay.cpp`).
 

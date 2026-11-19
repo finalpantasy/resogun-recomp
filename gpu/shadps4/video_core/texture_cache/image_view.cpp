@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <atomic>
+#include <cstdio>
 #include "common/logging/log.h"
 #include "shader_recompiler/resource.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
@@ -65,6 +67,7 @@ ImageViewInfo::ImageViewInfo(const AmdGpu::Image& image, const Shader::ImageReso
     range.extent.layers = image.NumViewLayers(desc.is_array);
     type = image.GetViewType(desc.is_array);
     min_lod = static_cast<u32>(image.min_lod);
+    is_cube = desc.IsCubeSampled(image);
 
     if (!is_storage) {
         mapping = Vulkan::LiverpoolToVK::ComponentMapping(image.DstSelect());
@@ -142,10 +145,22 @@ ImageView::ImageView(const Vulkan::Instance& instance, const ImageViewInfo& info
         }
     }
 
+    // resogun: a cube view needs a cube-compatible image; the texture cache may resolve the T# to
+    // an image made for another use, which then keeps the 2D array view.
+    auto view_type = ConvertImageViewType(info.type);
+    if (info.is_cube && image.cube_compatible && info.range.extent.layers % 6 == 0) {
+        view_type = vk::ImageViewType::eCubeArray;
+    } else if (info.is_cube) {
+        static std::atomic<bool> logged{false};
+        if (!logged.exchange(true)) {
+            std::printf("ImageView: cube map viewed as a 2D array (%ux%u, %u layers)\n",
+                        image.info.size.width, image.info.size.height, info.range.extent.layers);
+        }
+    }
     const vk::ImageViewCreateInfo image_view_ci = {
         .pNext = &usage_ci,
         .image = image.GetImage(),
-        .viewType = ConvertImageViewType(info.type),
+        .viewType = view_type,
         .format = instance.GetSupportedFormat(format, image.format_features),
         .components = info.mapping,
         .subresourceRange{

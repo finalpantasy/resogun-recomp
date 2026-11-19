@@ -19,6 +19,9 @@ Id EmitLaneId(EmitContext& ctx) {
 }
 
 Id EmitQuadBroadcast(EmitContext& ctx, Id value, Id index) {
+    if (ctx.golf_noquad) {
+        return value;
+    }
     return ctx.OpGroupNonUniformQuadBroadcast(ctx.U32[1], SubgroupScope(ctx), value, index);
 }
 
