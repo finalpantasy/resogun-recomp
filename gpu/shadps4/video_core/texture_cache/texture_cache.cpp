@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <xxhash.h>
 #include "video_core/amdgpu/liverpool.h"
@@ -1255,6 +1257,39 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
     Image& image = slot_images[image_id];
     image.tick_accessed_last = scheduler.CurrentTick();
     TouchImage(image);
+
+    // resogun diagnostics: RESOGUN_WATCH_IMAGE=<hex address> logs every uncached lookup whose range
+    // covers that address: what was asked, what was cached there and which image it got.
+    static const VAddr watch_address = [] {
+        const char* env = std::getenv("RESOGUN_WATCH_IMAGE");
+        return env ? static_cast<VAddr>(std::strtoull(env, nullptr, 16)) : VAddr{0};
+    }();
+    if (watch_address && watch_address >= info.guest_address &&
+        watch_address < info.guest_address + info.guest_size) {
+        std::fprintf(stderr,
+                     "Watch image: binding %u asked %#llx size %#llx %ux%u fmt %s tile %u pitch %u "
+                     "levels %u layers %u -> image %u at %#llx %ux%u fmt %s tile %u (%s, %zu cached "
+                     "overlaps, view mip %d slice %d)\n",
+                     static_cast<u32>(desc.type), static_cast<unsigned long long>(info.guest_address),
+                     static_cast<unsigned long long>(info.guest_size), info.size.width,
+                     info.size.height, vk::to_string(info.pixel_format).c_str(),
+                     static_cast<u32>(info.tile_mode), info.pitch, info.resources.levels,
+                     info.resources.layers, image_id.index,
+                     static_cast<unsigned long long>(image.info.guest_address), image.info.size.width,
+                     image.info.size.height, vk::to_string(image.info.pixel_format).c_str(),
+                     static_cast<u32>(image.info.tile_mode),
+                     created.reason,
+                     image_ids.size(), view_mip, view_slice);
+        for (const auto id : image_ids) {
+            const auto& other = slot_images[id].info;
+            std::fprintf(stderr, "Watch image:   cached image %u at %#llx size %#llx %ux%u fmt %s tile %u\n",
+                         id.index, static_cast<unsigned long long>(other.guest_address),
+                         static_cast<unsigned long long>(other.guest_size), other.size.width,
+                         other.size.height, vk::to_string(other.pixel_format).c_str(),
+                         static_cast<u32>(other.tile_mode));
+        }
+        std::fflush(stderr);
+    }
 
     // If the image requested is a subresource of the image from cache record its location.
     if (view_mip > 0) {

@@ -2,6 +2,8 @@
 #include "video_core/renderer_vulkan/vk_frame_capture.h"
 
 #include <algorithm>
+#include <atomic>
+#include <cstdio>
 #include <cstdlib>
 #include <ctime>
 #include <filesystem>
@@ -264,6 +266,27 @@ void FrameCapture::BeginPass(const VideoCore::ImageInfo* const* colors, u32 num_
     display = display && targets.size() == 1;
     const bool new_pass = !(pass_open && !entries.empty() && !entries.back().compute &&
                             entries.back().colors == targets);
+    // resogun diagnostics: RESOGUN_CAPTURE_TARGET=<hex address> records once from the first pass
+    // that draws into that address until the next display pass, for targets drawn only at load.
+    static const VAddr capture_target = [] {
+        const char* env = std::getenv("RESOGUN_CAPTURE_TARGET");
+        return env ? static_cast<VAddr>(std::strtoull(env, nullptr, 16)) : VAddr{0};
+    }();
+    if (capture_target && new_pass && target_pending.load(std::memory_order_relaxed) &&
+        state.load(std::memory_order_relaxed) != Recording) {
+        for (u32 i = 0; i < num_colors; ++i) {
+            if (colors[i] && colors[i]->guest_address == capture_target) {
+                target_pending.store(false, std::memory_order_relaxed);
+                entries.clear();
+                dropped_draws = 0;
+                pass_open = false;
+                state.store(Recording, std::memory_order_release);
+                std::fprintf(stderr, "Capture target: recording from pass into %#llx\n",
+                             static_cast<unsigned long long>(capture_target));
+                break;
+            }
+        }
+    }
     if (display && new_pass) {
         if (state.load(std::memory_order_relaxed) == Recording) {
             Write(last_presented.load(std::memory_order_relaxed));
@@ -276,10 +299,14 @@ void FrameCapture::BeginPass(const VideoCore::ImageInfo* const* colors, u32 num_
         // The pass that starts the recording bound its textures and buffers before it began
         // (BindResources runs before BeginRendering), while the capture was only armed: they
         // belong to its first draw and are kept, else that draw shows no samples or constants.
-        entries.clear();
-        dropped_draws = 0;
-        pass_open = false;
-        state.store(Recording, std::memory_order_release);
+        // Only an armed capture starts here: a pending capture target keeps passes looked at
+        // while the state stays Idle.
+        if (state.load(std::memory_order_relaxed) == Armed) {
+            entries.clear();
+            dropped_draws = 0;
+            pass_open = false;
+            state.store(Recording, std::memory_order_release);
+        }
     }
     if (state.load(std::memory_order_relaxed) != Recording) {
         pending_sampled.clear();

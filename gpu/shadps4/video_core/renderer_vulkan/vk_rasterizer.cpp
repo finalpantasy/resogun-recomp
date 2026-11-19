@@ -3,6 +3,7 @@
 
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <mutex>
 #include <set>
 #include <format>
@@ -3468,10 +3469,14 @@ bool Rasterizer::DrawsFreshTarget() {
     const auto& regs = Regs();
     const u64 frame = ResogunStats::gpu_frames.load(std::memory_order_relaxed);
     bool fresh = false;
+    u32 xscale, yscale;
+    std::memcpy(&xscale, &regs.viewports[0].xscale, sizeof(xscale));
+    std::memcpy(&yscale, &regs.viewports[0].yscale, sizeof(yscale));
+    const u64 view = u64(xscale) << 32 | yscale;
     // Every draw in the first frame of a target's (re)use is fresh, not only the first one.
     const auto note = [&](VAddr address, u32 extent) {
         for (auto& target : recent_targets) {
-            if (target.address == address && target.extent == extent) {
+            if (target.address == address && target.extent == extent && target.view == view) {
                 if (frame - target.frame > RecentFrames) {
                     target.since = frame;
                 }
@@ -3481,7 +3486,7 @@ bool Rasterizer::DrawsFreshTarget() {
             }
         }
         fresh = true;
-        recent_targets.push_back({address, extent, frame, frame});
+        recent_targets.push_back({address, extent, view, frame, frame});
     };
     bool has_color = false;
     for (u32 cb = 0; cb < AmdGpu::NUM_COLOR_BUFFERS; ++cb) {
