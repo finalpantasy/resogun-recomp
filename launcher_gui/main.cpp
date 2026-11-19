@@ -877,7 +877,9 @@ void refresh_online() {
 // Command line options for the game, or false (with a message shown) when the Online page is not filled in.
 bool online_arguments(std::wstring& command) {
     const std::string mode = online_mode();
-    if (mode == "off") return true;
+    // Signed in with no server, the game reports "Server connection failed" on the island; signed
+    // out it plays offline without asking.
+    if (mode == "off") { command += L" --np-mode offline"; return true; }
     const std::string name = prefs.get("online_name", "Golfer"), friend_host = prefs.get("online_host");
     if (!valid_online_name(name)) {
         MessageBoxW(window, L"On the Online page, enter a name of 3 to 16 letters, digits, - or _.", kTitle, MB_ICONWARNING);
