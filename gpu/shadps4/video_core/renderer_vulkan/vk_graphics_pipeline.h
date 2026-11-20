@@ -16,6 +16,7 @@
 #include <functional>
 #include "video_core/renderer_vulkan/vk_async_compiler.h"
 #include "video_core/renderer_vulkan/vk_pipeline_common.h"
+#include "resogun_toggles.h"
 
 namespace VideoCore {
 class BufferCache;
@@ -120,6 +121,8 @@ public:
     /// Draws record this on the recording thread, so the GPU thread can go on queueing builds.
     void WaitHandles() const {
         if (!HandlesReady()) {
+            ResogunStats::WaitTimer timer{ResogunStats::handle_wait_ns};
+            ResogunStats::handle_waits.fetch_add(1, std::memory_order_relaxed);
             handle_job.Wait();
         }
     }
