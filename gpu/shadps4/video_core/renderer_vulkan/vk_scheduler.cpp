@@ -429,7 +429,10 @@ void Scheduler::SubmitExecution(SubmitInfo& info) {
         // Until the next submission's first timestamp: mostly the GPU waiting for it.
         profiler->Mark(0x5B317ull, [] { return std::string{"(between submissions: GPU idle)"}; });
     }
-    SyncRecording();
+    {
+        ResogunStats::WaitTimer timer{ResogunStats::sync_submit_ns};
+        SyncRecording();
+    }
     // Guest memory copies into staging read by this submission (copy threads).
     WaitHostCopies();
     Check(current_cmdbuf.end());

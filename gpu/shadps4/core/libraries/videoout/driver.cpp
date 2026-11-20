@@ -608,7 +608,8 @@ void VideoOutDriver::Flip(const Request& req) {
                         "programs %u, %.1f ms); "
                         "%llu recorder syncs; "
                         "%.0f write faults/s, %lld hot pages; GPU thread %.2f us/draw, "
-                        "%.0f draws/frame, idle %.1f%%; blocked: recorder %.1f%%, host copies "
+                        "%.0f draws/frame, idle %.1f%%; blocked: recorder %.1f%% (submissions %.1f%%, "
+                        "large pushes %.1f%%), host copies "
                         "%.1f%% (%.0f/frame), copy threads %.1f%%, GPU ticks %.1f%%\n",
                         frames / window, worst_ms, EmulatorSettings.GetVblankFrequency(), compiles,
                         compile_ns / 1e6, capture_ms, async_ms, wait_ms, snapshot_ms, guest_wait_ms,
@@ -620,6 +621,8 @@ void VideoOutDriver::Flip(const Request& req) {
                         us_per_draw, draws_per_frame,
                         ResogunStats::gpu_idle_ns.exchange(0) / (window * 1e7),
                         ResogunStats::sync_recording_ns.exchange(0) / (window * 1e7),
+                        ResogunStats::sync_submit_ns.exchange(0) / (window * 1e7),
+                        ResogunStats::sync_large_ns.exchange(0) / (window * 1e7),
                         ResogunStats::host_copies_wait_ns.exchange(0) / (window * 1e7),
                         frames ? double(ResogunStats::host_copy_waits.exchange(0)) / frames : 0.0,
                         ResogunStats::copy_threads_wait_ns.exchange(0) / (window * 1e7),

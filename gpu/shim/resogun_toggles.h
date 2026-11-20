@@ -124,6 +124,9 @@ struct Timer {
 inline std::atomic<std::uint64_t> gpu_idle_ns{0};
 /// Wall time spent blocked in the scheduler (ns): waiting for the recording thread to drain,
 /// for host copies before a submission or fence, and for GPU ticks.
+/// sync_submit_ns and sync_large_ns: the parts of sync_recording_ns spent before a submission
+/// and before a descriptor push or data block too large for a recording chunk.
+inline std::atomic<std::uint64_t> sync_submit_ns{0}, sync_large_ns{0};
 inline std::atomic<std::uint64_t> sync_recording_ns{0}, host_copies_wait_ns{0}, tick_wait_ns{0},
     copy_threads_wait_ns{0}, host_copy_waits{0};
 struct WaitTimer {

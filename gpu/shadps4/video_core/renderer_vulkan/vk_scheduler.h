@@ -791,7 +791,10 @@ public:
         // once) lives on the heap. Waiting for the recorder first means every command that used
         // an older block has run; the last 8 blocks are kept for commands not yet recorded.
         if (bytes + alignof(T) + 1024 > RecordChunk::Capacity) {
-            SyncRecording();
+            {
+                ResogunStats::WaitTimer timer{ResogunStats::sync_large_ns};
+                SyncRecording();
+            }
             auto& block = large_record_data[large_record_next++ % large_record_data.size()];
             block = std::make_unique<std::max_align_t[]>(bytes / sizeof(std::max_align_t) + 1);
             std::memcpy(block.get(), data.data(), bytes);

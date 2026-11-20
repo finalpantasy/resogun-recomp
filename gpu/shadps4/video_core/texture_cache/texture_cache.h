@@ -491,9 +491,12 @@ private:
     Common::LeastRecentlyUsedCache<ImageId, u64> lru_cache;
     Common::LeastRecentlyUsedCache<u64, u64> sampler_lru_cache;
     const bool readback_linear_images;
+    /// resogun: on by default for Everybody's Golf (RESOGUN_DEFERRED_READBACK=0: off). Image
+    /// readbacks are copied without waiting; the CPU waits only when it touches a pending page.
+    /// Waiting on every readback cost tens of seconds of GPU-thread time on a cold course load.
     const bool deferred_readbacks = [] {
         const char* value = std::getenv("RESOGUN_DEFERRED_READBACK");
-        return value && value[0] == '1';
+        return !value || value[0] != '0';
     }();
     /// resogun: RESOGUN_STALE_READBACK=1 (needs deferred readbacks). A pending copy only blocks CPU
     /// writes: CPU reads see the version the GPU published last (one frame late) instead of

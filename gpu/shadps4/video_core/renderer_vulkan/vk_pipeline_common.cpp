@@ -64,7 +64,10 @@ void Pipeline::BindResources(DescriptorWrites& set_writes,
         // resogun: a push too large for a recording chunk (Everybody's Golf binds thousands of
         // descriptors at once) goes into the command buffer directly, after what was recorded.
         if (bytes + 1024 > RecordChunk::Capacity) {
-            scheduler.SyncRecording();
+            {
+                ResogunStats::WaitTimer timer{ResogunStats::sync_large_ns};
+                scheduler.SyncRecording();
+            }
             scheduler.CommandBuffer().pushDescriptorSetKHR(bind_point, layout, 0, set_writes);
             return;
         }
