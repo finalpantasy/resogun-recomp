@@ -145,8 +145,9 @@ struct WaitTimer {
     }
 };
 /// Recording-thread waits for a deferred graphics pipeline's handles (GraphicsPipeline::WaitHandles):
-/// count and wall time (ns). The GPU thread's host-copy waits include them.
-inline std::atomic<std::uint64_t> handle_waits{0}, handle_wait_ns{0};
+/// count and wall time (ns). The GPU thread's host-copy waits include them. handle_runs: those
+/// where the build was still queued, so the recording thread ran it itself.
+inline std::atomic<std::uint64_t> handle_waits{0}, handle_wait_ns{0}, handle_runs{0};
 /// GPU thread rusage, refreshed after each graphics submission.
 inline std::atomic<std::uint64_t> gpu_sys_us{0}, gpu_user_us{0}, gpu_invol_switches{0},
     gpu_vol_switches{0}, gpu_minor_faults{0};

@@ -611,7 +611,7 @@ void VideoOutDriver::Flip(const Request& req) {
                         "%.0f draws/frame, idle %.1f%%; blocked: recorder %.1f%% (submissions %.1f%%, "
                         "large pushes %.1f%%), host copies "
                         "%.1f%% (%.0f/frame), copy threads %.1f%%, GPU ticks %.1f%%; "
-                        "recorder pipeline waits %llu, %.1f ms\n",
+                        "recorder pipeline waits %llu (%llu run there), %.1f ms\n",
                         frames / window, worst_ms, EmulatorSettings.GetVblankFrequency(), compiles,
                         compile_ns / 1e6, capture_ms, async_ms, wait_ms, snapshot_ms, guest_wait_ms,
                         pending_draws, build_waits, build_wait_ms, fresh_waits, fresh_wait_ms,
@@ -629,6 +629,7 @@ void VideoOutDriver::Flip(const Request& req) {
                         ResogunStats::copy_threads_wait_ns.exchange(0) / (window * 1e7),
                         ResogunStats::tick_wait_ns.exchange(0) / (window * 1e7),
                         static_cast<unsigned long long>(ResogunStats::handle_waits.exchange(0)),
+                        static_cast<unsigned long long>(ResogunStats::handle_runs.exchange(0)),
                         ResogunStats::handle_wait_ns.exchange(0) / 1e6);
             presenter->GetRasterizer().GetPipelineCache().ReportCompilerStats();
             Vulkan::WaitDiagnostics::Report();

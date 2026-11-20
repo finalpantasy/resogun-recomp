@@ -123,13 +123,13 @@ public:
     bool Pending() const { return future.valid(); }
     bool Failed() const { return failed; }
     const std::string& Error() const { return error; }
-    void Wait() const {
-        if (task) {
-            task->Run(); // no-op once a worker has it
-        }
+    /// True when this thread ran the task itself (it was still queued).
+    bool Wait() const {
+        const bool ran = task && task->Run(); // no-op once a worker has it
         if (future.valid()) {
             future.wait();
         }
+        return ran;
     }
     std::optional<T> Poll() {
         if (!future.valid() || future.wait_for(std::chrono::seconds{0}) != std::future_status::ready) {
@@ -150,11 +150,13 @@ private:
     struct Claimable {
         template <typename F>
         explicit Claimable(F&& function) : task{std::forward<F>(function)} {}
-        void Run() {
-            if (!claimed.exchange(true, std::memory_order_acq_rel)) {
-                task();
-                task = {}; // drops the callable, whose captures often own this job (a cycle)
+        bool Run() {
+            if (claimed.exchange(true, std::memory_order_acq_rel)) {
+                return false;
             }
+            task();
+            task = {}; // drops the callable, whose captures often own this job (a cycle)
+            return true;
         }
         std::packaged_task<T()> task;
         std::atomic<bool> claimed{false};

@@ -123,7 +123,9 @@ public:
         if (!HandlesReady()) {
             ResogunStats::WaitTimer timer{ResogunStats::handle_wait_ns};
             ResogunStats::handle_waits.fetch_add(1, std::memory_order_relaxed);
-            handle_job.Wait();
+            if (handle_job.Wait()) {
+                ResogunStats::handle_runs.fetch_add(1, std::memory_order_relaxed);
+            }
         }
     }
 
