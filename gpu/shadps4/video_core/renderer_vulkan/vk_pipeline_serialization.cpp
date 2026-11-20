@@ -357,6 +357,9 @@ std::pair<u64, u64> Prune(const std::filesystem::path& directory, const Key& glo
     std::vector<Entry> entries;
     std::vector<fs::path> temporary;
     u64 total = 0;
+    // A pipeline file that could not be read (locked, or a read error) is skipped, not treated as
+    // foreign; its shared references are then unknown, so no shared file counts as an orphan.
+    bool unread = false;
     std::error_code error;
     for (fs::directory_iterator it(directory / "shared", error), end; !error && it != end;
          it.increment(error)) {
@@ -367,9 +370,10 @@ std::pair<u64, u64> Prune(const std::filesystem::path& directory, const Key& glo
         if (it->path().extension() == ".tmp") {
             temporary.push_back(it->path());
         } else if (it->path().extension() == ".bin") {
+            // A size that cannot be read counts as 0 (file_size returns -1, which would wrap total).
             const u64 size = it->file_size(status);
-            shared[it->path().filename().string()].size = size;
-            total += size;
+            shared[it->path().filename().string()].size = status ? 0 : size;
+            total += status ? 0 : size;
         }
     }
     error.clear();
@@ -390,9 +394,15 @@ std::pair<u64, u64> Prune(const std::filesystem::path& directory, const Key& glo
             continue;
         }
         const auto bytes = ReadFile(it->path());
+        const auto time = it->last_write_time(status);
+        const u64 size = status ? 0 : it->file_size(status);
+        // Empty or oversized files are junk (foreign); any other failure to read is skipped.
+        if (status || (!bytes && size != 0 && size <= MaxFileSize)) {
+            unread = true;
+            continue;
+        }
         const auto parsed = bytes ? Parse(*bytes) : std::nullopt;
-        Entry entry{it->last_write_time(status), it->path(), it->file_size(status),
-                    !parsed || parsed->global != global, {}};
+        Entry entry{time, it->path(), size, !parsed || parsed->global != global, {}};
         total += entry.size;
         if (parsed && parsed->version == 2) {
             for (const auto& binary : parsed->binaries) {
@@ -438,7 +448,7 @@ std::pair<u64, u64> Prune(const std::filesystem::path& directory, const Key& glo
         remove(path, 0);
     }
     for (const auto& [name, file] : shared) {
-        if (file.references == 0) {
+        if (file.references == 0 && !unread) {
             remove(directory / "shared" / name, file.size);
         }
     }
