@@ -33,6 +33,7 @@
 #include "core/emulator_settings.h"
 #include "shader_recompiler/frontend/fetch_shader.h"
 #include "shader_recompiler/info.h"
+#include "shader_recompiler/ir/passes/ir_passes.h"
 #include "video_core/cache_storage.h"
 #include "video_core/renderer_vulkan/vk_amd_paths.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
@@ -42,7 +43,9 @@
 
 namespace Serialization {
 /* You should increment versions below once corresponding serialization scheme is changed. */
-static constexpr u32 ShaderBinaryVersion = 8u; // resogun: v_writelane and spilled SGPR reloads (golf-fix v41)
+// resogun: 8 = v_writelane and spilled SGPR reloads (golf-fix v41); 10 = relative VGPR access
+// through a private array in programs with long select chains (VgprArrayPass).
+static constexpr u32 ShaderBinaryVersion = 10u;
 static constexpr u32 ShaderMetaVersion = 10u; // resogun: images and samplers specialize on golf-fix v22's LOD 0 sampling
 static constexpr u32 PipelineKeyVersion = 6u; // resogun: Info layout (larger image and sampler lists)
 } // namespace Serialization
@@ -53,7 +56,9 @@ namespace {
 // resogun: RESOGUN_AMD_PATHS_OFF=shaderext changes recompiled SPIR-V, so it gets its own shader
 // binary cache version (distinct from every plain version bump).
 u32 CurrentShaderBinaryVersion() {
-    return Serialization::ShaderBinaryVersion + (AmdPathsOff::Current().shaderext ? 32u : 0u);
+    // resogun: RESOGUN_VGPR_ARRAY also changes recompiled SPIR-V (VgprArrayPass).
+    return Serialization::ShaderBinaryVersion + (AmdPathsOff::Current().shaderext ? 32u : 0u) +
+           Shader::Optimization::VgprArrayMode() * 64u;
 }
 } // namespace
 
@@ -943,7 +948,12 @@ vk::ResultValue<vk::UniquePipeline> CreateCachedGraphicsPipeline(
         }
         CountDictionary(DictionaryHash(binaries), &DictionaryCounts::captured);
         // resogun: a compile this long stalls a load when the GPU thread waits for it.
-        if (compile_ms >= 1000.0) {
+        // RESOGUN_PIPELINE_SLOW_MS lowers the threshold (0 logs every compile).
+        static const double slow_ms = [] {
+            const char* const env = std::getenv("RESOGUN_PIPELINE_SLOW_MS");
+            return env ? std::atof(env) : 1000.0;
+        }();
+        if (compile_ms >= slow_ms) {
             std::printf("Pipeline slow compile: %.0f ms, %s, dictionary %s, stages %016zx %016zx %016zx\n",
                         compile_ms, file.filename().string().c_str(),
                         DictionaryHash(binaries) ? "yes" : "no", key.stage_hashes[0],

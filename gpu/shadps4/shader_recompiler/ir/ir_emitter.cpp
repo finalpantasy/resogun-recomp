@@ -153,6 +153,22 @@ void IREmitter::SetVectorReg(IR::VectorReg reg, const U32F32& value) {
     Inst(Opcode::SetVectorRegister, reg, value_typed);
 }
 
+U32 IREmitter::GetVectorRegIndexed(IR::VectorReg base, const U32& index) {
+    return Inst<U32>(Opcode::GetVectorRegisterIndexed, base, index);
+}
+
+void IREmitter::SetVectorRegIndexed(IR::VectorReg base, const U32& index, const U32& value) {
+    Inst(Opcode::SetVectorRegisterIndexed, base, index, value);
+}
+
+U32 IREmitter::ReadVgprArray(const U32& index) {
+    return Inst<U32>(Opcode::ReadVgprArray, index);
+}
+
+void IREmitter::WriteVgprArray(const U32& index, const U32& value) {
+    Inst(Opcode::WriteVgprArray, index, value);
+}
+
 Value IREmitter::GetVirtualReg(IR::VirtualReg reg) {
     return Inst(Opcode::GetVirtualRegister, reg);
 }

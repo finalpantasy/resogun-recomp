@@ -90,6 +90,9 @@ IR::Program TranslateProgram(const std::span<const u32>& code, Pools& pools, Inf
     Gcn::CFG cfg{gcn_block_pool, program.ins_list};
     EmitControlFlowGraph(program, pools, cfg, runtime_info, profile);
 
+    // resogun: relative VGPR access goes through a private array, before SSA sees the registers.
+    Shader::Optimization::VgprArrayPass(program, runtime_info.props.num_allocated_vgprs);
+
     // On NVIDIA GPUs HW interpolation of clip distance values seems broken, and we need to emulate
     // it with expensive discard in PS.
     Shader::InjectClipDistanceAttributes(program, runtime_info);

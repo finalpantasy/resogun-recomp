@@ -51,6 +51,8 @@ bool Inst::MayHaveSideEffects() const noexcept {
     case Opcode::StoreBufferU8:
     case Opcode::StoreBufferU16:
     case Opcode::StoreBufferU32:
+    case Opcode::SetVectorRegisterIndexed:
+    case Opcode::WriteVgprArray:
     case Opcode::StoreBufferU32x2:
     case Opcode::StoreBufferU32x3:
     case Opcode::StoreBufferU32x4:

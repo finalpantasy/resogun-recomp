@@ -579,6 +579,22 @@ void EmitSetVectorRegister(EmitContext& ctx) {
     UNREACHABLE_MSG("Unreachable instruction");
 }
 
+void EmitGetVectorRegisterIndexed(EmitContext& ctx) {
+    UNREACHABLE_MSG("Unreachable instruction");
+}
+
+void EmitSetVectorRegisterIndexed(EmitContext& ctx) {
+    UNREACHABLE_MSG("Unreachable instruction");
+}
+
+Id EmitReadVgprArray(EmitContext& ctx, Id index) {
+    return ctx.OpLoad(ctx.U32[1], ctx.OpAccessChain(ctx.vgpr_array_pointer, ctx.vgpr_array, index));
+}
+
+void EmitWriteVgprArray(EmitContext& ctx, Id index, Id value) {
+    ctx.OpStore(ctx.OpAccessChain(ctx.vgpr_array_pointer, ctx.vgpr_array, index), value);
+}
+
 void EmitSetVirtualRegister(EmitContext& ctx) {
     UNREACHABLE_MSG("Unreachable instruction");
 }

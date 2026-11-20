@@ -54,6 +54,11 @@ public:
     [[nodiscard]] T GetVectorReg(IR::VectorReg reg);
     void SetScalarReg(IR::ScalarReg reg, const U32F32& value);
     void SetVectorReg(IR::VectorReg reg, const U32F32& value);
+    // resogun: relative VGPR access (v_movrels/v_movreld), lowered by VgprArrayPass.
+    [[nodiscard]] U32 GetVectorRegIndexed(IR::VectorReg base, const U32& index);
+    void SetVectorRegIndexed(IR::VectorReg base, const U32& index, const U32& value);
+    [[nodiscard]] U32 ReadVgprArray(const U32& index);
+    void WriteVgprArray(const U32& index, const U32& value);
 
     [[nodiscard]] Value GetVirtualReg(IR::VirtualReg reg);
     void SetVirtualReg(IR::VirtualReg reg, const Value& value);
