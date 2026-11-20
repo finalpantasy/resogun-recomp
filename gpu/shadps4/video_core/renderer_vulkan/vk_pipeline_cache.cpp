@@ -449,6 +449,9 @@ std::atomic<u32> g_resogun_compiles;
 std::atomic<u64> g_resogun_capture_ns, g_resogun_async_ns, g_resogun_compile_wait_ns;
 std::atomic<u64> g_resogun_snapshot_ns, g_resogun_guest_wait_ns;
 std::atomic<u32> g_resogun_pool_reuses;
+// resogun: compile-thread time per shader: SPIR-V emission and driver module creation.
+std::atomic<u64> g_resogun_emit_ns, g_resogun_module_ns;
+std::atomic<u32> g_resogun_async_shaders;
 std::atomic<u32> g_resogun_pending_draws;
 // resogun: waits of the GPU thread for an async build at the skip budget, and their time.
 std::atomic<u32> g_resogun_build_waits;
@@ -609,14 +612,21 @@ bool PipelineCache::QueueShader(Program& program, HwStage stage, SwStage l_stage
     const bool queued = build->job.Start(*compiler, [this, build] {
         PhaseTimer compile{g_resogun_async_ns};
         Shader::Gcn::ScopedFetchShaderSnapshot snapshot{build->fetch};
+        const auto emit_start = std::chrono::steady_clock::now();
         auto spv = Shader::Backend::SPIRV::EmitSPIRV(profile, build->runtime, *build->ir,
                                                     build->binding);
+        const auto module_start = std::chrono::steady_clock::now();
+        g_resogun_emit_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                 module_start - emit_start).count();
         DumpShader(build->code, build->info.pgm_hash, build->info.hw_stage, build->permutation, "bin");
         DumpShader(spv, build->info.pgm_hash, build->info.hw_stage, build->permutation, "spv");
         auto patch = GetShaderPatch(build->info.pgm_hash, build->info.hw_stage,
                                     build->permutation, "spv");
         build->module = CompileSPV(patch && EmulatorSettings.IsPatchShaders() ? *patch : spv,
                                     instance.GetDevice());
+        g_resogun_module_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                   std::chrono::steady_clock::now() - module_start).count();
+        ++g_resogun_async_shaders;
         build->binary = std::move(spv);
         build->ir.reset();
         compiler_pools.Recycle(std::move(build->pools));
@@ -819,6 +829,27 @@ void PipelineCache::SeedWorkerCaches() {
 
 void PipelineCache::ReportCompilerStats() {
     if (compiler) {
+        extern std::atomic<u64> g_resogun_pipeline_total_ns, g_resogun_pipeline_driver_ns;
+        extern std::atomic<u32> g_resogun_pipelines_built;
+        // The totals also feed the warm-up report: take differences, not exchange.
+        static u32 last_pipelines;
+        static u64 last_pipeline_ns, last_driver_ns;
+        const u32 pipelines = g_resogun_pipelines_built.load() - last_pipelines;
+        const u64 pipeline_ns = g_resogun_pipeline_total_ns.load() - last_pipeline_ns;
+        const u64 driver_ns = g_resogun_pipeline_driver_ns.load() - last_driver_ns;
+        last_pipelines += pipelines;
+        last_pipeline_ns += pipeline_ns;
+        last_driver_ns += driver_ns;
+        const u32 shaders = g_resogun_async_shaders.exchange(0);
+        const u64 emit_ns = g_resogun_emit_ns.exchange(0), module_ns = g_resogun_module_ns.exchange(0);
+        if (pipelines || shaders) {
+            std::printf("Compile cost: %u graphics pipelines, %.1f ms each (driver %.1f ms); "
+                        "%u shaders, SPIR-V %.1f ms and module %.1f ms each\n",
+                        pipelines, pipelines ? pipeline_ns / 1e6 / pipelines : 0.0,
+                        pipelines ? driver_ns / 1e6 / pipelines : 0.0, shaders,
+                        shaders ? emit_ns / 1e6 / shaders : 0.0,
+                        shaders ? module_ns / 1e6 / shaders : 0.0);
+        }
         std::printf("Compiler stats: capture queue %zu, compile queue %zu; queue waits: capture "
                     "%.1f ms, compile %.1f ms; pools retained %zu, reused %u; pipelines built "
                     "behind their draws %llu\n",

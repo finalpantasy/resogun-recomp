@@ -36,7 +36,7 @@ void LowerBufferFormatToRaw(IR::Program& program);
 void LowerUserClipPlanes(IR::Program& program, const RuntimeInfo& runtime_info);
 void LowerFp64ToFp32(IR::Program& program);
 void VgprArrayPass(IR::Program& program, u32 num_allocated_vgprs);
-u32 VgprArrayMode(); // 0 = long chains only, 1 = never (RESOGUN_VGPR_ARRAY=0), 2 = always
+u32 VgprArrayMode(); // 3 = long chains, write-through (default), 0 = long chains, loads (=loads), 1 = never (=0), 2 = always (=all)
 void RingAccessElimination(const IR::Program& program, const RuntimeInfo& runtime_info);
 void TessellationPreprocess(IR::Program& program, RuntimeInfo& runtime_info);
 void HullShaderTransform(IR::Program& program, const RuntimeInfo& runtime_info);

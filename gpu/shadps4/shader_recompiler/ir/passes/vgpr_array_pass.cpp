@@ -23,8 +23,11 @@ namespace Shader::Optimization {
 //
 // Programs whose chains stay small keep them: private arrays usually live in local memory on the
 // GPU, while short chains stay in registers. Only programs past VgprArraySelectBudget selects use
-// the array. RESOGUN_VGPR_ARRAY=0 keeps the chains everywhere and =all uses the array everywhere;
-// each mode has its own shader cache version.
+// the array. Programs with only relative reads (the common case) write through to it: the
+// registers stay SSA values and only the relative reads load from the array. With every plain
+// access an array load, the largest programs compiled 26% slower on NVIDIA.
+// RESOGUN_VGPR_ARRAY=0 keeps the chains everywhere, =all uses the array everywhere and =loads
+// uses array loads for plain reads too; each mode has its own shader cache version.
 constexpr u32 VgprArraySelectBudget = 4096;
 
 u32 VgprArrayMode() {
@@ -36,7 +39,10 @@ u32 VgprArrayMode() {
         if (env && env[0] == 'a') {
             return 2u;
         }
-        return 0u;
+        if (env && env[0] == 'l') {
+            return 0u;
+        }
+        return 3u;
     }();
     return mode;
 }
@@ -69,6 +75,7 @@ static void LowerToSelectChain(IR::Block& block, IR::Inst& inst, u32 num_allocat
 void VgprArrayPass(IR::Program& program, u32 num_allocated_vgprs) {
     u32 base = std::numeric_limits<u32>::max();
     u64 selects = 0;
+    bool indexed_writes = false;
     // Registers that hold SGPR spills (v_writelane/v_readlane) or feed v_readfirstlane stay out of
     // the array: ReadLaneEliminationPass and sharp tracking follow them through SSA. The compiler
     // never indexes into its spill registers, so their array slots are simply unused.
@@ -87,6 +94,7 @@ void VgprArrayPass(IR::Program& program, u32 num_allocated_vgprs) {
                 const u32 reg = static_cast<u32>(inst.Arg(0).VectorReg());
                 base = std::min(base, reg);
                 selects += reg < num_allocated_vgprs ? num_allocated_vgprs - reg : 0;
+                indexed_writes |= inst.GetOpcode() == IR::Opcode::SetVectorRegisterIndexed;
                 break;
             }
             case IR::Opcode::ReadLane:
@@ -110,7 +118,7 @@ void VgprArrayPass(IR::Program& program, u32 num_allocated_vgprs) {
         return;
     }
     const u32 mode = VgprArrayMode();
-    if (mode == 1 || (mode == 0 && selects <= VgprArraySelectBudget)) {
+    if (mode == 1 || (mode != 2 && selects <= VgprArraySelectBudget)) {
         for (IR::Block* const block : program.blocks) {
             for (IR::Inst& inst : block->Instructions()) {
                 const IR::Opcode op = inst.GetOpcode();
@@ -129,6 +137,43 @@ void VgprArrayPass(IR::Program& program, u32 num_allocated_vgprs) {
         const u32 index = static_cast<u32>(reg);
         return index >= base && index < num_allocated_vgprs && !lane_regs[index];
     };
+    // Write-through: with only relative reads, the registers stay SSA values and every write in
+    // the range also goes to the array, which only the relative reads load from. Most accesses
+    // are plain ones, and as array loads they made the driver compile slowly.
+    if (mode == 3 && !indexed_writes) {
+        for (IR::Block* const block : program.blocks) {
+            for (IR::Inst& inst : block->Instructions()) {
+                switch (inst.GetOpcode()) {
+                case IR::Opcode::SetVectorRegister: {
+                    const IR::VectorReg reg = inst.Arg(0).VectorReg();
+                    if (in_array(reg)) {
+                        auto next = IR::Block::InstructionList::s_iterator_to(inst);
+                        IR::IREmitter ir{*block, ++next};
+                        ir.WriteVgprArray(ir.Imm32(static_cast<u32>(reg) - base),
+                                          IR::U32{inst.Arg(1)});
+                    }
+                    break;
+                }
+                case IR::Opcode::GetVectorRegisterIndexed: {
+                    IR::IREmitter ir{*block, IR::Block::InstructionList::s_iterator_to(inst)};
+                    const u32 reg = static_cast<u32>(inst.Arg(0).VectorReg());
+                    const IR::U32 index{inst.Arg(1)};
+                    const IR::U1 in_range{
+                        ir.ILessThan(index, ir.Imm32(num_allocated_vgprs - reg), false)};
+                    const IR::U32 slot{ir.IAdd(index, ir.Imm32(reg - base))};
+                    const IR::U32 value{
+                        ir.ReadVgprArray(IR::U32{ir.Select(in_range, slot, ir.Imm32(0u))})};
+                    const IR::U32 v0{ir.GetVectorReg<IR::U32>(IR::VectorReg::V0)};
+                    inst.ReplaceUsesWithAndRemove(ir.Select(in_range, value, v0));
+                    break;
+                }
+                default:
+                    break;
+                }
+            }
+        }
+        return;
+    }
     for (IR::Block* const block : program.blocks) {
         for (IR::Inst& inst : block->Instructions()) {
             switch (inst.GetOpcode()) {
