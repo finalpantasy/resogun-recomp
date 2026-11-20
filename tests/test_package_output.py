@@ -49,7 +49,7 @@ class PackageOutputTests(unittest.TestCase):
 
                 self.assertEqual(player.read_bytes(), b"prior player archive")
                 self.assertEqual(symbols.read_bytes(), b"prior symbols archive")
-                self.assertEqual(set(output.iterdir()), {output / executable, player, symbols})
+                self.assertEqual({path.name for path in output.iterdir()}, {executable, player.name, symbols.name})
 
     def test_failed_appimage_keeps_previous_tarballs_and_image(self):
         with TemporaryDirectory() as temp:
@@ -86,7 +86,7 @@ class PackageOutputTests(unittest.TestCase):
 
             for path in previous:
                 self.assertEqual(path.read_bytes(), path.name.encode())
-            self.assertEqual(set(output.iterdir()), {output / executable, *previous})
+            self.assertEqual({path.name for path in output.iterdir()}, {executable, *(path.name for path in previous)})
 
     def test_dependency_conflicts_leave_destination_untouched(self):
         fixtures = (

@@ -17,6 +17,9 @@ int resogun_frame_rate_priority(void) { return 0; }
 void resogun_set_frame_rate(int rate) { (void)rate; }
 int resogun_cheats(void) { return 0; }
 int resogun_game_held(void) { return 0; }
+int resogun_render_height(void) { return 0; }
+int resogun_render_4k(void) { return 0; }
+void runtime_memory_want_pool(uint64_t mb) { (void)mb; }
 int runtime_verbose(void) { return 0; }
 void *runtime_low_map(size_t size, int prot) {
     (void)prot;

@@ -128,56 +128,87 @@ void TestDriverFallback(const std::filesystem::path& root) {
         assert(result.result == vk::Result::eSuccess);
     }
     assert(compiled == 0 && restored == 1 && destroyed == 2);
-    assert(Vulkan::PipelineBinaryCache::Load(legacy / "0304.bin", {1, 2}, {3, 4}, 0));
+    // The migrated copy (named by driver key and draw state) restores without the legacy file.
+    std::filesystem::remove(legacy / "000000000000002a_0304.bin");
+    {
+        auto result = Vulkan::CreateCachedGraphicsPipeline(device, cache, info, key, global,
+                                                           legacy);
+        assert(result.result == vk::Result::eSuccess);
+    }
+    assert(compiled == 0 && restored == 2 && destroyed == 4);
     restored = destroyed = 0;
     create();
     assert(compiled == 1 && restored == 0 && destroyed == 2 && released == 1);
     create();
     assert(compiled == 1 && restored == 1 && destroyed == 4 && released == 1);
-    // The exact driver key must survive changes to the emulator's graphics key.
+    // Files are named by driver key and a hash of the emulator key and draw state (pipelines
+    // with one driver key but different state overwrote each other's file): another graphics
+    // key compiles and gets a file of its own.
+    struct Counts {
+        int compiled, restored, destroyed, released;
+    };
+    const auto counts = [&] { return Counts{int(compiled), int(restored), int(destroyed), int(released)}; };
+    const auto expect = [&](const Counts& before, int c, int r, int d, int l) {
+        const Counts now = counts();
+        assert(now.compiled - before.compiled == c && now.restored - before.restored == r &&
+               now.destroyed - before.destroyed == d && now.released - before.released == l);
+    };
     auto other_key = key;
     other_key.stage_hashes[0] = 123;
+    auto before = counts();
     {
         auto result = Vulkan::CreateCachedGraphicsPipeline(device, cache, info, other_key, global,
                                                            root);
         assert(result.result == vk::Result::eSuccess);
     }
-    assert(compiled == 1 && restored == 2);
-    restored = 1;
-    destroyed -= 2;
+    expect(before, 1, 0, 2, 1);
+    before = counts();
+    create();
+    expect(before, 0, 1, 2, 0);
+    // Binary handles the driver rejects, then a pipeline it rejects: both compile again.
+    before = counts();
     reject_binary = true;
     create();
-    assert(compiled == 2 && restored == 1 && destroyed == 7 && released == 2);
+    expect(before, 1, 0, 3, 1);
     reject_binary = false;
+    before = counts();
     reject_pipeline = true;
     create();
-    assert(compiled == 3 && restored == 2 && destroyed == 11 && released == 3);
+    expect(before, 1, 1, 4, 1);
     reject_pipeline = false;
-    const auto file = std::filesystem::directory_entry(root / "0304.bin");
-    {
-        std::ofstream corrupt(file.path(), std::ios::binary);
-        corrupt << "broken";
+    std::filesystem::path file;
+    for (const auto& entry : std::filesystem::directory_iterator(root)) {
+        if (entry.path().filename().string().starts_with("0304-")) {
+            file = entry.path();
+            std::ofstream corrupt(file, std::ios::binary);
+            corrupt << "broken";
+        }
     }
+    assert(!file.empty());
+    before = counts();
     fail_capture = true;
     create();
-    assert(compiled == 4 && released == 4 && destroyed == 11);
+    expect(before, 1, 0, 0, 1);
     fail_capture = false;
+    before = counts();
     fail_compile = true;
     create();
-    assert(compiled == 6 && released == 4);
+    assert(int(compiled) - before.compiled == 2 && int(released) == before.released);
     fail_compile = false;
+    before = counts();
     {
         auto result = Vulkan::CreateCachedGraphicsPipeline(device, cache, info, key, {}, root);
         assert(result.result == vk::Result::eSuccess);
     }
-    assert(compiled == 7 && released == 4);
+    assert(int(compiled) - before.compiled == 1 && int(released) == before.released);
     // A path below a file cannot be written, but pipeline creation must still succeed.
+    before = counts();
     {
         auto result = Vulkan::CreateCachedGraphicsPipeline(device, cache, info, key, global,
-                                                           file.path() / "blocked");
+                                                           file / "blocked");
         assert(result.result == vk::Result::eSuccess);
     }
-    assert(compiled == 8 && released == 5 && destroyed == 13);
+    expect(before, 1, 0, 2, 1);
     dispatch = original;
 }
 
