@@ -192,7 +192,7 @@ if (WIN32)
     target_link_options(resogun PRIVATE -Wl,--disable-high-entropy-va "SHELL:-Xlinker --stack -Xlinker 16777216,16777216")
     # Its manifest names the libs assembly (res/libs.manifest), which must sit beside it: libs/.
     set_property(SOURCE ../res/resogun.rc APPEND PROPERTY OBJECT_DEPENDS
-        ${CMAKE_CURRENT_SOURCE_DIR}/../res/resogun.manifest ${CMAKE_CURRENT_SOURCE_DIR}/../res/resogun.ico)
+        ${CMAKE_CURRENT_SOURCE_DIR}/../res/resogun.manifest ${CMAKE_CURRENT_SOURCE_DIR}/../res/golf.ico)
     add_custom_command(TARGET resogun POST_BUILD COMMAND ${CMAKE_COMMAND} -E copy_if_different
         ${CMAKE_CURRENT_SOURCE_DIR}/../res/libs.manifest $<TARGET_FILE_DIR:resogun>/libs/libs.manifest)
     # resogun-setup.exe (setup/): sets up a release folder (tools/package.py) from a player's dump.

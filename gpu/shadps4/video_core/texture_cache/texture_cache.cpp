@@ -884,11 +884,13 @@ std::tuple<ImageId, int, int> TextureCache::ResolveOverlap(const ImageInfo& imag
             image_info.size == cache_image.info.size &&
             is_1d(image_info.type) != is_1d(cache_image.info.type) &&
             IsVulkanFormatCompatible(cache_image.info.pixel_format, image_info.pixel_format)) {
+            // The first 8, then every power of two, so a log shows how often this repeats.
             static std::atomic<u32> logged{};
-            if (logged.fetch_add(1) < 8) {
-                LOG_ERROR(Render_Vulkan, "resogun: {}x{} image at {:#x} recreated as type {}",
+            const u32 count = logged.fetch_add(1) + 1;
+            if (count <= 8 || (count & (count - 1)) == 0) {
+                LOG_ERROR(Render_Vulkan, "resogun: {}x{} image at {:#x} recreated as type {} ({} times)",
                           image_info.size.width, image_info.size.height, image_info.guest_address,
-                          static_cast<int>(image_info.type));
+                          static_cast<int>(image_info.type), count);
             }
             return {ExpandImage(image_info, cache_image_id), -1, -1};
         }

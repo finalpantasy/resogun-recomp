@@ -1273,6 +1273,24 @@ bool HandleEvent(const SDL_Event& event) {
         ResogunSettings::SaveDisplay();
         return true;
     }
+    // F11 or Alt+Enter switches between a window and the last full-screen mode (borderless at
+    // first); the window thread applies the change (WindowSDL, display_mode), saved at once.
+    if (event.type == SDL_EVENT_KEY_DOWN && !event.key.repeat && !text_entry_active &&
+        (event.key.key == SDLK_F11 ||
+         ((event.key.key == SDLK_RETURN || event.key.key == SDLK_KP_ENTER) && (event.key.mod & SDL_KMOD_ALT)))) {
+        auto& s = ResogunSettings::Get();
+        static int full_mode = ResogunGraphics::Borderless;
+        if (s.display_mode == ResogunGraphics::Windowed) {
+            s.display_mode = full_mode;
+            ShowNotice(full_mode == ResogunGraphics::Fullscreen ? "Fullscreen" : "Borderless fullscreen", 1500);
+        } else {
+            full_mode = s.display_mode;
+            s.display_mode = ResogunGraphics::Windowed;
+            ShowNotice("Windowed", 1500);
+        }
+        ResogunSettings::SaveDisplay();
+        return true;
+    }
     // F4 asks to close the game anywhere; Alt+F4 still closes the window at once.
     if (event.type == SDL_EVENT_KEY_DOWN && event.key.key == SDLK_F4 && !event.key.repeat && !text_entry_active &&
         !(event.key.mod & SDL_KMOD_ALT)) {
