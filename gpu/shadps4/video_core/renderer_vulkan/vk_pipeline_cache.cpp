@@ -79,6 +79,18 @@ struct AsyncGraphicsCompilation {
     std::unique_ptr<GraphicsPipeline> pipeline;
 };
 
+// resogun: what a deferred pipeline's CreateHandles job reads (see DeferGraphicsPipeline).
+struct DeferredGraphicsBuild {
+    PipelineSelection selection;
+    GraphicsPipeline::SerializationSupport data;
+    GraphicsPipeline* pipeline{};
+};
+
+// resogun: a deferred pipeline whose build failed has no handle; its draws are skipped.
+static const GraphicsPipeline* Usable(const GraphicsPipeline* pipeline) {
+    return pipeline && pipeline->HandlesReady() && !pipeline->Handle() ? nullptr : pipeline;
+}
+
 constexpr static auto SpirvVersion1_6 = 0x00010600U;
 
 constexpr static std::array DescriptorHeapSizes = {
@@ -440,6 +452,9 @@ std::atomic<u64> g_resogun_build_wait_ns;
 // resogun: the part of those waits for draws into a fresh target (no skip budget).
 std::atomic<u32> g_resogun_fresh_waits;
 std::atomic<u64> g_resogun_fresh_wait_ns;
+// resogun: the part of build waits for shader programs (the rest is pipelines).
+std::atomic<u32> g_resogun_shader_waits;
+std::atomic<u64> g_resogun_shader_wait_ns;
 namespace {
 struct PhaseTimer {
     std::atomic<u64>& counter;
@@ -617,7 +632,12 @@ bool PipelineCache::BuildNow(Program& program, AsyncShaderCompilation* build) {
         return false;
     }
     if (build) {
+        const auto started = std::chrono::steady_clock::now();
         WaitForBuild(build->job);
+        ++g_resogun_shader_waits;
+        g_resogun_shader_wait_ns += u64(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                            std::chrono::steady_clock::now() - started)
+                                            .count());
         ++build_waits;
         PublishShaders();
     }
@@ -715,6 +735,21 @@ void PipelineCache::PublishShaders(bool wait) {
 }
 
 void PipelineCache::PublishGraphics(bool wait) {
+    // Deferred pipelines are already published; once built, their data is saved.
+    std::erase_if(deferred_graphics, [&](const auto& entry) {
+        const auto& [key, build] = entry;
+        if (!build->pipeline->HandlesReady()) {
+            return false;
+        }
+        if (build->pipeline->Handle()) {
+            const auto hash = std::hash<GraphicsPipelineKey>{}(key);
+            if (NewPipelineKey(fmt::format("g_{:#018x}", hash))) {
+                RegisterPipelineData(key, hash, build->data);
+            }
+            ++num_new_pipelines;
+        }
+        return true;
+    });
     for (auto it = pending_graphics.begin(); it != pending_graphics.end();) {
         auto build = it.value();
         if (wait) {
@@ -781,10 +816,12 @@ void PipelineCache::SeedWorkerCaches() {
 void PipelineCache::ReportCompilerStats() {
     if (compiler) {
         std::printf("Compiler stats: capture queue %zu, compile queue %zu; queue waits: capture "
-                    "%.1f ms, compile %.1f ms; pools retained %zu, reused %u\n",
+                    "%.1f ms, compile %.1f ms; pools retained %zu, reused %u; pipelines built "
+                    "behind their draws %llu\n",
                     capture_compiler->Depth(), compiler->Depth(),
                     capture_compiler->QueueWaitNs() / 1e6, compiler->QueueWaitNs() / 1e6,
-                    compiler_pools.Retained(), g_resogun_pool_reuses.exchange(0));
+                    compiler_pools.Retained(), g_resogun_pool_reuses.exchange(0),
+                    static_cast<unsigned long long>(deferred_pipelines));
     }
 }
 
@@ -826,7 +863,42 @@ const GraphicsPipeline* PipelineCache::TryPreparedPipeline(const PreparedDraw& p
         }
     }
     const auto it = graphics_pipelines.find(prepared.key);
-    return it != graphics_pipelines.end() ? it->second.get() : nullptr;
+    return it != graphics_pipelines.end() ? Usable(it->second.get()) : nullptr;
+}
+
+// resogun: a draw that may not be skipped would wait for its pipeline here, one build at a
+// time. Instead the pipeline is published at once with only its layout (all the GPU thread
+// needs to bind resources), its Vulkan pipelines are built on a compiler thread, and the draw's
+// recorded bind waits for them on the recording thread (GraphicsPipeline::WaitHandles). The GPU
+// thread goes on to the next draws, so their builds run alongside. Needs threaded recording and
+// dynamic vertex input (the build then reads no guest memory). RESOGUN_DEFER_PIPELINES=0: off.
+GraphicsPipeline* PipelineCache::DeferGraphicsPipeline() {
+    static const bool enabled = [] {
+        const char* env = std::getenv("RESOGUN_DEFER_PIPELINES");
+        return !(env && *env == '0');
+    }();
+    if (!enabled || !scheduler.IsRecordingDeferred() || !instance.IsVertexInputDynamicState() ||
+        !compiler->HasCapacity()) {
+        return nullptr;
+    }
+    auto build = std::make_shared<DeferredGraphicsBuild>();
+    build->selection = sel;
+    build->selection.regs = nullptr;
+    auto pipeline = std::make_unique<GraphicsPipeline>(
+        instance, scheduler, desc_heap, profile, sel.graphics_key, *pipeline_cache, sel.infos,
+        sel.runtime_infos, sel.fetch_shader, sel.modules, build->data, false, true);
+    build->pipeline = pipeline.get();
+    build->pipeline->StartHandles(*compiler, [this, build] {
+        PhaseTimer compile{g_resogun_async_ns};
+        auto& s = build->selection;
+        build->pipeline->CreateHandles(*worker_pipeline_caches[AsyncCompiler::WorkerIndex()],
+                                       s.infos, s.runtime_infos, s.modules, build->data, false);
+    });
+    deferred_graphics.emplace_back(sel.graphics_key, build);
+    auto* published = build->pipeline;
+    graphics_pipelines.emplace(sel.graphics_key, std::move(pipeline));
+    ++deferred_pipelines;
+    return published;
 }
 
 const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectParams params,
@@ -864,12 +936,20 @@ const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectPar
     if (AsyncCompilation() && !sel.regs->stage_enable.hs_en && !EmulatorSettings.IsShaderCollect()) {
         const auto found = graphics_pipelines.find(sel.graphics_key);
         if (found != graphics_pipelines.end()) {
-            return found->second.get();
+            if (!Usable(found->second.get())) {
+                miss_reason = "pipeline failed";
+            }
+            return Usable(found->second.get());
         }
         // resogun: the draw is skipped while its pipeline builds, for at most
         // SkipFrames() GPU frames; then the GPU thread waits for the build, or builds
         // it here when none could be queued or the async one failed.
         const u8 failures = graphics_misses[sel.graphics_key].failures;
+        if (failures == 0 && SkipFrames() == 0 && !pending_graphics.contains(sel.graphics_key)) {
+            if (auto* deferred = DeferGraphicsPipeline()) {
+                return deferred;
+            }
+        }
         if (failures == 0 && !pending_graphics.contains(sel.graphics_key) && compiler->HasCapacity()) {
             PhaseTimer capture{g_resogun_snapshot_ns};
             auto build = std::make_shared<AsyncGraphicsCompilation>();

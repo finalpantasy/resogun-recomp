@@ -1025,13 +1025,27 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
     const auto& fetch_shader = pipeline->GetFetchShader();
     const auto [vertex_offset, instance_offset] = GetDrawOffsets(regs, vs_info, fetch_shader);
 
-    const vk::Pipeline handle = pipeline->Handle();
-    const vk::Pipeline square = SquarePass(*pipeline);
+    // resogun: a deferred pipeline (PipelineCache::DeferGraphicsPipeline) is resolved when the
+    // draw is recorded, on the recording thread.
+    const GraphicsPipeline* deferred = pipeline->HandlesReady() ? nullptr : pipeline;
+    const vk::Pipeline handle = deferred ? vk::Pipeline{} : pipeline->Handle();
+    const vk::Pipeline square = deferred ? vk::Pipeline{} : SquarePass(*pipeline);
+    const bool square_allowed = deferred && SquareAllowed(false);
     const u32 num_indices = regs.num_indices;
     const u32 num_instances = regs.num_instances.NumInstances();
     const u32 first_vertex = vertex_offset;
     const u32 first_instance = instance_offset;
     scheduler.Record([=](vk::CommandBuffer cmdbuf) {
+        vk::Pipeline bound = handle;
+        vk::Pipeline squared = square;
+        if (deferred) {
+            deferred->WaitHandles();
+            bound = deferred->Handle();
+            squared = square_allowed ? deferred->SquarePassHandle() : vk::Pipeline{};
+            if (!bound) {
+                return; // the build failed: skipped, like a draw without a pipeline
+            }
+        }
         const auto draw = [&] {
             if (is_indexed) {
                 cmdbuf.drawIndexed(num_indices, num_instances, 0, s32(first_vertex),
@@ -1040,10 +1054,10 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
                 cmdbuf.draw(num_indices, num_instances, first_vertex, first_instance);
             }
         };
-        cmdbuf.bindPipeline(vk::PipelineBindPoint::eGraphics, handle);
+        cmdbuf.bindPipeline(vk::PipelineBindPoint::eGraphics, bound);
         draw();
-        if (square) [[unlikely]] {
-            cmdbuf.bindPipeline(vk::PipelineBindPoint::eGraphics, square);
+        if (squared) [[unlikely]] {
+            cmdbuf.bindPipeline(vk::PipelineBindPoint::eGraphics, squared);
             draw();
         }
     });
@@ -1150,14 +1164,23 @@ void Rasterizer::DrawIndirectRecord(const GraphicsPipeline* pipeline, bool is_in
 
     ASSERT(stride == (is_indexed ? sizeof(VkDrawIndexedIndirectCommand)
                                  : sizeof(VkDrawIndirectCommand)));
-    const vk::Pipeline handle = pipeline->Handle();
-    const vk::Pipeline square = SquarePass(*pipeline);
+    const GraphicsPipeline* deferred = pipeline->HandlesReady() ? nullptr : pipeline;
+    const vk::Pipeline handle = deferred ? vk::Pipeline{} : pipeline->Handle();
+    const vk::Pipeline square = deferred ? vk::Pipeline{} : SquarePass(*pipeline);
+    const bool square_allowed = deferred && SquareAllowed(false);
     const vk::Buffer args = buffer->Handle();
     const u64 args_offset = base;
     const vk::Buffer counts = count_address != 0 ? count_buffer->Handle() : vk::Buffer{};
     const u64 counts_offset = count_address != 0 ? count_offset : 0;
     scheduler.Record([=](vk::CommandBuffer cmdbuf) {
-        for (const vk::Pipeline bound : {handle, square}) {
+        vk::Pipeline first = handle;
+        vk::Pipeline second = square;
+        if (deferred) {
+            deferred->WaitHandles();
+            first = deferred->Handle();
+            second = square_allowed ? deferred->SquarePassHandle() : vk::Pipeline{};
+        }
+        for (const vk::Pipeline bound : {first, second}) {
             if (!bound) {
                 break;
             }
@@ -3208,12 +3231,16 @@ void Rasterizer::UpdateViewportScissorState() const {
 
 vk::Pipeline Rasterizer::SquarePass(const GraphicsPipeline& pipeline) const {
     const vk::Pipeline square = pipeline.SquarePassHandle();
+    return square && SquareAllowed(true) ? square : vk::Pipeline{};
+}
+
+bool Rasterizer::SquareAllowed(bool warn) const {
     static const bool enabled = [] {
         const char* env = std::getenv("RESOGUN_SQUARE_PASS");
         return !env || env[0] != '0';
     }();
-    if (!square || !enabled) [[likely]] {
-        return {};
+    if (!enabled) {
+        return false;
     }
     // MIN(s * s, d * d) = MIN(s, d)^2: the second draw needs the first one's coverage, which a
     // depth or stencil write would change.
@@ -3222,13 +3249,13 @@ vk::Pipeline Rasterizer::SquarePass(const GraphicsPipeline& pipeline) const {
                              regs.depth_control.depth_write_enable && regs.depth_buffer.DepthValid();
     if (depth_write || regs.depth_control.stencil_enable) {
         static bool warned = false;
-        if (!std::exchange(warned, true)) {
+        if (warn && !std::exchange(warned, true)) {
             LOG_WARNING(Render_Vulkan, "Scaled MIN/MAX blend not squared: the draw writes depth "
                                        "or stencil");
         }
-        return {};
+        return false;
     }
-    return square;
+    return true;
 }
 
 void Rasterizer::UpdateDepthStencilState() const {

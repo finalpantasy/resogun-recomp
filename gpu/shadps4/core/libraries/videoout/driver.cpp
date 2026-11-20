@@ -47,6 +47,8 @@ extern std::atomic<u64> g_resogun_capture_ns, g_resogun_async_ns, g_resogun_comp
 extern std::atomic<u64> g_resogun_snapshot_ns, g_resogun_guest_wait_ns;
 extern std::atomic<u32> g_resogun_pending_draws, g_resogun_build_waits, g_resogun_fresh_waits;
 extern std::atomic<u64> g_resogun_build_wait_ns, g_resogun_fresh_wait_ns;
+extern std::atomic<u32> g_resogun_shader_waits;
+extern std::atomic<u64> g_resogun_shader_wait_ns;
 } // namespace Vulkan
 
 // resogun: steady-clock ns of the last flip's start and of its event trigger, for the slow-wait
@@ -584,6 +586,8 @@ void VideoOutDriver::Flip(const Request& req) {
             const double build_wait_ms = Vulkan::g_resogun_build_wait_ns.exchange(0) / 1e6;
             const u32 fresh_waits = Vulkan::g_resogun_fresh_waits.exchange(0);
             const double fresh_wait_ms = Vulkan::g_resogun_fresh_wait_ns.exchange(0) / 1e6;
+            const u32 shader_waits = Vulkan::g_resogun_shader_waits.exchange(0);
+            const double shader_wait_ms = Vulkan::g_resogun_shader_wait_ns.exchange(0) / 1e6;
             const u64 direct = Vulkan::Scheduler::direct_recordings.exchange(0);
             const u64 faults = ResogunStats::tracker_faults.exchange(0);
             // GPU command thread CPU time per draw: comparable between builds even when the scene
@@ -600,7 +604,8 @@ void VideoOutDriver::Flip(const Request& req) {
             StatsPrintf(stdout, "Frame stats: %.1f FPS, worst frame %.1f ms (vblank %u Hz); "
                         "%u shader/pipeline compiles, %.1f ms; async: capture %.1f ms, workers "
                         "%.1f ms, sync wait %.1f ms, snapshots %.1f ms, GPU capture wait %.1f ms, "
-                        "%u pending draws, %u build waits %.1f ms (fresh targets %u, %.1f ms); "
+                        "%u pending draws, %u build waits %.1f ms (fresh targets %u, %.1f ms; shader "
+                        "programs %u, %.1f ms); "
                         "%llu recorder syncs; "
                         "%.0f write faults/s, %lld hot pages; GPU thread %.2f us/draw, "
                         "%.0f draws/frame, idle %.1f%%; blocked: recorder %.1f%%, host copies "
@@ -608,6 +613,7 @@ void VideoOutDriver::Flip(const Request& req) {
                         frames / window, worst_ms, EmulatorSettings.GetVblankFrequency(), compiles,
                         compile_ns / 1e6, capture_ms, async_ms, wait_ms, snapshot_ms, guest_wait_ms,
                         pending_draws, build_waits, build_wait_ms, fresh_waits, fresh_wait_ms,
+                        shader_waits, shader_wait_ms,
                         static_cast<unsigned long long>(direct),
                         faults / window,
                         static_cast<long long>(ResogunStats::hot_pages.load()),

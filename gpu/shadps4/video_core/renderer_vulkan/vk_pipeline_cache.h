@@ -46,6 +46,7 @@ class Scheduler;
 class ShaderCache;
 struct AsyncShaderCompilation;
 struct AsyncGraphicsCompilation;
+struct DeferredGraphicsBuild;
 
 struct Program {
     struct Module {
@@ -254,6 +255,10 @@ private:
     /// resogun: StartBackgroundWarmUp state; owned here, deleted by StopWarmUp.
     BackgroundWarmup* background = nullptr;
     tsl::robin_map<GraphicsPipelineKey, std::shared_ptr<AsyncGraphicsCompilation>> pending_graphics;
+    /// resogun: pipelines published before their Vulkan pipelines exist (DeferGraphicsPipeline).
+    std::vector<std::pair<GraphicsPipelineKey, std::shared_ptr<DeferredGraphicsBuild>>> deferred_graphics;
+    GraphicsPipeline* DeferGraphicsPipeline();
+    u64 deferred_pipelines = 0;
     /// resogun: graphics keys whose draws are skipped: GPU frame of the first skip, and
     /// failures (1: the async build failed, the next draw builds it here; 2: that failed too).
     struct GraphicsMiss {

@@ -201,6 +201,8 @@ private:
     void UpdateDepthStencilState() const;
     /// resogun: the squaring pipeline of a scaled MIN/MAX blend when this draw can use it.
     vk::Pipeline SquarePass(const GraphicsPipeline& pipeline) const;
+    /// resogun: whether this draw may add a squaring pass (no depth or stencil write).
+    bool SquareAllowed(bool warn) const;
     void UpdatePrimitiveState(bool is_indexed) const;
     void UpdateRasterizationState() const;
     void UpdateColorBlendingState(const GraphicsPipeline* pipeline) const;
