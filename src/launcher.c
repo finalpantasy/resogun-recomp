@@ -429,6 +429,7 @@ static const Setting settings[] = {
     {"--shader-store-mb", "SHADER_STORE_MB", 0},
     {"--sharpening", "SHARPENING", 0},
     {"--skip-intro", "SKIP_INTRO", 0},
+    {"--skip-pipelines", "SKIP_PIPELINES", 0},
     {"--slow-waits", "SLOW_WAITS", 0},
     {"--slow-waits-thread", "SLOW_WAITS_THREAD", 0},
     {"--smaa", "SMAA", 0},
@@ -492,6 +493,12 @@ static int env_set(const char *suffix, const char *value) {
     char name[128];
     snprintf(name, sizeof name, "RESOGUN_%s", suffix);
     return set_env(name, value);
+}
+
+static int set_pipeline_skip(int skip) {
+    /* Older runtimes use the inverse switch. Keep both launch paths aligned. */
+    return env_set("SKIP_PIPELINES", skip ? "1" : "0") &&
+           env_set("SYNC_PIPELINES", skip ? "0" : "1");
 }
 
 static void usage(void) {
@@ -565,6 +572,15 @@ static int parse(Options *o, int argc, char **argv) {
     for (size_t i = 0; i < sizeof settings / sizeof *settings; ++i) {
         const char *suffix = settings[i].suffix, *value = env_option(suffix);
         if (value && !env_set(suffix, value)) return option_error(settings[i].flag, "invalid environment value");
+    }
+    const char *skip_pipelines = env_option("SKIP_PIPELINES");
+    if (skip_pipelines) {
+        if (strcmp(skip_pipelines, "0") && strcmp(skip_pipelines, "1"))
+            return option_error("--skip-pipelines", "expected 0 or 1");
+        if (!set_pipeline_skip(skip_pipelines[0] == '1')) return LAUNCH_ERROR;
+    } else {
+        const char *sync_pipelines = env_option("SYNC_PIPELINES");
+        if (sync_pipelines && !set_pipeline_skip(sync_pipelines[0] != '1')) return LAUNCH_ERROR;
     }
     int start = 1;
     if (argc > 1 && argv[1][0] != '-') { o->boot = argv[1]; ++start; }
@@ -685,6 +701,15 @@ static int parse(Options *o, int argc, char **argv) {
         if (n == sizeof settings / sizeof *settings) return option_error(flag, "unknown option");
         if (++i >= argc || !argv[i][0] || !strncmp(argv[i], "--", 2)) return option_error(flag, "missing argument");
         const char *value = argv[i];
+        if (!strcmp(flag, "--skip-pipelines")) {
+            if (strcmp(value, "0") && strcmp(value, "1")) return option_error(flag, "expected 0 or 1");
+            if (!set_pipeline_skip(value[0] == '1')) return LAUNCH_ERROR;
+            continue;
+        }
+        if (!strcmp(flag, "--sync-pipelines")) {
+            if (!set_pipeline_skip(value[0] != '1')) return LAUNCH_ERROR;
+            continue;
+        }
         char absolute[PATH_CHARS];
         if (settings[n].path) {
             if (!from_cwd(absolute, value)) return option_error(flag, "invalid path");
