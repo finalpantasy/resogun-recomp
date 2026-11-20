@@ -1042,9 +1042,11 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
             deferred->WaitHandles();
             bound = deferred->Handle();
             squared = square_allowed ? deferred->SquarePassHandle() : vk::Pipeline{};
-            if (!bound) {
-                return; // the build failed: skipped, like a draw without a pipeline
-            }
+        }
+        // The build failed: skipped, like a draw without a pipeline. Also when it failed between
+        // the pipeline lookup and this draw's preparation (ready then, so not deferred).
+        if (!bound) {
+            return;
         }
         const auto draw = [&] {
             if (is_indexed) {

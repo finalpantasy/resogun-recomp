@@ -4,6 +4,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdlib>
+#include <stdexcept>
 #include <cstdio>
 #include <cstring>
 #include <mutex>
@@ -770,6 +771,8 @@ void PipelineCache::PublishGraphics(bool wait) {
             // resogun: a failed deferred build gets the async failure's retry: the next draw
             // builds it on the GPU thread. Recorded binds may still point at the failed one,
             // so it is kept, not freed.
+            LOG_ERROR(Render_Vulkan, "resogun: deferred pipeline {:#x} failed; retrying on the GPU thread",
+                      std::hash<GraphicsPipelineKey>{}(key));
             retired_graphics.push_back(std::move(found.value()));
             graphics_pipelines.erase(found);
             graphics_misses[key].failures = 1;
@@ -936,6 +939,16 @@ GraphicsPipeline* PipelineCache::DeferGraphicsPipeline() {
         sel.runtime_infos, sel.fetch_shader, sel.modules, build->data, false, true);
     build->pipeline = pipeline.get();
     build->pipeline->StartHandles(*compiler, [this, build] {
+        // resogun: RESOGUN_FAIL_DEFERRED=N (diagnostic) fails every Nth deferred build, to
+        // exercise the GPU-thread retry in PublishGraphics.
+        static const u32 fail_every = [] {
+            const char* env = std::getenv("RESOGUN_FAIL_DEFERRED");
+            return env ? u32(std::strtoul(env, nullptr, 10)) : 0u;
+        }();
+        static std::atomic<u32> started{0};
+        if (fail_every && (started.fetch_add(1, std::memory_order_relaxed) + 1) % fail_every == 0) {
+            throw std::runtime_error("RESOGUN_FAIL_DEFERRED");
+        }
         PhaseTimer compile{g_resogun_async_ns};
         auto& s = build->selection;
         build->pipeline->CreateHandles(*worker_pipeline_caches[AsyncCompiler::WorkerIndex()],
