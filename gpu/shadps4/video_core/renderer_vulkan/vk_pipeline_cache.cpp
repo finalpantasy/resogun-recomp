@@ -412,7 +412,11 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
     pipeline_cache = std::move(cache);
     // resogun: shaders and pipelines compile on these threads while the game runs.
     {
-        const auto count = std::clamp(ResogunThreads::Available() / 2, 1u, 6u);
+        // RESOGUN_COMPILE_THREADS=N (1..16) overrides the count, for measurements.
+        const char* threads_env = std::getenv("RESOGUN_COMPILE_THREADS");
+        const auto count = threads_env && std::atoi(threads_env) > 0
+                               ? std::clamp(unsigned(std::atoi(threads_env)), 1u, 16u)
+                               : std::clamp(ResogunThreads::Available() / 2, 1u, 6u);
         const auto capture_count = std::min(2u, std::max(1u, ResogunThreads::Available() / 4));
         for (unsigned i = 0; i < count; ++i) {
             auto [result, worker_cache] = instance.GetDevice().createPipelineCacheUnique({});
