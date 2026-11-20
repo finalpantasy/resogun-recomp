@@ -275,6 +275,8 @@ private:
     const char* miss_reason = "";
     tsl::robin_map<ComputePipelineKey, std::unique_ptr<ComputePipeline>> compute_pipelines;
     tsl::robin_map<GraphicsPipelineKey, std::unique_ptr<GraphicsPipeline>> graphics_pipelines;
+    /// resogun: failed deferred pipelines, kept alive for binds already recorded.
+    std::vector<std::unique_ptr<GraphicsPipeline>> retired_graphics;
     PipelineSelection sel{}; ///< GPU thread selection state
     ComputePipelineKey compute_key{};
     u32 num_new_pipelines{}; // new pipelines added to the cache since the game start

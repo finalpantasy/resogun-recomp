@@ -86,7 +86,8 @@ struct DeferredGraphicsBuild {
     GraphicsPipeline* pipeline{};
 };
 
-// resogun: a deferred pipeline whose build failed has no handle; its draws are skipped.
+// resogun: a deferred pipeline whose build failed has no handle; its draws are skipped until
+// PublishGraphics hands the key to the GPU-thread retry.
 static const GraphicsPipeline* Usable(const GraphicsPipeline* pipeline) {
     return pipeline && pipeline->HandlesReady() && !pipeline->Handle() ? nullptr : pipeline;
 }
@@ -764,6 +765,14 @@ void PipelineCache::PublishGraphics(bool wait) {
                 RegisterPipelineData(key, hash, build->data);
             }
             ++num_new_pipelines;
+        } else if (const auto found = graphics_pipelines.find(key);
+                   found != graphics_pipelines.end() && found->second.get() == build->pipeline) {
+            // resogun: a failed deferred build gets the async failure's retry: the next draw
+            // builds it on the GPU thread. Recorded binds may still point at the failed one,
+            // so it is kept, not freed.
+            retired_graphics.push_back(std::move(found.value()));
+            graphics_pipelines.erase(found);
+            graphics_misses[key].failures = 1;
         }
         return true;
     });
