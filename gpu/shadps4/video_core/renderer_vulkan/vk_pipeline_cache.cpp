@@ -442,12 +442,15 @@ struct PhaseTimer {
     std::atomic<u64>& counter;
     std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
     bool active = true;
+    u64 Elapsed() const {
+        return u64(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                       std::chrono::steady_clock::now() - start).count());
+    }
     void Stop() {
         if (!active) {
             return;
         }
-        counter += u64(std::chrono::duration_cast<std::chrono::nanoseconds>(
-                           std::chrono::steady_clock::now() - start).count());
+        counter += Elapsed();
         active = false;
     }
     ~PhaseTimer() { Stop(); }
@@ -549,6 +552,12 @@ bool PipelineCache::QueueShader(Program& program, HwStage stage, SwStage l_stage
                                                    build->runtime, profile));
         build->spec = Shader::StageSpecialization(build->info, build->runtime, profile, binding);
         build->fetch.Capture(build->info);
+        // resogun: the GPU thread waits for this translation, so a long one stalls the frame.
+        const double translate_ms = capture.Elapsed() / 1e6;
+        if (translate_ms >= 100.0) {
+            std::printf("Shader slow translate: %.0f ms, %#llx/%zu\n", translate_ms,
+                        static_cast<unsigned long long>(build->info.pgm_hash), build->permutation);
+        }
         return true;
     })) {
         return false;
