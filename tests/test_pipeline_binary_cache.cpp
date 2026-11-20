@@ -437,6 +437,43 @@ int main(int argc, char** argv) {
     const auto c = Load(shared_dir / "c.bin", global, {3, 6}, 0);
     assert(c && c->size() == 2 && (*c)[0].data == big.data && (*c)[1].data == binaries[1].data);
     assert(ConvertToShared(shared_dir).first == 0);
+    // Prune: another driver's files and unnamed shared files always go; over the budget the
+    // oldest pipeline files go with the shared files only they name; files used in the last hour
+    // stay.
+    {
+        namespace fs = std::filesystem;
+        const auto dir = root / "prune-test";
+        const auto now = fs::file_time_type::clock::now();
+        const auto age = [&](const fs::path& path, int hours) {
+            fs::last_write_time(path, now - std::chrono::hours{hours});
+        };
+        const Binary only_old{{8}, std::vector<u8>(2048, 0x21)};
+        const Binary orphan{{9}, std::vector<u8>(512, 0x31)};
+        assert(StoreShared(dir / "old1.bin", global, {9, 1}, 0, {only_old}));
+        assert(StoreShared(dir / "old2.bin", global, {9, 2}, 0, {big}));
+        assert(StoreShared(dir / "keep.bin", global, {9, 3}, 0, {big}));
+        assert(StoreShared(dir / "foreign.bin", Key{9, 9}, {9, 4}, 0, {binaries[0]}));
+        assert(StoreShared(dir / "gone.bin", global, {9, 5}, 0, {orphan}));
+        fs::remove(dir / "gone.bin");
+        for (const auto& entry : fs::directory_iterator(dir / "shared")) {
+            age(entry.path(), 2);
+        }
+        age(dir / "old1.bin", 3);
+        age(dir / "old2.bin", 2);
+        age(dir / "foreign.bin", 2);
+        const auto [removed, freed] = Prune(dir, global, 0);
+        assert(removed == 3 && freed > orphan.data.size()); // foreign.bin, its binary, the orphan
+        assert(!fs::exists(dir / "foreign.bin") && fs::exists(dir / "old1.bin"));
+        assert(Prune(dir, global, 1).first == 3); // old1.bin, its binary, old2.bin
+        assert(!fs::exists(dir / "old1.bin") && !fs::exists(dir / "old2.bin"));
+        const auto kept = Load(dir / "keep.bin", global, {9, 3}, 0);
+        assert(kept && kept->size() == 1 && (*kept)[0].data == big.data);
+        unsigned left = 0;
+        for (const auto& entry : fs::directory_iterator(dir / "shared")) {
+            left += entry.path().extension() == ".bin";
+        }
+        assert(left == 1);
+    }
     TestDriverFallback(root / "driver");
     std::filesystem::remove_all(root);
     std::puts("pipeline-binary-cache-test: passed");

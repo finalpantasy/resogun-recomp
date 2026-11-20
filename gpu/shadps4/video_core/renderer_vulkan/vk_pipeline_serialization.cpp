@@ -282,6 +282,7 @@ bool StoreShared(const std::filesystem::path& file, const Key& global, const Key
         if (const auto existing = Load(shared, global, binary.key, 0);
             existing && existing->size() == 1 && (*existing)[0].data == binary.data) {
             ++shared_reused;
+            Touch(shared);
             continue;
         }
         const auto encoded = Encode(global, binary.key, 0, {binary});
@@ -329,6 +330,133 @@ std::pair<u64, s64> ConvertToShared(const std::filesystem::path& directory,
                  s64(shared_bytes - shared_before);
     }
     return {files, freed};
+}
+void Touch(const std::filesystem::path& file) {
+    std::error_code error;
+    const auto now = std::filesystem::file_time_type::clock::now();
+    const auto time = std::filesystem::last_write_time(file, error);
+    if (!error && now - time > std::chrono::minutes{10}) {
+        std::filesystem::last_write_time(file, now, error);
+    }
+}
+std::pair<u64, u64> Prune(const std::filesystem::path& directory, const Key& global, u64 budget,
+                          const std::function<bool()>& stop) {
+    namespace fs = std::filesystem;
+    struct Shared {
+        u32 references = 0;
+        u64 size = 0;
+    };
+    struct Entry {
+        fs::file_time_type time;
+        fs::path path;
+        u64 size;
+        bool foreign;
+        std::vector<std::string> shared;
+    };
+    std::unordered_map<std::string, Shared> shared;
+    std::vector<Entry> entries;
+    std::vector<fs::path> temporary;
+    u64 total = 0;
+    std::error_code error;
+    for (fs::directory_iterator it(directory / "shared", error), end; !error && it != end;
+         it.increment(error)) {
+        std::error_code status;
+        if (!it->is_regular_file(status)) {
+            continue;
+        }
+        if (it->path().extension() == ".tmp") {
+            temporary.push_back(it->path());
+        } else if (it->path().extension() == ".bin") {
+            const u64 size = it->file_size(status);
+            shared[it->path().filename().string()].size = size;
+            total += size;
+        }
+    }
+    error.clear();
+    for (fs::directory_iterator it(directory, error), end; !error && it != end;
+         it.increment(error)) {
+        if (stop && stop()) {
+            return {};
+        }
+        std::error_code status;
+        if (!it->is_regular_file(status)) {
+            continue;
+        }
+        if (it->path().extension() == ".tmp") {
+            temporary.push_back(it->path());
+            continue;
+        }
+        if (it->path().extension() != ".bin") {
+            continue;
+        }
+        const auto bytes = ReadFile(it->path());
+        const auto parsed = bytes ? Parse(*bytes) : std::nullopt;
+        Entry entry{it->last_write_time(status), it->path(), it->file_size(status),
+                    !parsed || parsed->global != global, {}};
+        total += entry.size;
+        if (parsed && parsed->version == 2) {
+            for (const auto& binary : parsed->binaries) {
+                auto name =
+                    SharedPath(directory, parsed->global, binary.key, binary.content).filename().string();
+                if (const auto found = shared.find(name); found != shared.end()) {
+                    ++found->second.references;
+                    entry.shared.push_back(std::move(name));
+                }
+            }
+        }
+        entries.push_back(std::move(entry));
+    }
+    // Writers put a shared file down before the pipeline file that names it, and Touch a shared
+    // file they reuse, so anything used in the last hour may have a reference this scan missed.
+    const auto recent = fs::file_time_type::clock::now() - std::chrono::hours{1};
+    u64 removed = 0, freed = 0;
+    const auto remove = [&](const fs::path& path, u64 size) {
+        std::error_code status;
+        const auto time = fs::last_write_time(path, status);
+        if (status || time > recent || !fs::remove(path, status)) {
+            return false;
+        }
+        ++removed;
+        freed += size;
+        total -= std::min(total, size);
+        return true;
+    };
+    const auto remove_pipeline = [&](const Entry& entry) {
+        if (!remove(entry.path, entry.size)) {
+            return;
+        }
+        std::error_code status;
+        fs::remove(fs::path{entry.path} += ".fp", status); // RESOGUN_BINARY_FINGERPRINT notes
+        for (const auto& name : entry.shared) {
+            auto& file = shared[name];
+            if (--file.references == 0) {
+                remove(directory / "shared" / name, file.size);
+            }
+        }
+    };
+    for (const auto& path : temporary) {
+        remove(path, 0);
+    }
+    for (const auto& [name, file] : shared) {
+        if (file.references == 0) {
+            remove(directory / "shared" / name, file.size);
+        }
+    }
+    // Other drivers' files first, then the oldest.
+    std::ranges::sort(entries, [](const Entry& a, const Entry& b) {
+        return a.foreign != b.foreign ? a.foreign : a.time < b.time;
+    });
+    const bool over = budget && total > budget;
+    for (const auto& entry : entries) {
+        if (stop && stop()) {
+            break;
+        }
+        if (!entry.foreign && (!over || total <= budget / 4 * 3)) {
+            break;
+        }
+        remove_pipeline(entry);
+    }
+    return {removed, freed};
 }
 } // namespace PipelineBinaryCache
 
@@ -844,6 +972,9 @@ vk::ResultValue<vk::UniquePipeline> CreateCachedGraphicsPipeline(
                 auto& result = *restored;
                 if (result.result == vk::Result::eSuccess) {
                     ++binary_hits;
+                    if (source == 0) {
+                        Touch(file);
+                    }
                     if (HasBigBinary(*binaries)) ++binary_hits_big;
                     CountDictionary(DictionaryHash(*binaries), &DictionaryCounts::hits);
                     return std::move(result);
@@ -1710,19 +1841,32 @@ void PipelineCache::StartBinaryConversion() {
     }
     const auto directory = Common::FS::GetShaderCachePath(Common::ElfInfo::Instance().GameSerial()) /
         "pipeline-binaries";
+    // RESOGUN_SHADER_STORE_MB caps the folder (default 1024; 0 keeps everything of this driver).
+    u64 budget = u64{1024} << 20;
+    if (const char* env = std::getenv("RESOGUN_SHADER_STORE_MB"); env && *env) {
+        budget = std::strtoull(env, nullptr, 10) << 20;
+    }
     binary_conversion = new BinaryConversion;
-    binary_conversion->thread = std::jthread{[directory](std::stop_token stop) {
+    binary_conversion->thread = std::jthread{[directory, budget,
+                                              global = BinaryKey(instance.GetPipelineBinaryGlobalKey())](
+                                                 std::stop_token stop) {
         Common::SetCurrentThreadName("resogun:BinaryConvert");
         Common::SetCurrentThreadPriority(Common::ThreadPriority::Low);
         const auto started = std::chrono::steady_clock::now();
-        const auto [files, freed] = PipelineBinaryCache::ConvertToShared(
-            directory, [&stop] { return stop.stop_requested(); });
+        const auto seconds = [&started] {
+            return std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
+        };
+        const auto stopped = [&stop] { return stop.stop_requested(); };
+        const auto [files, freed] = PipelineBinaryCache::ConvertToShared(directory, stopped);
         if (files) {
             std::printf("Pipeline binaries: %llu files moved to shared storage, %.0f MB freed "
                         "in %.1f s\n",
-                        static_cast<unsigned long long>(files), freed / 1048576.0,
-                        std::chrono::duration<double>(std::chrono::steady_clock::now() - started)
-                            .count());
+                        static_cast<unsigned long long>(files), freed / 1048576.0, seconds());
+        }
+        const auto [removed, pruned] = PipelineBinaryCache::Prune(directory, global, budget, stopped);
+        if (removed) {
+            std::printf("Pipeline binaries: %llu unused files removed, %.0f MB freed in %.1f s\n",
+                        static_cast<unsigned long long>(removed), pruned / 1048576.0, seconds());
         }
     }};
 }
