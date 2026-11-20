@@ -494,14 +494,17 @@ struct CompileTimer {
 thread_local bool must_draw = false;
 
 // resogun: GPU frames a draw may be skipped while its build runs, after which the GPU thread
-// waits for it. Draws that must not be skipped have no budget, and RESOGUN_SYNC_PIPELINES=1
-// (diagnostic) gives none to any draw.
+// waits for it. No draw is skipped by default: a skipped draw leaves its object out of that
+// frame, which showed as textures flickering while the lobby loaded (4K, warm store: 641 to
+// 1255 skipped draws a run). Graphics pipelines then take the deferred path (handles built on
+// a compiler thread, waited for at record time), and lobby and course frame rates stayed the
+// same. RESOGUN_SKIP_PIPELINES=1 restores the one-frame skip.
 int SkipFrames() {
-    static const bool sync = [] {
-        const char* env = std::getenv("RESOGUN_SYNC_PIPELINES");
+    static const bool skip = [] {
+        const char* env = std::getenv("RESOGUN_SKIP_PIPELINES");
         return env && *env == '1';
     }();
-    return must_draw || sync ? 0 : 1;
+    return must_draw || !skip ? 0 : 1;
 }
 
 // resogun: whether draws needing a build were skipped for the budget of GPU frames, counted
