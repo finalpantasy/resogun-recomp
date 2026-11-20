@@ -623,7 +623,7 @@ size_t PipelineCache::NewPermutationIndex(const Program& program) const {
     };
     if (DiskShadersActive()) {
         for (size_t i = 0; i < program.modules.size(); ++i) {
-            if (!program.modules[i].module && !taken(i)) {
+            if (!program.modules[i].module && !program.modules[i].on_disk && !taken(i)) {
                 return i;
             }
         }
@@ -1303,7 +1303,7 @@ PipelineCache::Result PipelineCache::GetProgram(PipelineSelection& sel, HwStage 
         auto spec = Shader::StageSpecialization(info, runtime_info, profile, binding);
         runtime_fault_recover = nullptr;
         const auto it = std::ranges::find(program->modules, spec, &Program::Module::spec);
-        if (it == program->modules.end()) {
+        if (it == program->modules.end() || !it->module) {
             worker.failed = true;
             return {};
         }
@@ -1425,6 +1425,12 @@ PipelineCache::Result PipelineCache::GetProgram(PipelineSelection& sel, HwStage 
                   : std::ranges::find(program->modules, spec, &Program::Module::spec);
     if (it != program->modules.end()) {
         program->last_used = std::distance(program->modules.begin(), it);
+        // resogun: a saved permutation gets its module on first use (LoadDiskProgram).
+        if (it->on_disk && !CreateDiskModule(params.hash, *program, program->last_used)) {
+            it = program->modules.end();
+            perm_idx = NewPermutationIndex(*program);
+            perm_hash = HashCombine(params.hash, perm_idx);
+        }
     }
     // resogun: a new permutation compiles alongside the program's other pending ones; its draws
     // are skipped for at most SkipFrames() GPU frames, then it is waited for or built here.
@@ -1475,9 +1481,6 @@ PipelineCache::Result PipelineCache::GetProgram(PipelineSelection& sel, HwStage 
     } else {
         info.AddBindings(binding);
         module = it->module;
-        if (!disk_modules_unused.empty() && disk_modules_unused.erase(module)) {
-            ++disk_stats.matched;
-        }
         perm_idx = std::distance(program->modules.begin(), it);
         perm_hash = HashCombine(params.hash, perm_idx);
     }

@@ -51,6 +51,8 @@ struct Program {
     struct Module {
         vk::ShaderModule module;
         Shader::StageSpecialization spec;
+        /// resogun: saved in the disk store, module not created yet (PipelineCache::CreateDiskModule)
+        bool on_disk = false;
     };
     static constexpr size_t MaxPermutations = 8;
     using ModuleList = boost::container::small_vector<Module, MaxPermutations>;
@@ -278,7 +280,6 @@ private:
     bool disk_store_untrusted = false; ///< the bit went off live: marker reset to 0
     std::unordered_map<u64, std::vector<u32>> disk_permutations; ///< pgm hash -> saved indices
     std::unordered_set<std::string> disk_pipeline_keys;          ///< "g_0x..."/"c_0x..." saved
-    std::unordered_set<VkShaderModule> disk_modules_unused;      ///< loaded, not used yet
     struct DiskShaderStats {
         u64 programs, permutations, matched, compiled, keys_skipped, keys_written, load_ns;
     } disk_stats{}, disk_reported{};
@@ -294,6 +295,8 @@ private:
     void StartBinaryConversion();
     void StopBinaryConversion();
     bool LoadDiskProgram(u64 hash);
+    /// Creates the module of a saved permutation on its first use. False leaves the slot empty.
+    bool CreateDiskModule(u64 hash, Program& program, size_t perm_idx);
     /// Index for a new permutation: a slot the store left empty, else the next one.
     [[nodiscard]] size_t NewPermutationIndex(const Program& program) const;
     /// False when this pipeline key is already in the store (nothing to write).

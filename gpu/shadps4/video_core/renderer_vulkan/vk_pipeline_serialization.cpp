@@ -1387,7 +1387,7 @@ bool PipelineCache::LoadPipelineStage(Serialization::Archive& ar, size_t stage) 
                             perm_idx, program->info.hw_stage, program->info.pgm_hash, idx);
                 return false;
             }
-            module = it->module;
+            module = it->module ? it->module : CompileSPV(spv, instance.GetDevice());
         } else {
             module = CompileSPV(spv, instance.GetDevice());
         }
@@ -1595,22 +1595,29 @@ void PipelineCache::IndexDiskShaders() {
     }
 }
 
-// resogun: the saved files of one program, read off the GPU thread (DiskPrefetch) or on it.
+// resogun: the saved metas of one program, read off the GPU thread (DiskPrefetch) or on it. The
+// SPIR-V is read only when a permutation is first used (CreateDiskModule): the driver keeps a copy
+// of every module, so creating them all at load held about 0.8 GB for shaders never drawn.
 struct DiskBlob {
     u32 idx;
     std::vector<u8> meta;
-    std::vector<u32> spv;
 };
 
-static std::vector<DiskBlob> ReadDiskProgram(u64 hash, const std::vector<u32>& indices) {
+// With spv_bytes, the SPIR-V files are also read once (and dropped) so the OS file cache holds them.
+static std::vector<DiskBlob> ReadDiskProgram(u64 hash, const std::vector<u32>& indices,
+                                             u64* spv_bytes = nullptr) {
     auto& db = Storage::DataBase::Instance();
     std::vector<DiskBlob> blobs;
     for (const u32 idx : indices) {
         DiskBlob blob{idx};
         db.Load(Storage::BlobType::ShaderMeta, fmt::format("{:#018x}", HashCombine(hash, u64{idx})),
                 blob.meta);
-        db.Load(Storage::BlobType::ShaderBinary, fmt::format("{:#018x}_{}", hash, idx), blob.spv);
-        if (!blob.meta.empty() && !blob.spv.empty()) {
+        if (spv_bytes) {
+            std::vector<u32> spv;
+            db.Load(Storage::BlobType::ShaderBinary, fmt::format("{:#018x}_{}", hash, idx), spv);
+            *spv_bytes += spv.size() * sizeof(u32);
+        }
+        if (!blob.meta.empty()) {
             blobs.push_back(std::move(blob));
         }
     }
@@ -1660,14 +1667,15 @@ void PipelineCache::StartDiskPrefetch() {
                     continue;
                 }
             }
-            auto blobs = ReadDiskProgram(hash, indices);
+            u64 spv_bytes = 0;
+            auto blobs = ReadDiskProgram(hash, indices, &spv_bytes);
+            warmed_bytes += spv_bytes;
             u64 size = 0;
             for (const auto& blob : blobs) {
-                size += blob.meta.size() + blob.spv.size() * sizeof(u32);
+                size += blob.meta.size();
             }
             if (bytes + size > budget) {
-                ++warmed; // read once for the file cache; the GPU thread reads it again
-                warmed_bytes += size;
+                ++warmed; // the GPU thread reads these metas again, from the file cache
                 continue;
             }
             bytes += size;
@@ -1678,8 +1686,8 @@ void PipelineCache::StartDiskPrefetch() {
             }
         }
         ResogunOverlay::SetShaderPrefetch(total, total);
-        std::printf("Disk shaders: prefetch kept %llu programs (%.1f MB), read %llu more for the "
-                    "file cache (%.1f MB) in %.0f ms\n",
+        std::printf("Disk shaders: prefetch kept the metas of %llu programs (%.1f MB), %llu more "
+                    "and %.1f MB of SPIR-V read for the file cache in %.0f ms\n",
                     static_cast<unsigned long long>(programs), bytes / 1048576.0,
                     static_cast<unsigned long long>(warmed), warmed_bytes / 1048576.0,
                     std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() -
@@ -1764,17 +1772,13 @@ bool PipelineCache::LoadDiskProgram(u64 hash) {
             info.pgm_hash != hash) {
             continue;
         }
-        const auto module = CompileSPV(blob.spv, instance.GetDevice());
-        if (!module) {
-            continue;
-        }
         if (!have_info) {
             program->info = std::move(info);
             have_info = true;
         }
         spec.info = &program->info;
-        program->InsertPermut(module, std::move(spec), blob.idx);
-        disk_modules_unused.insert(module);
+        program->InsertPermut(vk::ShaderModule{}, std::move(spec), blob.idx);
+        program->modules[blob.idx].on_disk = true;
         ++inserted;
         ++disk_stats.permutations;
     }
@@ -1784,18 +1788,36 @@ bool PipelineCache::LoadDiskProgram(u64 hash) {
         std::unique_lock lock{programs_mutex};
         program_cache.emplace(hash, std::move(program));
         ++disk_stats.programs;
-    } else {
-        for (const auto& module : program->modules) {
-            if (module.module) {
-                instance.GetDevice().destroyShaderModule(module.module);
-            }
-        }
     }
     disk_permutations.erase(found);
     disk_stats.load_ns += u64(std::chrono::duration_cast<std::chrono::nanoseconds>(
                                   std::chrono::steady_clock::now() - started)
                                   .count());
     return inserted != 0;
+}
+
+// resogun: GPU thread, on the first draw that uses a saved permutation (LoadDiskProgram).
+bool PipelineCache::CreateDiskModule(u64 hash, Program& program, size_t perm_idx) {
+    const auto started = std::chrono::steady_clock::now();
+    std::vector<u32> spv;
+    Storage::DataBase::Instance().Load(Storage::BlobType::ShaderBinary,
+                                       fmt::format("{:#018x}_{}", hash, perm_idx), spv);
+    const auto module = spv.empty() ? vk::ShaderModule{} : CompileSPV(spv, instance.GetDevice());
+    {
+        std::unique_lock lock{programs_mutex};
+        auto& slot = program.modules[perm_idx];
+        slot.on_disk = false;
+        if (module) {
+            slot.module = module;
+        } else {
+            slot = {};
+        }
+    }
+    disk_stats.load_ns += u64(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                  std::chrono::steady_clock::now() - started)
+                                  .count());
+    disk_stats.matched += bool(module);
+    return bool(module);
 }
 
 bool PipelineCache::NewPipelineKey(const std::string& name) {
@@ -2022,9 +2044,17 @@ bool PipelineCache::MergeWarmStage(WarmStage& stage) {
         if (size_t(std::distance(program.modules.begin(), it)) != stage.perm_idx) {
             return false;
         }
+        if (it->on_disk) {
+            // resogun: the warm-up built the saved permutation's module first; it is the slot's.
+            it->module = stage.module;
+            it->on_disk = false;
+            stage.module_kept = true;
+            ++disk_stats.matched;
+        }
         stage.result = it->module;
     } else {
-        if (stage.perm_idx < program.modules.size() && program.modules[stage.perm_idx].module) {
+        if (stage.perm_idx < program.modules.size() &&
+            (program.modules[stage.perm_idx].module || program.modules[stage.perm_idx].on_disk)) {
             return false;
         }
         stage.spec.info = &program.info;
