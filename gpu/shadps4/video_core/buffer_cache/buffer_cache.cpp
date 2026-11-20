@@ -399,7 +399,13 @@ void PrintBufferStats() {
 
 std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 size,
                                                         bool is_written, bool is_texel_buffer) {
-    texture_cache.ResolveReadbacks(device_addr, size, true, ReadbackSource::BufferObtain);
+    // resogun: a read of the arena needs guest memory only where it uploads it, and UploadCopies
+    // resolves exactly those ranges (a texel buffer over an image copies it on the GPU). Waiting
+    // here for an image's readback stalled each 4K frame ~5 ms on a 128 KiB R16F target the
+    // course draws read back. Writes and the stream path (guest memory as is) still wait.
+    if (is_written || size <= STREAM_THRESHOLD || ResogunToggle::Disabled(ResogunToggle::ArenaReadNoWait)) {
+        texture_cache.ResolveReadbacks(device_addr, size, true, ReadbackSource::BufferObtain);
+    }
     const bool stats = BufferStatsEnabled();
     if (stats) {
         PrintBufferStats();
