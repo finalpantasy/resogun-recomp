@@ -335,9 +335,13 @@ static const Setting settings[] = {
     {"--audio-stats", "AUDIO_STATS", 0},
     {"--audio", "AUDIO", 0},
     {"--background-warmup", "BACKGROUND_WARMUP", 0},
+    {"--binary-internal-cache", "BINARY_INTERNAL_CACHE", 0},
+    {"--binary-selftest", "BINARY_SELFTEST", 0},
     {"--buffer-stats", "BUFFER_STATS", 0},
     {"--capture-dir", "CAPTURE_DIR", 1},
+    {"--capture-target", "CAPTURE_TARGET", 0},
     {"--capture-trigger", "CAPTURE_TRIGGER", 1},
+    {"--compile-threads", "COMPILE_THREADS", 0},
     {"--config-default", "CONFIG_DEFAULT", 1},
     {"--config", "CONFIG", 1},
     {"--copy-gpu-buffers", "COPY_GPU_BUFFERS", 0},
@@ -345,6 +349,7 @@ static const Setting settings[] = {
     {"--copy-threads", "COPY_THREADS", 0},
     {"--cpu-check", "CPU_CHECK", 0},
     {"--crash-watch", "CRASH_WATCH", 0},
+    {"--defer-pipelines", "DEFER_PIPELINES", 0},
     {"--deferred-readback", "DEFERRED_READBACK", 0},
     {"--diag-dir", "DIAG_DIR", 1},
     {"--diag-images", "DIAG_IMAGES", 0},
@@ -355,6 +360,7 @@ static const Setting settings[] = {
     {"--draw-pipe", "DRAW_PIPE", 0},
     {"--dump-dir", "DUMP_DIR", 1},
     {"--dump-shaders", "DUMP_SHADERS", 0},
+    {"--equeue-waiters", "EQUEUE_WAITERS", 0},
     {"--fail-guest-memory", "FAIL_GUEST_MEMORY", 0},
     {"--fault-log", "FAULT_LOG", 0},
     {"--fault-peek", "FAULT_PEEK", 0},
@@ -380,9 +386,11 @@ static const Setting settings[] = {
     {"--internal-width", "INTERNAL_WIDTH", 0},
     {"--interp-int-fix", "INTERP_INT_FIX", 0},
     {"--isa-rewrite-mode", "ISA_REWRITE", 0},
+    {"--lag-guard", "LAG_GUARD", 0},
     {"--language", "LANGUAGE", 0},
     {"--low-handles", "LOW_HANDLES", 0},
     {"--log-missing", "LOG_MISSING", 0},
+    {"--manual-interp", "MANUAL_INTERP", 0},
     {"--monitor", "MONITOR", 0},
     {"--ngs2-mix", "NGS2_MIX", 0},
     {"--ngs2-trace", "NGS2_TRACE", 0},
@@ -401,8 +409,11 @@ static const Setting settings[] = {
     {"--pipeline-binary-isolated", "PIPELINE_BINARY_ISOLATED", 0},
     {"--pipeline-cache", "PIPELINE_CACHE", 0},
     {"--pipeline-capture-only", "PIPELINE_CAPTURE_ONLY", 0},
+    {"--pipeline-fingerprint", "PIPELINE_FINGERPRINT", 0},
+    {"--pipeline-slow-ms", "PIPELINE_SLOW_MS", 0},
     {"--prep-workers", "PREP_WORKERS", 0},
     {"--present-thread", "PRESENT_THREAD", 0},
+    {"--ps-debug", "PS_DEBUG", 0},
     {"--readback-linear", "READBACK_LINEAR", 0},
     {"--readbacks", "READBACKS", 0},
     {"--reload-trigger", "RELOAD_TRIGGER", 1},
@@ -414,9 +425,12 @@ static const Setting settings[] = {
     {"--shader-dir", "SHADER_DIR", 1},
     {"--shader-notes", "SHADER_NOTES", 0},
     {"--shader-prefetch", "SHADER_PREFETCH", 0},
+    {"--shader-prefetch-mb", "SHADER_PREFETCH_MB", 0},
+    {"--shader-store-mb", "SHADER_STORE_MB", 0},
     {"--sharpening", "SHARPENING", 0},
     {"--skip-intro", "SKIP_INTRO", 0},
     {"--slow-waits", "SLOW_WAITS", 0},
+    {"--slow-waits-thread", "SLOW_WAITS_THREAD", 0},
     {"--smaa", "SMAA", 0},
     {"--square-pass", "SQUARE_PASS", 0},
     {"--staging-keep-mb", "STAGING_KEEP_MB", 0},
@@ -424,9 +438,11 @@ static const Setting settings[] = {
     {"--stall-ms", "STALL_MS", 0},
     {"--stream-memory", "STREAM_MEMORY", 0},
     {"--strict-handles", "STRICT_HANDLES", 0},
+    {"--sync-pipelines", "SYNC_PIPELINES", 0},
     {"--target-sizes", "TARGET_SIZES", 0},
     {"--tearing", "TEARING", 0},
     {"--test-refuse-dmem", "TEST_REFUSE_DMEM", 0},
+    {"--test-render-height", "TEST_RENDER_HEIGHT", 0},
     {"--texture-dump", "TEXTURE_DUMP", 1},
     {"--texture-pack", "TEXTURE_PACK", 1},
     {"--texture-helper", "TEXTURE_HELPER", 0},
@@ -441,11 +457,13 @@ static const Setting settings[] = {
     {"--vblank-timer", "VBLANK_TIMER", 0},
     {"--verbose", "VERBOSE", 0},
     {"--verify-prepared", "VERIFY_PREPARED", 0},
+    {"--vgpr-array", "VGPR_ARRAY", 0},
     {"--vk-markers", "VK_MARKERS", 0},
     {"--vk-record-thread", "VK_RECORD_THREAD", 0},
     {"--vk-validation-sync", "VK_VALIDATION_SYNC", 0},
     {"--vk-validation", "VK_VALIDATION", 0},
     {"--vsync", "VSYNC", 0},
+    {"--watch-image", "WATCH_IMAGE", 0},
     {"--wave-stats", "WAVE_STATS", 0},
     {"--window-icon", "WINDOW_ICON", 1},
     {"--window", "WINDOW", 0},
@@ -490,6 +508,7 @@ static void usage(void) {
            "  --online-id NAME    Local account name (up to 16 bytes)\n"
            "  --discovery-port N  Local replay port (0 disables replay)\n"
            "  --local-auth N      Synthetic login fixture, 0 or 1\n"
+           "  --local-lobbies N   Local multiplayer replay, 0 or 1\n"
            "  --http-dump DIR     Save local replay request bodies (relative to DATA)\n"
            "  --ticket-grants N   Synthetic ticket fixture, 0 or 1\n"
            "  --tus MODE          In-process Title User Storage, local or off\n"
@@ -569,6 +588,7 @@ static int parse(Options *o, int argc, char **argv) {
         else if (!strcmp(flag, "--online-id")) golf_env = "GOLF_ONLINE_ID";
         else if (!strcmp(flag, "--discovery-port")) golf_env = "GOLF_DISCOVERY_PORT";
         else if (!strcmp(flag, "--local-auth")) golf_env = "GOLF_LOCAL_AUTH";
+        else if (!strcmp(flag, "--local-lobbies")) golf_env = "GOLF_LOCAL_LOBBIES";
         else if (!strcmp(flag, "--ticket-grants")) golf_env = "GOLF_TICKET_GRANTS";
         else if (!strcmp(flag, "--tus")) golf_env = "GOLF_TUS";
         else if (!strcmp(flag, "--font-file")) golf_env = "GOLF_FONT_FILE";
@@ -586,7 +606,8 @@ static int parse(Options *o, int argc, char **argv) {
                     return option_error(flag, "expected a loopback port from 0 through 65535");
                 if (value[strspn(value, "0")] == '\0') value = "";
             }
-            if ((!strcmp(golf_env, "GOLF_LOCAL_AUTH") || !strcmp(golf_env, "GOLF_TICKET_GRANTS"))
+            if ((!strcmp(golf_env, "GOLF_LOCAL_AUTH") || !strcmp(golf_env, "GOLF_LOCAL_LOBBIES") ||
+                 !strcmp(golf_env, "GOLF_TICKET_GRANTS"))
                     && strcmp(value, "0") && strcmp(value, "1"))
                 return option_error(flag, "expected 0 or 1");
             if (!strcmp(golf_env, "GOLF_NGS2_MATRIX_TRACE")) {
