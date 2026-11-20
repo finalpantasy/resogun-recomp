@@ -226,7 +226,32 @@ struct PageManager::Impl {
         release_pending();
     }
 
-    std::array<PageState, NUM_ADDRESS_PAGES> cached_pages{};
+    // resogun: one state per page of the 40-bit space is 512 MiB. A value-initialized std::array
+    // wrote all of it (512 MiB resident from boot); zero pages from the OS stay unbacked until
+    // the tracker touches them, which is only where the game's GPU data lies.
+    static PageState* AllocatePageStates() {
+        constexpr size_t bytes = NUM_ADDRESS_PAGES * sizeof(PageState);
+#ifdef _WIN64
+        void* p = VirtualAlloc(nullptr, bytes, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+        ASSERT_MSG(p, "Cannot allocate the page tracker's {} MiB", bytes >> 20);
+#else
+        void* p = mmap(nullptr, bytes, PROT_READ | PROT_WRITE,
+                       MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+        ASSERT_MSG(p != MAP_FAILED, "Cannot allocate the page tracker's {} MiB", bytes >> 20);
+#endif
+        return static_cast<PageState*>(p);
+    }
+    struct PageStatesDeleter {
+        void operator()(PageState* p) const {
+#ifdef _WIN64
+            VirtualFree(p, 0, MEM_RELEASE);
+#else
+            munmap(p, NUM_ADDRESS_PAGES * sizeof(PageState));
+#endif
+        }
+    };
+    static_assert(std::is_trivially_default_constructible_v<PageState>);
+    std::unique_ptr<PageState[], PageStatesDeleter> cached_pages{AllocatePageStates()};
 #ifdef PTHREAD_ADAPTIVE_MUTEX_INITIALIZER_NP
     using LockType = Common::AdaptiveMutex;
 #else

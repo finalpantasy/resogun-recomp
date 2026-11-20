@@ -1617,9 +1617,11 @@ static std::vector<DiskBlob> ReadDiskProgram(u64 hash, const std::vector<u32>& i
     return blobs;
 }
 
-// resogun: one low-priority thread reads every saved program into memory at startup (a few MB),
-// so the GPU thread only deserializes and creates the modules. A program the GPU thread needs
-// first is claimed and read there instead.
+// resogun: one low-priority thread reads every saved program at startup, so the GPU thread only
+// deserializes and creates the modules. A program the GPU thread needs first is claimed and read
+// there instead. Programs are kept in memory up to RESOGUN_SHADER_PREFETCH_MB (default 64); past
+// that they are only read once, so the GPU thread's read comes from the OS file cache (a golf
+// cache held 544 MB of SPIR-V, most of it for scenes not yet visited).
 struct PipelineCache::DiskPrefetch {
     std::mutex mutex;
     std::unordered_map<u64, std::vector<DiskBlob>> ready;
@@ -1641,7 +1643,11 @@ void PipelineCache::StartDiskPrefetch() {
         const auto started = std::chrono::steady_clock::now();
         const u32 total = u32(work.size());
         u32 done = 0;
-        u64 programs = 0, bytes = 0;
+        u64 programs = 0, bytes = 0, warmed = 0, warmed_bytes = 0;
+        u64 budget = 64ull << 20;
+        if (const char* mb = std::getenv("RESOGUN_SHADER_PREFETCH_MB")) {
+            budget = std::strtoull(mb, nullptr, 10) << 20;
+        }
         for (const auto& [hash, indices] : work) {
             if (stop.stop_requested()) {
                 ResogunOverlay::SetShaderPrefetch(0, 0);
@@ -1655,9 +1661,16 @@ void PipelineCache::StartDiskPrefetch() {
                 }
             }
             auto blobs = ReadDiskProgram(hash, indices);
+            u64 size = 0;
             for (const auto& blob : blobs) {
-                bytes += blob.meta.size() + blob.spv.size() * sizeof(u32);
+                size += blob.meta.size() + blob.spv.size() * sizeof(u32);
             }
+            if (bytes + size > budget) {
+                ++warmed; // read once for the file cache; the GPU thread reads it again
+                warmed_bytes += size;
+                continue;
+            }
+            bytes += size;
             std::scoped_lock lock{prefetch->mutex};
             if (!prefetch->claimed.contains(hash)) {
                 prefetch->ready.emplace(hash, std::move(blobs));
@@ -1665,8 +1678,10 @@ void PipelineCache::StartDiskPrefetch() {
             }
         }
         ResogunOverlay::SetShaderPrefetch(total, total);
-        std::printf("Disk shaders: prefetch read %llu programs (%.1f MB) in %.0f ms\n",
+        std::printf("Disk shaders: prefetch kept %llu programs (%.1f MB), read %llu more for the "
+                    "file cache (%.1f MB) in %.0f ms\n",
                     static_cast<unsigned long long>(programs), bytes / 1048576.0,
+                    static_cast<unsigned long long>(warmed), warmed_bytes / 1048576.0,
                     std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() -
                                                               started)
                         .count());
