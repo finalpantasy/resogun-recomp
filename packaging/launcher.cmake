@@ -6,7 +6,9 @@ function(golf_launcher_target)
     if(TARGET resogun-setup)
         set_target_properties(resogun-setup PROPERTIES EXCLUDE_FROM_ALL TRUE)
     endif()
-    target_compile_definitions(resogun PRIVATE "GOLF_LAUNCHER_VERSION=\"${GOLF_LAUNCHER_VERSION}\"")
+    # Only the launcher prints the revision. Keep other runner objects reusable.
+    set_property(SOURCE "${launcher_src}/launcher.c" APPEND PROPERTY
+        COMPILE_DEFINITIONS "GOLF_LAUNCHER_VERSION=\"${GOLF_LAUNCHER_VERSION}\"")
     if(WIN32)
         target_link_libraries(resogun PRIVATE ole32 uuid)
     endif()
