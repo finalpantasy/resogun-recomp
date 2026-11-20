@@ -437,6 +437,9 @@ std::atomic<u32> g_resogun_pending_draws;
 // resogun: waits of the GPU thread for an async build at the skip budget, and their time.
 std::atomic<u32> g_resogun_build_waits;
 std::atomic<u64> g_resogun_build_wait_ns;
+// resogun: the part of those waits for draws into a fresh target (no skip budget).
+std::atomic<u32> g_resogun_fresh_waits;
+std::atomic<u64> g_resogun_fresh_wait_ns;
 namespace {
 struct PhaseTimer {
     std::atomic<u64>& counter;
@@ -494,7 +497,14 @@ template <typename Job>
 void WaitForBuild(const Job& job) {
     PhaseTimer waiting{g_resogun_build_wait_ns};
     ++g_resogun_build_waits;
+    const auto started = std::chrono::steady_clock::now();
     job.Wait();
+    if (must_draw) {
+        ++g_resogun_fresh_waits;
+        g_resogun_fresh_wait_ns += u64(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                           std::chrono::steady_clock::now() - started)
+                                           .count());
+    }
 }
 
 std::string ErrorText(const std::exception_ptr& error) {
