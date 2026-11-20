@@ -16,8 +16,8 @@ pacman -S --needed git patch make \
   mingw-w64-clang-x86_64-{spirv-tools,spirv-headers,spirv-cross}
 ```
 
-You also need Python 3.10 or newer on Windows itself (python.org) for `run.py`, the tests and the
-packaging, and [Git for Windows](https://git-scm.com) for Git Bash.
+The build and packaging tools, `run.py`, and the tests use Python 3.10 or newer.
+Install [Git for Windows](https://git-scm.com) to use Git Bash.
 
 ## 2. Source
 

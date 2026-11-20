@@ -20,6 +20,8 @@ import tempfile
 import time
 import zipfile
 
+from source_identity import source_identity
+
 PORT = Path(__file__).resolve().parent.parent
 LINUX = sys.platform.startswith('linux')
 EXES = ('everybodys-golf',) if LINUX else ('everybodys-golf.exe',)
@@ -197,8 +199,10 @@ def verify_build(executable, revision):
         lines = receipt.read_text(encoding='ascii').splitlines()
     except (OSError, UnicodeError):
         raise SystemExit(f'Cannot read build receipt for {executable.name}. {rebuild}') from None
-    if len(lines) != 2 or lines[0] != revision:
+    if len(lines) != 3 or lines[0] != revision:
         raise SystemExit(f'{executable.name} was built from a different revision. {rebuild}')
+    if lines[2] != source_identity(PORT):
+        raise SystemExit(f'Source files changed after building {executable.name}. {rebuild}')
     digest = hashlib.sha256()
     with executable.open('rb') as stream:
         for block in iter(lambda: stream.read(1024 * 1024), b''):

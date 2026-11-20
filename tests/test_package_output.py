@@ -1,5 +1,7 @@
 """Guard the packager against pruning files from a user-supplied output folder."""
+import hashlib
 from pathlib import Path
+import subprocess
 import sys
 from tempfile import TemporaryDirectory
 import unittest
@@ -12,6 +14,38 @@ import package
 
 
 class PackageOutputTests(unittest.TestCase):
+    def test_stale_runner_is_rejected_after_source_changes_under_the_same_commit(self):
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+
+            def git(*args):
+                return subprocess.check_output(["git", *args], cwd=root, text=True).strip()
+
+            git("init", "-q")
+            source = root / "launcher.c"
+            source.write_text("int original;\n", encoding="ascii")
+            git("add", "launcher.c")
+            git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+                "commit", "-qm", "fixture")
+            revision = git("rev-parse", "HEAD")
+            binary = root / "everybodys-golf.exe"
+            binary.write_bytes(b"built from original")
+            digest = hashlib.sha256(binary.read_bytes()).hexdigest()
+            with patch.object(package, "PORT", root):
+                stamp = package.source_identity(root)
+                binary.with_suffix(".exe.build").write_text(f"{revision}\n{digest}\n{stamp}\n", encoding="ascii")
+                package.verify_build(binary, revision)
+                source.write_text("int edited_after_build;\n", encoding="ascii")
+                with self.assertRaisesRegex(SystemExit, "Source files changed"):
+                    package.verify_build(binary, revision)
+
+                source.write_text("int original;\n", encoding="ascii")
+                package.verify_build(binary, revision)
+                (root / "src").mkdir()
+                (root / "src/runtime_extra.c").write_text("int added_after_build;\n", encoding="ascii")
+                with self.assertRaisesRegex(SystemExit, "Source files changed"):
+                    package.verify_build(binary, revision)
+
     def test_failed_symbols_write_preserves_both_archives(self):
         fixtures = (
             (False, "everybodys-golf.exe", "fixture", ".zip"),

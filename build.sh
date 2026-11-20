@@ -13,11 +13,11 @@ MINGW*|MSYS*)
     if [[ -d $msys2_root/clang64/bin ]]; then
         export PATH="$msys2_root/clang64/bin:$msys2_root/usr/bin:$PATH" MSYSTEM=CLANG64
     fi
-    exe=.exe
+    exe=.exe python=${PYTHON:-python}
     # The Windows counterparts of the POSIX calls (src/compat_win.h).
     compat=(src/compat_win.c -lbcrypt) net=(-lws2_32) memory=(-lonecore) cflags=() ;;
 Linux)
-    exe=''
+    exe='' python=${PYTHON:-python3}
     # -std=c11 hides POSIX from glibc's headers.
     compat=() net=() memory=() cflags=(-D_DEFAULT_SOURCE) ;;
 *) echo 'Windows (Git Bash or an MSYS2 shell) or Linux only.' >&2; exit 1 ;;
@@ -28,12 +28,13 @@ version=$(git describe --tags --always 2>/dev/null || printf development)
 launcher_cmake=$PWD/packaging/launcher.cmake
 command -v cygpath >/dev/null && launcher_cmake=$(cygpath -m "$launcher_cmake")
 cc=${CC:-clang} cxx=${CXX:-clang++}
-for tool in "$cc" "$cxx" cmake ninja pkg-config make curl; do
+for tool in "$cc" "$cxx" "$python" cmake ninja pkg-config make curl; do
     command -v "$tool" >/dev/null || { echo "Need $tool (docs/building.md)." >&2; exit 1; }
 done
 if [[ ! -f gpu/third_party/imgui/imgui.h || ! -f gpu/third_party/xbyak/xbyak/xbyak.h ]]; then
     git submodule update --init --recursive
 fi
+source_identity=$("$python" tools/source_identity.py .)
 # The minimal static FFmpeg in out/ffmpeg: unpacked from prebuilt/, or built when that archive is for
 # another version or options (tools/build_ffmpeg.sh).
 CC="$cc" bash tools/build_ffmpeg.sh out/ffmpeg
@@ -52,13 +53,16 @@ if ! ninja -j "$jobs" -C out/gpu resogun > out/gpu-build.log 2>&1; then
     grep -v '^[[]' out/gpu-build.log | tail -40 >&2
     echo 'Build failed (full log: out/gpu-build.log)' >&2; exit 1
 fi
+if [[ $source_identity != "$("$python" tools/source_identity.py .)" ]]; then
+    echo 'Source changed during this build. Run bash build.sh again.' >&2; exit 1
+fi
 cp "out/gpu/everybodys-golf$exe" out/
 cp settings.example.ini out/
 [[ -n $exe ]] && mkdir -p out/libs && cp out/gpu/libs/libs.manifest out/libs/
 runner="out/everybodys-golf$exe"
 checksum=$(sha256sum "$runner")
 receipt="$runner.build"
-printf '%s\n%s\n' "$revision" "${checksum%% *}" > "$receipt.tmp"
+printf '%s\n%s\n%s\n' "$revision" "${checksum%% *}" "$source_identity" > "$receipt.tmp"
 mv -f -- "$receipt.tmp" "$receipt"
 echo "Built everybodys-golf$exe in $PWD/out"
 if [[ ${1:-} == --test ]]; then
