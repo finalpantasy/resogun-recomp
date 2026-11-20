@@ -3,8 +3,11 @@
 
 #include <algorithm>
 #include <array>
+#include <cstdio>
 #include <cstdlib>
 #include <limits>
+#include <mutex>
+#include <unordered_set>
 
 #include "shader_recompiler/info.h"
 #include "shader_recompiler/ir/basic_block.h"
@@ -77,8 +80,8 @@ void VgprArrayPass(IR::Program& program, u32 num_allocated_vgprs) {
     u64 selects = 0;
     bool indexed_writes = false;
     // Registers that hold SGPR spills (v_writelane/v_readlane) or feed v_readfirstlane stay out of
-    // the array: ReadLaneEliminationPass and sharp tracking follow them through SSA. The compiler
-    // never indexes into its spill registers, so their array slots are simply unused.
+    // array reads: ReadLaneEliminationPass and sharp tracking follow them through SSA. Their writes
+    // still store to the array, since a relative read can reach them.
     std::array<bool, IR::NumVectorRegs> lane_regs{};
     const auto mark_lane_source = [&](const IR::Value& value) {
         const IR::Inst* const source = value.TryInst();
@@ -133,10 +136,31 @@ void VgprArrayPass(IR::Program& program, u32 num_allocated_vgprs) {
     const u32 length = num_allocated_vgprs - base;
     program.info.vgpr_array_size = length + 1;
 
-    const auto in_array = [&](IR::VectorReg reg) {
+    const auto in_range = [&](IR::VectorReg reg) {
         const u32 index = static_cast<u32>(reg);
-        return index >= base && index < num_allocated_vgprs && !lane_regs[index];
+        return index >= base && index < num_allocated_vgprs;
     };
+    const auto in_array = [&](IR::VectorReg reg) {
+        return in_range(reg) && !lane_regs[static_cast<u32>(reg)];
+    };
+    // A lane register inside the range keeps its SSA reads, but its writes still go to the array:
+    // relative reads can reach it. Without the store they read a slot nothing wrote, which drew
+    // the golfer's face grey (pixel shader e018fbaa, 12 decal layers).
+    u32 lane_in_range = 0;
+    for (u32 i = base; i < num_allocated_vgprs; i++) {
+        lane_in_range += lane_regs[i] ? 1 : 0;
+    }
+    static std::mutex logged_mutex;
+    static std::unordered_set<u64> logged;
+    const bool first = lane_in_range != 0 && [&] {
+        std::scoped_lock lock{logged_mutex};
+        return logged.insert(program.info.pgm_hash).second;
+    }();
+    if (first) {
+        std::printf("Shader VGPR array %#llx: %u lane registers in v%u..v%u write through\n",
+                    static_cast<unsigned long long>(program.info.pgm_hash), lane_in_range, base,
+                    num_allocated_vgprs - 1);
+    }
     // Write-through: with only relative reads, the registers stay SSA values and every write in
     // the range also goes to the array, which only the relative reads load from. Most accesses
     // are plain ones, and as array loads they made the driver compile slowly.
@@ -146,7 +170,7 @@ void VgprArrayPass(IR::Program& program, u32 num_allocated_vgprs) {
                 switch (inst.GetOpcode()) {
                 case IR::Opcode::SetVectorRegister: {
                     const IR::VectorReg reg = inst.Arg(0).VectorReg();
-                    if (in_array(reg)) {
+                    if (in_range(reg)) {
                         auto next = IR::Block::InstructionList::s_iterator_to(inst);
                         IR::IREmitter ir{*block, ++next};
                         ir.WriteVgprArray(ir.Imm32(static_cast<u32>(reg) - base),
@@ -190,6 +214,11 @@ void VgprArrayPass(IR::Program& program, u32 num_allocated_vgprs) {
                 if (in_array(reg)) {
                     inst.ReplaceOpcode(IR::Opcode::WriteVgprArray);
                     inst.SetArg(0, IR::Value{static_cast<u32>(reg) - base});
+                } else if (in_range(reg)) {
+                    auto next = IR::Block::InstructionList::s_iterator_to(inst);
+                    IR::IREmitter ir{*block, ++next};
+                    ir.WriteVgprArray(ir.Imm32(static_cast<u32>(reg) - base),
+                                      IR::U32{inst.Arg(1)});
                 }
                 break;
             }

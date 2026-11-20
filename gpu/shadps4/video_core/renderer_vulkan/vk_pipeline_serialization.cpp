@@ -45,7 +45,7 @@ namespace Serialization {
 /* You should increment versions below once corresponding serialization scheme is changed. */
 // resogun: 8 = v_writelane and spilled SGPR reloads (golf-fix v41); 10 = relative VGPR access
 // through a private array in programs with long select chains (VgprArrayPass).
-static constexpr u32 ShaderBinaryVersion = 10u;
+static constexpr u32 ShaderBinaryVersion = 11u;
 static constexpr u32 ShaderMetaVersion = 10u; // resogun: images and samplers specialize on golf-fix v22's LOD 0 sampling
 static constexpr u32 PipelineKeyVersion = 6u; // resogun: Info layout (larger image and sampler lists)
 } // namespace Serialization
