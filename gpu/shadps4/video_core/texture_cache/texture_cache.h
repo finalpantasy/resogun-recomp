@@ -547,7 +547,11 @@ private:
     bool ExactReadbackWaits() const {
         return stale_readbacks && !ResogunToggle::Disabled(ResogunToggle::ExactReadbackWaits);
     }
-    ReadbackQueue<Vulkan::StagingBufferRef> pending_readbacks;
+    using PendingReadbacks = ReadbackQueue<Vulkan::StagingBufferRef>;
+    using ReadbackEntry = PendingReadbacks::Entry;
+    PendingReadbacks pending_readbacks;
+    /// Drops the page protection a pending copy still holds (its released edge pages excepted).
+    void UnwatchReadback(const ReadbackEntry& entry);
     std::mutex readback_mutex;
     std::atomic<bool> has_pending_readbacks{false};
     std::atomic<u64> readback_generation{0};

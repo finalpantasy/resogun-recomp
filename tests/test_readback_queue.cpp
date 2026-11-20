@@ -71,4 +71,33 @@ int main() {
     published.clear();
     queue.Retire([](auto) { return true; }, complete);
     assert((published == std::vector<int>{8}));
+
+    // Edge rule: a game flag stored 0x20 past a 128 KiB render target that is read back. The
+    // write releases only the last page; the copy keeps its other pages and its bytes.
+    using Queue = VideoCore::ReadbackQueue<int>;
+    std::vector<std::pair<std::uint64_t, std::uint64_t>> pages;
+    auto release_page = [&](std::uint64_t page, std::uint64_t size) { pages.emplace_back(page, size); };
+    queue.Push(0x10650ec300, 0x20000, 12, 10);
+    assert(queue.RequiredTick(0x106510c320, 8) == 12);                     // waited before
+    assert(queue.ReleaseEdge(0x106510c320, 8, release_page) == 1);
+    assert((pages == std::vector<std::pair<std::uint64_t, std::uint64_t>>{{0x106510c000, 4096}}));
+    assert(queue.RequiredTick(0x106510c320, 8) == 0);                      // flag write: no wait
+    assert(queue.RequiredTick(0x106510c2f8, 8) == 12);                     // copy bytes still wait
+    assert(queue.RequiredTick(0x10650f0000, 8) == 12);                     // inner pages still wait
+    assert(queue.ReleaseEdge(0x106510c320, 8, release_page) == 0);         // already released
+    assert(queue.ReleaseEdge(0x10650f0010, 8, release_page) == 0);         // inside the bytes
+    assert(queue.ReleaseEdge(0x10650ec100, 8, release_page) == 1);         // the first page too
+    {
+        const auto [begin, end] = Queue::WatchedPages(queue.Entries().front());
+        assert(begin == 0x10650ed000 && end == 0x106510c000);
+    }
+    assert(queue.ReleaseEdge(0x10650ecffc, 8, release_page) == 0);         // spans two pages
+    // A one-page copy released from its only page is no longer watched at all.
+    queue.Push(0x30000100, 0x100, 13, 11);
+    assert(queue.ReleaseEdge(0x30000000, 8, release_page) == 1);
+    assert(!queue.Entries().back().watched);
+    assert(queue.RequiredTick(0x30000000, 8) == 0);
+    unsigned done = 0;
+    queue.Retire([](auto) { return true; }, [&](auto& entry) { done += entry.valid; });
+    assert(done == 2);
 }

@@ -71,6 +71,9 @@ enum : std::uint64_t {
     /// Pipeline binaries are stored once each in pipeline-binaries/shared, the per-pipeline
     /// files hold their keys only; old files are converted at start (vk_pipeline_serialization).
     SharedBinaries = 1ull << 61,
+    /// A CPU write next to a pending GPU-to-RAM copy, on its first or last page but not its bytes,
+    /// releases that page instead of waiting for the copy (readback_queue.h, ReleaseEdge).
+    ReadbackEdgeWrites = 1ull << 63,
     /// A read-only arena buffer read waits for pending GPU-to-RAM image copies only where it
     /// uploads guest memory, not over its whole range (buffer_cache.cpp, ObtainBuffer).
     ArenaReadNoWait = 1ull << 62,

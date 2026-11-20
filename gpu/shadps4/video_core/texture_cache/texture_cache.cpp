@@ -113,6 +113,11 @@ void TextureCache::WatchReadback(VAddr address, u64 size) {
     }
 }
 
+void TextureCache::UnwatchReadback(const ReadbackEntry& entry) {
+    const auto [begin, end] = PendingReadbacks::WatchedPages(entry);
+    if (end > begin) WatchReadback<false>(begin, end - begin);
+}
+
 void TextureCache::RetireReadbacks() {
     pending_readbacks.Retire([this](u64 tick) { return scheduler.IsFree(tick); },
         [this](auto& entry) {
@@ -120,7 +125,7 @@ void TextureCache::RetireReadbacks() {
                 entry.payload.Invalidate();
                 Core::Memory::Instance()->TryWriteBacking(std::bit_cast<u8*>(entry.address),
                     entry.payload.mapped, entry.size);
-                if (entry.watched) WatchReadback<false>(entry.address, entry.size);
+                if (entry.watched) UnwatchReadback(entry);
                 ++readbacks_completed;
             }
             runtime.GetStagingPool().FreeDeferred(entry.payload);
@@ -144,7 +149,11 @@ bool TextureCache::ResolveReadbacks(VAddr address, u64 size, bool assume_locks,
         // copy only stops protecting its page and is still published when the GPU is done.
         if (stale_readbacks && source == ReadbackSource::CpuWrite) {
             readbacks_released += pending_readbacks.ReleaseOutside(address, size, 64_KB,
-                [this](auto& entry) { WatchReadback<false>(entry.address, entry.size); });
+                [this](auto& entry) { UnwatchReadback(entry); });
+        } else if (source == ReadbackSource::CpuWrite &&
+                   !ResogunToggle::Disabled(ResogunToggle::ReadbackEdgeWrites)) {
+            readbacks_released += pending_readbacks.ReleaseEdge(address, size,
+                [this](u64 page, u64 bytes) { WatchReadback<false>(page, bytes); });
         }
         if (!pending_readbacks.RequiredTick(address, size, exact)) {
             if (exact && pending_readbacks.RequiredTick(address, size)) ++readbacks_neighbors;
@@ -188,7 +197,7 @@ void TextureCache::CancelReadbacks(VAddr address, u64 size, bool exact) {
     if (!deferred_readbacks) return;
     std::scoped_lock lock{readback_mutex};
     pending_readbacks.Cancel(address, size, [this](auto& entry) {
-        if (entry.watched) WatchReadback<false>(entry.address, entry.size);
+        if (entry.watched) UnwatchReadback(entry);
         ++readbacks_canceled;
     }, exact);
 }
