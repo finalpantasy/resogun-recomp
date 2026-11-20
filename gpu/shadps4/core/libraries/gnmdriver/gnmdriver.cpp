@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 
@@ -2428,11 +2429,37 @@ s32 PS4_SYSV_ABI sceGnmSubmitDone() {
     HLE_TRACE;
     LOG_DEBUG(Lib_GnmDriver, "called");
     std::scoped_lock lk{m_submit_lock};
+    const auto wait_start = std::chrono::steady_clock::now();
     WaitGpuIdle();
+    // resogun: the guest may run one submission ahead of the GPU, as on PS4. Everybody's Golf
+    // reads a UI constant buffer from the half of its per-frame ring that the CPU fills for the
+    // next frame; when the GPU thread is a frame behind (cold course loads, long host-copy
+    // waits), the next frame's vertices land there first and the loading picture turns magenta.
+    // After a wait that shows such a stall, the guest also waits for its own submission for a
+    // while (bounded, in case the commands wait on something the CPU writes later).
+    // RESOGUN_LAG_GUARD=0 turns this off.
+    static const bool lag_guard = [] {
+        const char* env = std::getenv("RESOGUN_LAG_GUARD");
+        return !(env && env[0] == '0');
+    }();
+    static std::chrono::steady_clock::time_point guard_until{};
+    const auto now = std::chrono::steady_clock::now();
+    if (lag_guard && now - wait_start > std::chrono::milliseconds{50}) {
+        if (now >= guard_until) {
+            std::printf("SubmitDone: GPU thread %lld ms behind, guest waits for each frame\n",
+                        static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                            now - wait_start).count()));
+        }
+        guard_until = now + std::chrono::seconds{2};
+    }
     if (!liverpool->IsGpuIdle()) {
         submission_lock = true;
     }
     liverpool->SubmitDone();
+    if (lag_guard && now < guard_until) {
+        std::unique_lock lock{m_wait_idle};
+        cv_lock.wait_for(lock, std::chrono::milliseconds{250}, [] { return submission_lock == 0; });
+    }
     send_init_packet = true;
     ++frames_submitted;
     DebugState.IncGnmFrameNum();
