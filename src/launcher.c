@@ -505,7 +505,7 @@ static void usage(void) {
            "  --no-dlc             Ignore the extra add-on directory\n"
            "  --entitlements MODE  Built-in or installed-folder mode: builtin | original\n"
            "  --np-mode MODE      Synthetic local account or signed out: local | offline\n"
-           "  --online-id NAME    Local account name (up to 16 bytes)\n"
+           "  --online-id NAME    Local account ID (1-16 ASCII letters, digits, _ or -)\n"
            "  --discovery-port N  Local replay port (0 disables replay)\n"
            "  --local-auth N      Synthetic login fixture, 0 or 1\n"
            "  --local-lobbies N   Local multiplayer replay, 0 or 1\n"
@@ -599,8 +599,12 @@ static int parse(Options *o, int argc, char **argv) {
             char absolute[PATH_CHARS];
             if (!strcmp(golf_env, "GOLF_NP") && strcmp(value, "local") && strcmp(value, "offline"))
                 return option_error(flag, "expected local or offline");
-            if (!strcmp(golf_env, "GOLF_ONLINE_ID") && strlen(value) > 16)
-                return option_error(flag, "expected a name of at most 16 bytes");
+            if (!strcmp(golf_env, "GOLF_ONLINE_ID")) {
+                const size_t length = strlen(value);
+                const char *allowed = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-";
+                if (length > 16 || strspn(value, allowed) != length)
+                    return option_error(flag, "expected 1-16 ASCII letters, digits, underscores or hyphens");
+            }
             if (!strcmp(golf_env, "GOLF_DISCOVERY_PORT")) {
                 if (strlen(value) > 5 || !number(value, 65535))
                     return option_error(flag, "expected a loopback port from 0 through 65535");
