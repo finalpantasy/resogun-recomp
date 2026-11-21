@@ -123,6 +123,25 @@ int compat_random(void *buffer, size_t size) {
     return 0;
 }
 
+/* The system timer at 1 ms (RESOGUN_TIMER_RESOLUTION=0 leaves Windows' 15.6 ms). The game's timed
+ * semaphore, event flag and condition waits go through winpthreads, whose timeouts end on a timer
+ * tick: at 15.6 ms one short wait in a frame turns a 16.7 ms frame into 33 ms. Windows 11 drops a
+ * process's request while its window is hidden or minimized unless the process opts out, so this
+ * opts out first. Returns the resolution in 100 ns units, 0 when unchanged. */
+unsigned long compat_timer_resolution(void) {
+    const char *env = getenv("RESOGUN_TIMER_RESOLUTION");
+    if (env && *env == '0') return 0;
+    PROCESS_POWER_THROTTLING_STATE state = {PROCESS_POWER_THROTTLING_CURRENT_VERSION,
+                                            PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION, 0};
+    SetProcessInformation(GetCurrentProcess(), ProcessPowerThrottling, &state, sizeof state);
+    typedef LONG (WINAPI *SetResolution)(ULONG, BOOLEAN, PULONG);
+    HMODULE ntdll = GetModuleHandleA("ntdll.dll");
+    SetResolution set = ntdll ? (SetResolution)(void *)GetProcAddress(ntdll, "NtSetTimerResolution") : NULL;
+    ULONG actual = 0;
+    if (!set || set(10000, TRUE, &actual) < 0) return 0;
+    return actual;
+}
+
 /* One high-resolution timer per thread (Windows 10 1803+); a plain waitable timer before. */
 static __thread HANDLE sleep_timer;
 void compat_sleep_ns(uint64_t ns) {
