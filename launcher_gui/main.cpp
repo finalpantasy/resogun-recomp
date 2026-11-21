@@ -1166,7 +1166,7 @@ bool http_get(const std::wstring& url, std::string* body, const fs::path* file, 
                         WINHTTP_NO_HEADER_INDEX);
     if (status != 200) {
         close();
-        error = status == 404 ? L"GitHub has no published release yet." :
+        error = status == 404 ? (api ? L"GitHub has no published release yet." : L"The update file is no longer on GitHub. Try again later.") :
                 status == 403 || status == 429 ? L"GitHub is limiting requests from this network right now. Try again in an hour." :
                 L"GitHub answered with an error (HTTP " + std::to_wstring(status) + L"). Try again later.";
         return false;
@@ -1427,7 +1427,7 @@ bool recover_update() {
                 if (!left.empty()) Sleep(500);
             }
             std::error_code e;
-            if (left.empty()) fs::remove(cleanup_path(), e);
+            if (left.empty()) { fs::remove(cleanup_path(), e); GolfUpdate::CleanUpdateDir(update_dir()); }
         }).detach();
     }
     return rolled_back;
