@@ -3,6 +3,8 @@
 // .sha256 file and the hash check, the GitHub release JSON, and the paths an update may write.
 #include <cassert>
 #include <cstdio>
+#include <filesystem>
+#include <fstream>
 #include <string>
 
 #include "../launcher_gui/update_logic.h"
@@ -22,7 +24,7 @@ int main() {
     assert(ParseVersion("12.3.45", v) && v.major == 12 && v.minor == 3 && v.patch == 45);
     assert(ParseVersion("v1.0.0-rc.1+build5", v) && v.pre == "rc.1");
     for (const char* bad : {"", "v", "1", "1.2", "1.2.3.4", "v1..2", "1.2.x", "development", "a1b2c3d", "v0.1.0-",
-                            "v0.1.0-dirty space", "v0.1.0-12-gabcdef0 ", "1.2.3junk"})
+                            "v0.1.0-dirty space", "v0.1.0-12-gabcdef0 ", "v0.1.0-5-gabc1234", "v0.1.0-5-gabc1234-dirty", "v0.1.0-dirty", "1.2.3junk"})
         assert(!ParseVersion(bad, v));
 
     assert(compare("v0.1.0", "v0.1.0") == 0);
@@ -115,6 +117,38 @@ int main() {
     assert(!ParseRelease("{\"tag_name\": \"v1.0.0\"", r));     // cut short
     assert(!ParseRelease("{\"tag_name\": \"v1.0.0\"} x", r));
     assert(ParseRelease("{\"tag_name\": \"v1.0.0\", \"body\": null}", r) && r.notes.empty());
+
+    // Drafts and pre-releases are never offered; a 403/rate-limit body is not a release; a tag that is
+    // not a version never counts as newer; a development build is never offered its own release.
+    assert(ParseRelease("{\"tag_name\": \"v1.0.0\", \"draft\": true}", r) && r.draft && !Offerable(r));
+    assert(ParseRelease("{\"tag_name\": \"v1.0.0\", \"prerelease\": true, \"draft\": false}", r) && r.prerelease && !Offerable(r));
+    assert(ParseRelease("{\"tag_name\": \"v1.0.0\", \"prerelease\": false, \"draft\": null}", r) && Offerable(r));
+    assert(!ParseRelease("{\"message\": \"API rate limit exceeded\", \"documentation_url\": \"https://x\"}", r));
+    assert(!IsNewer("nightly", "v0.1.0") && !IsNewer("latest", "v0.1.0") && !IsNewer("v2", "v0.1.0"));
+    assert(!IsNewer("v0.1.0", "v0.1.0-5-gabc1234") && !IsNewer("v0.1.1", "development"));
+    assert(IsNewer("v0.1.1", "v0.1.0"));
+    {
+        // Cleanup after any outcome: staging and .part files go, the journal and the player's files stay.
+        namespace fs = std::filesystem;
+        const fs::path base = fs::temp_directory_path() / "golf-update-test";
+        fs::remove_all(base);
+        const fs::path up = base / "data" / "update";
+        fs::create_directories(up / "staging" / "libs");
+        fs::create_directories(base / "data" / "save");
+        std::ofstream(base / "data" / "save" / "settings.ini") << "x";
+        std::ofstream(up / "staging" / "libs" / "a.dll") << "x";
+        std::ofstream(up / "z.zip.part") << "x";
+        std::ofstream(up / "journal.txt") << "R a";
+        CleanUpdateDir(up);
+        assert(!fs::exists(up / "staging") && !fs::exists(up / "z.zip.part"));
+        assert(fs::exists(up / "journal.txt") && fs::exists(base / "data" / "save" / "settings.ini"));
+        fs::remove(up / "journal.txt");
+        fs::create_directories(up / "staging"); // the empty leftover of a refused update
+        CleanUpdateDir(up);
+        assert(!fs::exists(up) && fs::exists(base / "data" / "save" / "settings.ini"));
+        CleanUpdateDir(up); // missing folder: nothing to do
+        fs::remove_all(base);
+    }
 
     // Zip entries: inside the release's top folder only.
     assert(InstallPath("everybodys-golf-pc-v0.2.0/EverybodysGolf.exe") == "EverybodysGolf.exe");

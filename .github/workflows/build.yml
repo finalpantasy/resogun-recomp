@@ -89,8 +89,22 @@ jobs:
       - name: Python tests
         run: cd tests && python -m unittest discover -p "test_*.py"
 
+      # The Windows zip bundles tools that live in the maintainer's project folder, not in this
+      # repository (embedded Python, Real-ESRGAN, the online service). Without them the job stops after
+      # the build and tests with a notice instead of failing, and no Windows zip is published.
+      - name: Check the packaging tools
+        id: tools
+        run: |
+          if python tools/package.py --check-tools; then
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=Windows zip not packaged::The project-only tools it bundles are not in this checkout, so the build and tests ran but no zip was made. Release the Windows zip from the maintainer's PC (python tools/package.py --zip --version vX.Y.Z)."
+          fi
+
       - name: Package
         id: package
+        if: steps.tools.outputs.ok == 'true'
         env:
           GOLF_VERSION: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || '' }}
         run: |
@@ -100,6 +114,7 @@ jobs:
           echo "release=$(cat dist/release.txt)-windows-x64" >> "$GITHUB_OUTPUT"
 
       - uses: actions/upload-artifact@v4
+        if: steps.tools.outputs.ok == 'true'
         with:
           name: ${{ env.RELEASE }}
           path: |
@@ -107,11 +122,13 @@ jobs:
             out/${{ env.RELEASE }}.zip.sha256
           compression-level: 0
       - uses: actions/upload-artifact@v4
+        if: steps.tools.outputs.ok == 'true'
         with:
           name: ${{ env.RELEASE }}-debug
           path: out/${{ env.RELEASE }}-debug.zip
           compression-level: 0
       - uses: actions/upload-artifact@v4
+        if: steps.tools.outputs.ok == 'true'
         with:
           name: ${{ env.RELEASE }}-symbols
           path: out/${{ env.RELEASE }}-symbols.zip
@@ -227,9 +244,18 @@ jobs:
           docker run --rm -v "$PWD:/w" "${{ matrix.image }}" \
             bash /w/.github/scripts/smoke-test.sh "/w/unpacked/${{ needs.linux.outputs.release }}"
 
+  publish-skipped:
+    if: startsWith(github.ref, 'refs/tags/v') && needs.windows.outputs.release == ''
+    needs: [windows]
+    runs-on: ubuntu-24.04
+    steps:
+      - run: echo "::notice title=Release not published::The Windows zip was not built (its project-only tools are missing here), so nothing was published. Build and publish the release from the maintainer's PC."
+
   # v* tags: the release, with what players download and nothing else (no symbols or debug builds).
+  # Skipped (with a notice) when the Windows job could not package: a release without the Windows zip
+  # would never reach the launcher's updater.
   publish:
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/v') && needs.windows.outputs.release != ''
     needs: [notes, windows, linux, linux-smoke]
     runs-on: ubuntu-24.04
     permissions:

@@ -9,6 +9,8 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
+#include <system_error>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -47,6 +49,16 @@ inline bool ParseVersion(std::string_view text, Version& out) {
         if (core[i++] != '.') return false;
     }
     if (count != 3 || i != core.size()) return false;
+    // `git describe` output of a development build ("v0.1.0-5-gabc1234", "...-dirty") is not a release.
+    {
+        std::string_view rest = pre;
+        if (rest == "dirty") return false;
+        if (rest.size() > 6 && rest.substr(rest.size() - 6) == "-dirty") rest.remove_suffix(6);
+        const size_t g = rest.rfind("-g");
+        if (g != std::string_view::npos && g + 2 < rest.size() && rest.substr(g + 2).find_first_not_of("0123456789abcdef") == std::string_view::npos &&
+            g > 0 && rest.substr(0, g).find_first_not_of("0123456789") == std::string_view::npos)
+            return false;
+    }
     for (char c : pre)
         if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '.' || c == '-')) return false;
     out = {parts[0], parts[1], parts[2], std::string(pre)};
@@ -216,7 +228,7 @@ inline bool HashMatches(std::string_view expected, std::string_view actual) {
 // --- the GitHub release JSON -----------------------------------------------------------------------
 
 struct Asset { std::string name, url; };
-struct Release { std::string tag, name, notes, page; std::vector<Asset> assets; };
+struct Release { std::string tag, name, notes, page; bool draft = false, prerelease = false; std::vector<Asset> assets; };
 
 // A small JSON reader for the release object: strings (with \u escapes as UTF-8), numbers, literals,
 // arrays and objects; it keeps only the fields Release names.
@@ -229,6 +241,8 @@ public:
                 if (key == "name") return string_or_null(out.name);
                 if (key == "body") return string_or_null(out.notes);
                 if (key == "html_url") return string_or_null(out.page);
+                if (key == "draft") return boolean(out.draft);
+                if (key == "prerelease") return boolean(out.prerelease);
                 if (key == "assets") return array([&] {
                     Asset a;
                     if (!object([&](const std::string& k) {
@@ -330,6 +344,12 @@ private:
         }
         return false;
     }
+    bool boolean(bool& out) {
+        space();
+        if (s_.substr(i_, 4) == "true") { i_ += 4; out = true; return true; }
+        if (s_.substr(i_, 5) == "false") { i_ += 5; out = false; return true; }
+        return skip(); // null or anything else: not a draft
+    }
     bool string_or_null(std::string& out) {
         space();
         if (s_.substr(i_, 4) == "null") { i_ += 4; out.clear(); return true; }
@@ -370,6 +390,10 @@ inline bool PickWindowsAssets(const Release& r, Asset& zip, Asset& sha) {
     }
     return false;
 }
+
+// Whether a release may be offered: drafts and pre-releases never are (the "latest release" API
+// leaves them out already; this covers a pointed-at test server and a changed API).
+inline bool Offerable(const Release& r) { return !r.draft && !r.prerelease; }
 
 // --- what an update may replace ----------------------------------------------------------------------
 
@@ -418,6 +442,22 @@ inline bool PlayerOwned(std::string_view path) {
     for (std::string_view file : {"paths.ini", "settings.ini", "launcher.ini"})
         if (SameText(path, file)) return true;
     return false;
+}
+
+// --- leftovers ---------------------------------------------------------------------------------------
+
+// After every outcome of an update (applied, refused, bad hash, locked file, rolled back, canceled):
+// removes `update_dir`\staging and any *.part download, then the folder itself when nothing else is
+// in it. journal.txt and cleanup.txt stay (a rollback or the old-file cleanup still needs them), and
+// nothing outside `update_dir` is touched.
+inline void CleanUpdateDir(const std::filesystem::path& update_dir) {
+    std::error_code ec;
+    if (!std::filesystem::is_directory(update_dir, ec)) return;
+    std::filesystem::remove_all(update_dir / "staging", ec);
+    for (std::filesystem::directory_iterator it(update_dir, ec), end; !ec && it != end; it.increment(ec))
+        if (it->is_regular_file(ec) && it->path().extension() == ".part") std::filesystem::remove(it->path(), ec);
+    ec.clear();
+    std::filesystem::remove(update_dir, ec); // only succeeds when empty
 }
 
 } // namespace GolfUpdate

@@ -292,6 +292,17 @@ def add_windows_tools(out, ship):
     ship(clang64 / 'share' / 'licenses' / 'openssl' / 'LICENSE', 'tools/server/LICENSE-openssl.txt')
 
 
+def missing_project_tools():
+    """What the Windows zip needs from the private project folder (ROOT, outside this repository):
+    the cached Python, Real-ESRGAN, the online service and its URL map. A public checkout has none."""
+    py = ROOT / 'tools' / 'python-embed'
+    wanted = [(py / 'runtime' / 'python.exe', py / f'python-{PY_VERSION}-embed-amd64.zip'),
+              (ROOT / 'tools' / 'realesrgan' / 'realesrgan-ncnn-vulkan.exe',),
+              (ROOT / 'server' / 'host.py',),
+              (ROOT / 'analysis' / 'online' / 'title-url-map.tsv',)]
+    return [str(options[0]) for options in wanted if not any(o.is_file() for o in options)]
+
+
 def build_installer(out, release):
     iscc = next((c for c in (ROOT / 'tools' / 'innosetup' / 'ISCC.exe', shutil.which('ISCC')) if c and Path(c).is_file()), None)
     if not iscc:
@@ -457,7 +468,14 @@ def main():
     p.add_argument('--zip', action='store_true', help='also write out/<release>.zip (and <release>-symbols.zip)')
     p.add_argument('--debug', action='store_true', help='keep debug info in the exes and ship the diagnose/ kit')
     p.add_argument('--version', help='release version such as v0.1.0: names the archives and must match the build (GOLF_VERSION)')
+    p.add_argument('--check-tools', action='store_true',
+                   help='only check that the project-only tools the Windows zip bundles are present (exit 1 and list them if not)')
     a = p.parse_args()
+    if a.check_tools:
+        missing = [] if LINUX else missing_project_tools()
+        for path in missing:
+            print(f'missing: {path}')
+        return 1 if missing else 0
     if a.version and not VERSION.fullmatch(a.version):
         p.error('--version takes vMAJOR.MINOR.PATCH, such as v0.1.0')
     bin_dir = Path(os.environ.get('MSYS2_ROOT', r'C:\msys64')) / 'clang64' / 'bin'

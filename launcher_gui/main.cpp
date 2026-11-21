@@ -1206,7 +1206,7 @@ void start_update_check(bool manual) {
         } else if (!http_get(release_api(), &body, nullptr, nullptr, 2 << 20, true, message)) {
         } else if (!GolfUpdate::ParseRelease(body, found->release)) {
             message = L"GitHub's answer could not be read. Try again later.";
-        } else if (!GolfUpdate::IsNewer(found->release.tag, kVersion)) {
+        } else if (!GolfUpdate::Offerable(found->release) || !GolfUpdate::IsNewer(found->release.tag, kVersion)) {
             message = L"You have the newest version.";
         } else if (!GolfUpdate::PickWindowsAssets(found->release, found->zip, found->sha)) {
             message = L"Version " + wide(found->release.tag) + L" is out, but its Windows download is not ready yet. Try again later.";
@@ -1268,6 +1268,7 @@ void download_update() {
         fs::create_directories(dir, ec);
         std::wstring error;
         auto fail = [&](const std::wstring& why) {
+            GolfUpdate::CleanUpdateDir(dir);
             PostMessageW(update_window, WM_UPDATE_STATUS, 0, (LPARAM)new std::wstring(why));
             PostMessageW(window, WM_UPDATE_READY, 0, 0);
         };
@@ -1302,7 +1303,7 @@ void download_update() {
             return fail(error + L" Nothing changed.");
         }
         fs::remove(part, ec);
-        PostMessageW(window, WM_UPDATE_READY, 1, 0);
+        PostMessageW(window, WM_UPDATE_READY, 1, 0); // staging stays for apply_update, which cleans up
     }).detach();
 }
 
@@ -1343,7 +1344,7 @@ bool apply_update(std::wstring& error) {
     std::error_code ec;
     for (auto it = fs::recursive_directory_iterator(staging, ec); !ec && it != fs::recursive_directory_iterator(); it.increment(ec))
         if (it->is_regular_file(ec)) files.push_back(fs::relative(it->path(), staging, ec));
-    if (ec || files.empty()) { error = L"The unpacked update could not be read."; return false; }
+    if (ec || files.empty()) { error = L"The unpacked update could not be read."; GolfUpdate::CleanUpdateDir(update_dir()); return false; }
     // The launcher last, so the rest is in place before the program that starts next.
     std::stable_partition(files.begin(), files.end(), [](const fs::path& p) { return _wcsicmp(p.c_str(), L"EverybodysGolf.exe") != 0; });
     std::ofstream journal(journal_path(), std::ios::binary | std::ios::trunc);
@@ -1373,6 +1374,7 @@ bool apply_update(std::wstring& error) {
     journal.close();
     if (!error.empty()) {
         roll_back();
+        GolfUpdate::CleanUpdateDir(update_dir());
         return false;
     }
     std::ifstream in(journal_path(), std::ios::binary);
@@ -1384,7 +1386,7 @@ bool apply_update(std::wstring& error) {
     }
     in.close();
     fs::remove(journal_path(), ec);
-    fs::remove_all(staging, ec);
+    GolfUpdate::CleanUpdateDir(update_dir());
     return true;
 }
 
@@ -1394,7 +1396,7 @@ bool recover_update() {
     std::error_code ec;
     const bool rolled_back = fs::exists(journal_path(), ec);
     if (rolled_back) roll_back();
-    fs::remove_all(update_dir() / L"staging", ec);
+    GolfUpdate::CleanUpdateDir(update_dir());
     if (fs::exists(cleanup_path(), ec)) {
         std::thread([] {
             std::vector<fs::path> left;
@@ -2090,6 +2092,7 @@ void on_update_ready(bool ready) {
         if (apply_update(error)) { restart_updated(); return; }
         update_status(error + L" The previous version was kept.");
     } else if (update_cancel) {
+        GolfUpdate::CleanUpdateDir(update_dir());
         close_update_window();
         return;
     }
