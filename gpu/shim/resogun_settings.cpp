@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
+#include <cmath>
 #include "resogun_settings.h"
 #include "resogun_graphics.h"
 
@@ -33,6 +34,14 @@ const char* ReadPath() {
     const char* fallback = std::getenv("RESOGUN_CONFIG_DEFAULT");
     return fallback && fallback[0] ? fallback : Path();
 }
+
+std::string Lower(std::string_view value) {
+    std::string lower;
+    for (const char c : value) lower += char(std::tolower(static_cast<unsigned char>(c)));
+    return lower;
+}
+
+constexpr const char* SharpeningNames[3] = {"soft", "default", "strong"};
 
 bool Truthy(std::string_view value) {
     std::string lower;
@@ -83,6 +92,13 @@ void Set(Values& v, const std::string& key, const std::string& value) {
         v.title_back_exits = Truthy(value);
     } else if (key == "sharpening") {
         v.sharpening = Truthy(value);
+    } else if (key == "sharpening_strength") {
+        const std::string t = Lower(value);
+        v.sharpening_strength = t == "soft" || t == "low" ? 0 : t == "strong" || t == "high" ? 2 : 1;
+    } else if (key == "anisotropy") {
+        v.anisotropy = i >= 16 ? 16 : i >= 8 ? 8 : i >= 2 ? 4 : 0;
+    } else if (key == "texture_lod_bias") {
+        v.texture_lod_auto = Lower(value) == "auto" || Truthy(value);
     } else if (key == "smaa") {
         v.smaa = Truthy(value);
     } else if (key == "hdr") {
@@ -126,6 +142,9 @@ std::vector<std::pair<std::string, std::string>> DisplayKeys() {
         {"frame_rate", std::to_string(v.frame_rate.load())},
         {"render_resolution", std::string(RenderResolutionKeys[std::clamp(v.render_resolution.load(), 0, RenderResolutionCount - 1)])},
         {"sharpening", v.sharpening ? "1" : "0"},
+        {"sharpening_strength", SharpeningNames[std::clamp(v.sharpening_strength.load(), 0, 2)]},
+        {"anisotropy", v.anisotropy ? std::to_string(v.anisotropy.load()) : std::string("off")},
+        {"texture_lod_bias", v.texture_lod_auto ? "auto" : "off"},
         {"smaa", v.smaa ? "1" : "0"},
         {"hdr", v.hdr ? "1" : "0"},
         {"frame_generation", v.frame_generation ? "1" : "0"},
@@ -255,6 +274,9 @@ void Load() {
         {"RESOGUN_FRAME_GENERATION", "frame_generation"},
         {"RESOGUN_SHARPENING", "sharpening"},
         {"RESOGUN_SMAA", "smaa"},
+        {"RESOGUN_SHARPENING_STRENGTH", "sharpening_strength"},
+        {"RESOGUN_ANISOTROPY", "anisotropy"},
+        {"RESOGUN_TEXTURE_LOD_BIAS", "texture_lod_bias"},
     };
     for (const auto& [env, key] : env_keys) {
         if (const char* value = std::getenv(env); value && value[0]) {
@@ -311,6 +333,18 @@ extern "C" int resogun_skip_intro(void) {
 extern "C" int resogun_frame_rate_priority(void) {
     return ResogunSettings::Get().startup_frame_rate_priority ? 1 : 0;
 }
+
+namespace ResogunSettings {
+float TextureLodBias() {
+    const Values& v = Get();
+    if (!v.texture_lod_auto) return 0.0f;
+    // The render height in use: the setting, else the game's own (1080 in 60 FPS mode, else 1800).
+    const int height = v.render_height > 0 ? v.render_height.load() : v.frame_rate_priority ? 1080 : 1800;
+    // Half a mip level, not log2(height / 1080): at the window's own size the GPU already picks
+    // finer levels for a taller render, so a full level per doubling would mostly add shimmer.
+    return height > 1080 ? -std::min(0.5f, std::log2(float(height) / 1080.0f)) : 0.0f;
+}
+} // namespace ResogunSettings
 
 extern "C" int resogun_title_back_exits(void) {
     return ResogunSettings::Get().title_back_exits.load(std::memory_order_relaxed) ? 1 : 0;

@@ -191,6 +191,15 @@ struct Values {
     /// FSR 1 RCAS sharpening of the picture as the window shows it (key sharpening,
     /// RESOGUN_SHARPENING; on by default): the presenter reads it at each frame.
     std::atomic<bool> sharpening{true};
+    /// RCAS strength (key sharpening_strength: soft, default, strong; RESOGUN_SHARPENING_STRENGTH):
+    /// an index into SharpeningStrengths; the presenter reads it at each frame.
+    std::atomic<int> sharpening_strength{1};
+    /// Anisotropic filtering override of the game's linear samplers (key anisotropy: off, 4, 8, 16;
+    /// RESOGUN_ANISOTROPY): 0 keeps the game's own, else the level it is raised to at least.
+    std::atomic<int> anisotropy{0};
+    /// Texture LOD bias for render sizes above 1080 lines (key texture_lod_bias: off, auto;
+    /// RESOGUN_TEXTURE_LOD_BIAS): auto sharpens by half a mip level above 1080 lines.
+    std::atomic<bool> texture_lod_auto{false};
     /// SMAA 1x anti-aliasing of the game's picture at its render size (key smaa, RESOGUN_SMAA;
     /// off by default, the game's own look): the presenter reads it at each frame.
     std::atomic<bool> smaa{false};
@@ -227,6 +236,12 @@ void SaveDisplayIfChanged();
 
 /// Refresh rate of the window's display in Hz (0 unknown), looked up at most every 500 ms.
 double DisplayRefresh();
+
+/// Sharpness values of RCAS (FSR's exp2(-stops)): soft (1 stop), the default (0.25 stop), strong (none).
+inline constexpr float SharpeningStrengths[3] = {0.5f, 0.8409f, 1.0f};
+/// The mip bias the texture LOD option adds to the game's samplers at the current render height
+/// (0 when off, or at 1080 lines and below).
+float TextureLodBias();
 
 /// The frame rate the game runs at: frame_rate, lowered to the highest of FrameRates the window's
 /// display refreshes at, since a frame shown later than the engine's target slows the game (it

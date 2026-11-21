@@ -1555,12 +1555,17 @@ vk::Sampler TextureCache::GetSampler(const AmdGpu::Sampler& sampler,
                                      AmdGpu::BorderColorBuffer border_color_base,
                                      const bool is_depth, float extra_lod_bias) {
     // Compare and plain uses of one S# need separate samplers; so do extra LOD biases.
-    const u64 hash = HashCombine(HashCombine(XXH3_64bits(&sampler, sizeof(sampler)), is_depth),
-                                 u64(std::bit_cast<u32>(extra_lod_bias)));
+    // resogun: the texture LOD bias and anisotropy options are part of the key, so a change of
+    // either makes new samplers (the old ones age out).
+    if (!is_depth) extra_lod_bias += ResogunSettings::TextureLodBias();
+    const u32 aniso_override = u32(ResogunSettings::Get().anisotropy.load(std::memory_order_relaxed));
+    const u64 hash = HashCombine(HashCombine(HashCombine(XXH3_64bits(&sampler, sizeof(sampler)), is_depth),
+                                             u64(std::bit_cast<u32>(extra_lod_bias))),
+                                 u64(aniso_override));
 
     std::scoped_lock lock{samplers_mutex};
     const auto [it, new_sampler] = samplers.try_emplace(hash, instance, sampler, border_color_base,
-                                                        is_depth, extra_lod_bias);
+                                                        is_depth, extra_lod_bias, aniso_override);
     if (new_sampler) {
         samplers.at(hash).lru_id = sampler_lru_cache.Insert(hash, gc_tick);
     } else {

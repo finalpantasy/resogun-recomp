@@ -151,7 +151,7 @@ std::atomic<bool> cheats_open{false};
 int cheat_row = 0;
 bool cheats_dirty = false;
 // Everybody's Golf has no aspect ratio or frame rate patch (Resogun's rows), so those are not listed.
-enum DisplayRow : int { RowMode, RowResolution, RowMonitor, RowVsync, RowRender, RowSixty, RowFrameGen, RowSharpen, RowSmaa, RowHd, RowHdr, RowCount };
+enum DisplayRow : int { RowMode, RowResolution, RowMonitor, RowVsync, RowRender, RowSixty, RowFrameGen, RowSharpen, RowSharpness, RowAniso, RowLod, RowSmaa, RowHd, RowHdr, RowCount };
 // The render heights the panel steps through (settings.ini render_height; 0 is the game's own).
 constexpr std::array<int, 6> kRenderHeights = {0, 1080, 1440, 1800, 2160, 2880};
 extern "C" int runtime_game_golf_set_render_height(int height);
@@ -402,6 +402,15 @@ void ChangeDisplayRow(int row, int delta) {
     case RowHd: s.hd_textures = !s.hd_textures; break;
     case RowFrameGen: s.frame_generation = !s.frame_generation; break;
     case RowSharpen: s.sharpening = !s.sharpening; break;
+    case RowSharpness: s.sharpening_strength = (s.sharpening_strength.load() + delta + 3) % 3; break;
+    case RowAniso: { // Game's own, 4x, 8x, 16x
+        static constexpr int kLevels[4] = {0, 4, 8, 16};
+        int i = 0;
+        while (i < 3 && kLevels[i] != s.anisotropy.load()) ++i;
+        s.anisotropy = kLevels[(i + delta + 4) % 4];
+        break;
+    }
+    case RowLod: s.texture_lod_auto = !s.texture_lod_auto; break;
     case RowSmaa: s.smaa = !s.smaa; break;
     case RowHdr: s.hdr = !s.hdr; break;
     default: return;
@@ -502,6 +511,25 @@ DisplayRowText DisplayRowAt(int row) {
         return {"Sharpening", s.sharpening ? "On" : "Off",
                 "AMD FSR 1 RCAS sharpening of the picture at the window's size: crisper edges and detail, "
                 "without halos. Costs well under a millisecond a frame. Applies at once; F9 switches it over the game."};
+    case RowSharpness: {
+        static const char* const names[3] = {"Soft", "Default", "Strong"};
+        return {"Sharpening strength", names[std::clamp(s.sharpening_strength.load(), 0, 2)],
+                "How hard the RCAS pass sharpens: Soft is half the default's strength before halos, "
+                "Strong is the most the filter allows. Applies at once; no effect with Sharpening off.",
+                s.sharpening.load(), s.sharpening.load()};
+    }
+    case RowAniso: {
+        const int level = s.anisotropy.load();
+        return {"Anisotropic filtering", level ? std::to_string(level) + "x" : std::string("Game's own"),
+                "Keeps textures sharp at a slant, like fairways and greens far ahead. Raises the game's "
+                "linear texture filtering to at least this level; Game's own leaves it as the game sets it. "
+                "Applies to new draws within moments; costs little on a modern GPU."};
+    }
+    case RowLod:
+        return {"High-res texture detail", s.texture_lod_auto ? "Auto" : "Off",
+                "Auto picks sharper texture detail levels when the render resolution is above 1080 lines "
+                "(half a level from 1620 lines up), so fine texture detail holds at native 4K; it can add a "
+                "little shimmer. Off keeps the game's own. Applies to new draws within moments."};
     case RowSmaa:
         return {"Anti-aliasing", s.smaa ? "SMAA" : "Off",
                 "SMAA 1x smooths jagged edges of the game's picture at its render size, before it is scaled "

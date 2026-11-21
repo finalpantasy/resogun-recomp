@@ -734,7 +734,8 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
     if (pp_settings.easu) {
         pp_pass.Render(cmdbuf, image_view, image_size, rcas_pass.Input(cmdbuf, draw_scheduler, *frame),
                        pp_settings);
-        rcas_pass.Render(cmdbuf, *frame, HostPasses::RcasPass::DefaultSharpness);
+        rcas_pass.Render(cmdbuf, *frame, ResogunSettings::SharpeningStrengths[std::clamp(
+                              ResogunSettings::Get().sharpening_strength.load(std::memory_order_relaxed), 0, 2)]);
     } else {
         pp_pass.Render(cmdbuf, image_view, image_size, *frame, pp_settings);
     }
