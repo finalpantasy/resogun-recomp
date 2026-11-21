@@ -862,10 +862,6 @@ int main(int argc, char **argv) {
      * TCB needs one of the 64 TEB TLS slots before DLLs (Vulkan drivers) take them. */
     runtime_memory_reserve();
     runtime_thread_tcb_offset();
-    {
-        const unsigned long tick = compat_timer_resolution();
-        if (tick) printf("Timer: %.2f ms system timer\n", tick / 1e4);
-    }
 #endif
     int cpu_only = 0, strict_imports = 0, check_imports = 0;
     unsigned timeout_seconds = 10;

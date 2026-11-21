@@ -72,8 +72,6 @@ int compat_random(void *buffer, size_t size);
 /* Sleeps with sub-millisecond precision (high-resolution waitable timer; winpthreads'
  * nanosleep rounds up to the 15.6 ms scheduler tick). */
 void compat_sleep_ns(uint64_t ns);
-/* The system timer at 1 ms for this process (compat_win.c); 100 ns units, 0 when unchanged. */
-unsigned long compat_timer_resolution(void);
 /* rm -rf: 0 when the tree is gone (or never existed). */
 int compat_remove_tree(const char *path);
 /* errno for a Win32 error code. */

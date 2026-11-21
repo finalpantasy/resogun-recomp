@@ -470,13 +470,9 @@ static ABI int32_t thread_cancel(GuestThread *t) {
     if (runtime_verbose()) printf("Runtime: guest thread '%s' cancel requested\n",t->name);
     return 0;
 }
-int runtime_thread_cancel_pending(void) {
-    const GuestThread *t=current;
-    return t && !t->host_owned && __atomic_load_n(&t->cancel_pending,__ATOMIC_ACQUIRE);
-}
 void runtime_thread_testcancel(void) {
     GuestThread *t=current;
-    if (!runtime_thread_cancel_pending()) return;
+    if (!t || t->host_owned || !__atomic_load_n(&t->cancel_pending,__ATOMIC_ACQUIRE)) return;
     if (runtime_verbose()) printf("Runtime: guest thread '%s' cancelled\n",t->name);
     t->result=(void *)1;
     exit_longjmp(t);
