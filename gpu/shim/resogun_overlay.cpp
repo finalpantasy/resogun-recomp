@@ -486,10 +486,18 @@ DisplayRowText DisplayRowAt(int row) {
     }
     case RowSixty: {
         std::string text = s.frame_rate_priority ? "On" : "Off";
-        if (s.frame_rate_priority != s.startup_frame_rate_priority) text += "  (after restart)";
+        if (s.frame_rate_priority != s.startup_frame_rate_priority) {
+            text += "  (after restart)";
+        } else if (s.frame_rate_priority && s.render_resolution != ResogunSettings::Render4k) {
+            text += "  (needs PS4 Pro mode)"; // render_resolution=1080p: the game's mode is a Pro option
+        } else if (s.frame_rate_priority && s.startup_render_resolution != ResogunSettings::Render4k) {
+            text += "  (after restart)";
+        }
         return {"60 FPS mode", text,
                 "The game's frame rate priority mode held on in every scene: 60 FPS at the tee, in shots and "
-                "flyovers. Off gives the game's own choice from its Options menu. Applies after a restart."};
+                "flyovers. It is a PS4 Pro option: picking any Render resolution size, or render_resolution=4k in "
+                "settings.ini, turns Pro mode on. Off "
+                "gives the game's own choice from its Options menu. Applies after a restart."};
     }
     case RowHd: {
         const bool pack = !s.texture_pack.empty();
