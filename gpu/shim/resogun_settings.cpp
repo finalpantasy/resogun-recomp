@@ -111,6 +111,8 @@ void Set(Values& v, const std::string& key, const std::string& value) {
         if (!value.empty() && !listed) {
             std::printf("Settings: frame_rate=%s is not 30, 60, 90, 120, 144 or 180; using 60\n", value.c_str());
         }
+    } else if (key == "audio_volume") {
+        v.audio_volume = std::clamp(i, 0, 100);
     } else if (key == "audio_channels") {
         v.audio_channels = ParseAudioChannels(value);
     } else if (key == "render_resolution") {
@@ -263,7 +265,7 @@ void Load() {
         {"RESOGUN_MONITOR", "monitor"},           {"RESOGUN_WINDOW", "output_resolution"},
         {"RESOGUN_OUTPUT_RESOLUTION", "output_resolution"},
         {"RESOGUN_ASPECT_RATIO", "aspect_ratio"},
-        {"RESOGUN_AUDIO_CHANNELS", "audio_channels"},
+        {"RESOGUN_AUDIO_CHANNELS", "audio_channels"}, {"RESOGUN_AUDIO_VOLUME", "audio_volume"},
         {"RESOGUN_SKIP_INTRO", "skip_intro"},     {"RESOGUN_FRAME_RATE", "frame_rate"},
         {"RESOGUN_TITLE_BACK_EXITS", "title_back_exits"},
         {"RESOGUN_FRAME_RATE_PRIORITY", "frame_rate_priority"},

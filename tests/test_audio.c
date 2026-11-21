@@ -17,6 +17,7 @@ uintptr_t runtime_lookup(const RuntimeExport *table, size_t count, const char *n
 }
 /* The menu's audio setting (resogun_gpu.cpp): the layout that follows the device. */
 int resogun_gpu_audio_channels(void) { return 0; }
+int resogun_gpu_audio_volume(void) { return 100; }
 /* The controller speaker (runtime_pad.c): no controller here. */
 int runtime_pad_speaker(void) { return RUNTIME_PAD_SPEAKER_NONE; }
 void runtime_pad_speaker_route(int on) { (void)on; }

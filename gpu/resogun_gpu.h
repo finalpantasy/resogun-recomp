@@ -87,6 +87,8 @@ void resogun_gpu_common_dialog_initialized(void);
 /* Speaker layout for the game's 7.1 audio (settings.ini audio_channels): 0 automatic (the
  * device's), 1 stereo, 2 5.1, 3 7.1. Read when an audio port is opened. */
 int resogun_gpu_audio_channels(void);
+/* Master volume of the game's audio, 0..100 percent (settings.ini audio_volume), read live. */
+int resogun_gpu_audio_volume(void);
 /* Number of symbols registered by the vendored libraries (diagnostics). */
 unsigned resogun_gpu_symbol_count(void);
 /* Yields of threads waiting for guest memory copies (CPU report). */

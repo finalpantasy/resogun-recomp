@@ -184,6 +184,8 @@ struct Values {
     std::atomic<int> frame_rate{60};
     /// Speaker layout of the game's audio (AudioChannels), read when the game opens its ports.
     std::atomic<int> audio_channels{AudioChannelsAuto};
+    /// Master volume of the game's audio, 0..100 percent (settings.ini audio_volume); live, applied per buffer.
+    std::atomic<int> audio_volume{100};
     /// RenderResolution, 4k by default; read once, before the game starts.
     int startup_render_resolution = Render4k;
     /// What the Display Settings pages save for the next start.

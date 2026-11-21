@@ -50,6 +50,9 @@ typedef struct {
     uint64_t last_output_us;
     pthread_mutex_t lock;
     FILE *dump;                     /* RESOGUN_AUDIO_DUMP: raw converted PCM per port */
+    FILE *wav; uint64_t wav_bytes;  /* RESOGUN_AUDIO=wav:<path>: the port's output as a WAV file */
+    float master_prev;              /* master gain of the previous buffer, for a ramp across this one */
+    uint64_t last_call_ns, late_calls, max_late_ns; /* the game's calls more than 1.5 periods apart: underruns */
     int stats;
     uint64_t stat_start_ns, stat_last_ns, stat_max_gap_ns; /* RESOGUN_AUDIO_STATS */
     unsigned stat_starved, stat_buffers; int stat_min_queued;
@@ -75,7 +78,7 @@ static void sleep_until(uint64_t deadline) {
 static int sdl_audio(void) {
     if (sdl_ready<0) {
         const char *mode=getenv("RESOGUN_AUDIO");
-        sdl_ready = (!mode || strcmp(mode,"none")) && SDL_InitSubSystem(SDL_INIT_AUDIO);
+        sdl_ready = (!mode || (strcmp(mode,"none") && strncmp(mode,"wav:",4))) && SDL_InitSubSystem(SDL_INIT_AUDIO);
         printf("Runtime: audio backend %s\n", sdl_ready ? SDL_GetCurrentAudioDriver() : "timer (silent)");
     }
     return sdl_ready;
@@ -164,12 +167,39 @@ static void track_peaks(Port *p, const void *data) {
     ++p->data_buffers;
 }
 
+/* Master volume (settings audio_volume, percent): amplitude is the square of the slider, so 50 is -12 dB
+   and 100 is exactly the game's level. */
+static float master_gain(void) {
+    int v=resogun_gpu_audio_volume();
+    float x=(float)(v<0 ? 0 : v>100 ? 100 : v)/100.0f;
+    return x*x;
+}
+
+/* RESOGUN_AUDIO=wav:<path>: each port writes <path>.port<N>.wav (16-bit PCM or 32-bit float, 48 kHz,
+   the channels sent to the device). The header is rewritten as data arrives, so a killed run still
+   leaves a readable file. */
+static void wav_header(Port *p) {
+    unsigned char h[44];
+    const uint32_t rate=48000, ch=(uint32_t)p->out_channels, bits=(uint32_t)p->sample_bytes*8;
+    const uint32_t align=ch*bits/8, bytes=(uint32_t)p->wav_bytes;
+    const uint16_t tag=p->is_float ? 3 : 1;
+    memcpy(h,"RIFF",4); uint32_t v=36+bytes; memcpy(h+4,&v,4); memcpy(h+8,"WAVEfmt ",8);
+    v=16; memcpy(h+16,&v,4); memcpy(h+20,&tag,2); uint16_t s=(uint16_t)ch; memcpy(h+22,&s,2);
+    memcpy(h+24,&rate,4); v=rate*align; memcpy(h+28,&v,4); s=(uint16_t)align; memcpy(h+32,&s,2);
+    s=(uint16_t)bits; memcpy(h+34,&s,2); memcpy(h+36,"data",4); memcpy(h+40,&bytes,4);
+    fseek(p->wav,0,SEEK_SET); fwrite(h,1,44,p->wav); fseek(p->wav,0,SEEK_END); fflush(p->wav);
+}
+static void wav_close(Port *p) {
+    if (!p->wav) return;
+    wav_header(p); fclose(p->wav); p->wav=NULL;
+}
+
 /* One period of the game's samples to what the device stream takes: the port's per-channel
    volumes, PS4 8ch (L R C LFE SL SR BL BR) to SDL 7.1 order, then folded to `out_channels` when
    that is fewer. Folded mixes go through the soft limiter; a port passed on as it is is only
    scaled by its own volumes. `out` holds
    frames * out_channels samples of the port's format. */
-static void shape_buffer(const Port *p, const void *data, void *out) {
+static void shape_buffer(const Port *p, const void *data, void *out, float master0, float master1) {
     static const int remap[8]={0,1,2,3,6,7,4,5};
     float gain[8];
     /* Pad speaker ports (type 4) are mastered for the DualShock 4's speaker: PAD_SPEAKER_GAIN. */
@@ -179,9 +209,10 @@ static void shape_buffer(const Port *p, const void *data, void *out) {
         /* The controller's device: the port's mix (mono) on the first two channels, which carry
            the speaker; a DualSense's third and fourth drive its haptics and stay silent. */
         for (size_t f=0;f<(size_t)p->frames;++f) {
+            const float m=master0+(master1-master0)*(float)f/(float)p->frames;
             float v=0;
             for (int c=0;c<p->channels;++c) v+=load_sample(data,f*(size_t)p->channels+(size_t)c,p->is_float)*gain[c];
-            v=soft_limit(v/(float)p->channels);
+            v=soft_limit(v*m/(float)p->channels);
             for (int c=0;c<p->out_channels;++c) store_sample(out,f*(size_t)p->out_channels+(size_t)c,c<2 ? v : 0.0f,p->is_float);
         }
         return;
@@ -190,9 +221,10 @@ static void shape_buffer(const Port *p, const void *data, void *out) {
     const int n=fold ? p->out_channels : p->channels;
     for (size_t f=0;f<(size_t)p->frames;++f) {
         float s[8]={0}, o[8];
+        const float m=master0+(master1-master0)*(float)f/(float)p->frames; /* ramped: no zipper noise */
         for (int c=0;c<p->channels;++c) {
             int target=p->channels==8 && !p->std_layout ? remap[c] : c;
-            s[target]=load_sample(data,f*(size_t)p->channels+(size_t)c,p->is_float)*gain[c];
+            s[target]=load_sample(data,f*(size_t)p->channels+(size_t)c,p->is_float)*gain[c]*m;
         }
         const float *src=s;
         if (fold) { fold_frame(s,o,p->out_channels); src=o; }
@@ -348,6 +380,14 @@ static ABI int32_t audio_open(int32_t user, int32_t type, int32_t index, uint32_
         snprintf(path,sizeof(path),"%s.port%d.%dch.%s",dump,id,p->out_channels,p->is_float ? "f32" : "s16");
         p->dump=fopen(path,"wb");
     }
+    const char *mode=getenv("RESOGUN_AUDIO");
+    p->master_prev=-1.0f;
+    if (mode && !strncmp(mode,"wav:",4) && mode[4]) {
+        char path[4096];
+        snprintf(path,sizeof(path),"%s.port%d.wav",mode+4,id);
+        p->wav=fopen(path,"wb");
+        if (p->wav) wav_header(p); else fprintf(stderr,"Runtime: cannot write %s\n",path);
+    }
     ++ports_opened;
     pthread_mutex_unlock(&table_lock);
     char layout[64]="";
@@ -365,6 +405,7 @@ static ABI int32_t audio_close(int32_t handle) {
         if (p->stream) SDL_DestroyAudioStream(p->stream);
         if (p->on_pad) runtime_pad_speaker_route(0);
         if (p->dump) fclose(p->dump);
+        wav_close(p);
         p->dump=NULL;
         p->stream=NULL; p->used=0; p->on_pad=0;
         pthread_mutex_unlock(&p->lock);
@@ -392,9 +433,23 @@ static int32_t output_port(int32_t handle, const void *data, int pace, uint64_t 
     if (data) {
         /* Port volumes, PS4 8ch to SDL 7.1 order, folded to the device's layout. */
         unsigned char converted[2048*8*4];
-        shape_buffer(p,data,converted);
+        const float master=master_gain();
+        shape_buffer(p,data,converted,p->master_prev<0 ? master : p->master_prev,master);
+        p->master_prev=master;
         track_peaks(p,data);
         if (p->dump) fwrite(converted,1,bytes,p->dump);
+        if (p->wav) {
+            fwrite(converted,1,bytes,p->wav); p->wav_bytes+=bytes;
+            if ((p->data_buffers & 63)==0) wav_header(p);
+        }
+        {   /* The game's own cadence: a call far later than one period after the last is an underrun. */
+            uint64_t t=now_ns();
+            if (p->last_call_ns && p->data_buffers>8 && t-p->last_call_ns>period+period/2) {
+                ++p->late_calls;
+                if (t-p->last_call_ns-period>p->max_late_ns) p->max_late_ns=t-p->last_call_ns-period;
+            }
+            p->last_call_ns=t;
+        }
         if (p->stats) {
             uint64_t now=now_ns();
             if (!p->stat_start_ns) { p->stat_start_ns=now; p->stat_min_queued=1<<30; }
@@ -524,8 +579,11 @@ static const RuntimeExport exports[]={
 uintptr_t runtime_audio_resolve(const char *name) { return RUNTIME_LOOKUP(exports,name); }
 void runtime_audio_report(void) {
     printf("Runtime: audio ports opened=%zu, buffers output=%zu\n",ports_opened,buffers_out);
-    for (int i=0;i<PORTS;++i) if (ports[i].data_buffers || ports[i].silent_calls)
-        printf("Runtime:   port %d (type %d, %d ch): %llu buffers, %llu audible (above -60 dBFS), %llu without data, peak %.3f\n",
+    for (int i=0;i<PORTS;++i) if (ports[i].data_buffers || ports[i].silent_calls) {
+        printf("Runtime:   port %d (type %d, %d ch): %llu buffers, %llu audible (above -60 dBFS), %llu without data, peak %.3f, late calls %llu (max %.1f ms)\n",
                i,ports[i].type,ports[i].channels,(unsigned long long)ports[i].data_buffers,
-               (unsigned long long)ports[i].audible_buffers,(unsigned long long)ports[i].silent_calls,(double)ports[i].session_peak);
+               (unsigned long long)ports[i].audible_buffers,(unsigned long long)ports[i].silent_calls,(double)ports[i].session_peak,
+               (unsigned long long)ports[i].late_calls,(double)ports[i].max_late_ns/1e6);
+        wav_close(&ports[i]);
+    }
 }

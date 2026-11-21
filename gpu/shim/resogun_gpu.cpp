@@ -398,6 +398,10 @@ ScreenshotRequests ConsumeScreenshotRequests() {
 }
 } // namespace VideoCore
 
+extern "C" int resogun_gpu_audio_volume(void) {
+    return ResogunSettings::Get().audio_volume.load(std::memory_order_relaxed);
+}
+
 extern "C" int resogun_gpu_audio_channels(void) {
     return ResogunSettings::Get().audio_channels.load(std::memory_order_relaxed);
 }
