@@ -9,6 +9,7 @@
 #include "video_core/texture_cache/readback_queue.h"
 #include "video_core/texture_cache/readback_sources.h"
 #include <chrono>
+#include "resogun_settings.h"
 #include "resogun_toggles.h"
 #include <optional>
 #include <cstdlib>
@@ -165,7 +166,10 @@ public:
     /// checked it beforehand; only a guest write racing with the draw can make it so).
     /// resogun: the texture pack view to sample in place of `view` (texture_pack.h), or null.
     [[nodiscard]] vk::ImageView ReplacementView(const Image& image, const ImageView& view) {
-        return image.replacement_key ? texture_pack.ViewFor(image, view) : vk::ImageView{};
+        // hd_textures: the Display Settings panel shows or hides the pack at once.
+        return image.replacement_key && ResogunSettings::Get().hd_textures.load(std::memory_order_relaxed)
+                   ? texture_pack.ViewFor(image, view)
+                   : vk::ImageView{};
     }
     /// resogun: uploads texture pack images decoded since the last call. Main thread.
     void TickTexturePack() {
@@ -487,9 +491,12 @@ private:
     Common::LeastRecentlyUsedCache<ImageId, u64> lru_cache;
     Common::LeastRecentlyUsedCache<u64, u64> sampler_lru_cache;
     const bool readback_linear_images;
+    /// resogun: on by default for Everybody's Golf (RESOGUN_DEFERRED_READBACK=0: off). Image
+    /// readbacks are copied without waiting; the CPU waits only when it touches a pending page.
+    /// Waiting on every readback cost tens of seconds of GPU-thread time on a cold course load.
     const bool deferred_readbacks = [] {
         const char* value = std::getenv("RESOGUN_DEFERRED_READBACK");
-        return value && value[0] == '1';
+        return !value || value[0] != '0';
     }();
     /// resogun: RESOGUN_STALE_READBACK=1 (needs deferred readbacks). A pending copy only blocks CPU
     /// writes: CPU reads see the version the GPU published last (one frame late) instead of
@@ -540,7 +547,11 @@ private:
     bool ExactReadbackWaits() const {
         return stale_readbacks && !ResogunToggle::Disabled(ResogunToggle::ExactReadbackWaits);
     }
-    ReadbackQueue<Vulkan::StagingBufferRef> pending_readbacks;
+    using PendingReadbacks = ReadbackQueue<Vulkan::StagingBufferRef>;
+    using ReadbackEntry = PendingReadbacks::Entry;
+    PendingReadbacks pending_readbacks;
+    /// Drops the page protection a pending copy still holds (its released edge pages excepted).
+    void UnwatchReadback(const ReadbackEntry& entry);
     std::mutex readback_mutex;
     std::atomic<bool> has_pending_readbacks{false};
     std::atomic<u64> readback_generation{0};

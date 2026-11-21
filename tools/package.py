@@ -4,6 +4,15 @@
 
 Build with bash build.sh. --zip writes the Windows zip or Linux tar.gz.
 On Linux, --appimage also writes an AppImage using a locally installed appimagetool.
+On Windows the folder also holds (nothing game-derived):
+  EverybodysGolf.exe        the GUI launcher, when out/ has it
+  tools/python/             embeddable Python with numpy, pillow, etcpak (cached in tools/python-embed/)
+  tools/realesrgan/         Real-ESRGAN ncnn-vulkan, DLL, x4plus and animevideov3 models, licenses
+  tools/scripts/            texture_pack.py
+  tools/server/             the online title server (server/*.py without tests, the title URL map,
+                            OpenSSL's libcrypto for the fixtures' Blowfish, its license)
+--installer runs Inno Setup (tools/innosetup or PATH) on packaging/windows/installer.iss,
+writing <out>/EverybodysGolfPC-Setup-<version>.exe, a per-user installer for the folder.
 """
 import argparse
 import hashlib
@@ -45,10 +54,25 @@ LIBS_MANIFEST = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 README = '''Everybody's Golf for PC
 Release {release}
 
-Use a merged, decrypted dump of CUSA04687 with update 1.17.
-The dump folder must contain eboot.bin, sce_module and sce_sys.
-Keep the dump available for the runner to mount as /app0.
+You need your own decrypted dump of CUSA04687 (Everybody's Golf, PS4) and
+its 1.17 update. Nothing from the game ships with this release.
 
+Windows, with the launcher
+  1. Start EverybodysGolf.exe.
+  2. Game files: pick the base game folder (it holds eboot.bin, sce_module
+     and sce_sys), the update folder if it is separate, and any DLC folders,
+     then press Set up game files. This takes a few seconds.
+  3. Play.
+The Display tab sets window mode, output and render size, frame rate
+priority, SMAA, sharpening and HDR. The HD textures tab collects the game's
+textures while you play and builds an upscaled pack with Real-ESRGAN.
+The launcher keeps all its files in data\\ next to it: settings and saves in
+data\\save, logs in data\\logs, the prepared game in data\\game. Nothing goes
+to AppData or the registry. The installer adds only a Start menu shortcut
+and an uninstall entry for your user, and needs no admin rights. Without
+the installer, deleting the folder removes everything.
+
+Command line
   {exe} --game "path to dump" --prepare-only
   {exe}
 
@@ -178,6 +202,86 @@ def min_glibc(paths):
         dump = subprocess.run([objdump, '-T', str(path)], capture_output=True, text=True).stdout
         versions |= set(re.findall(r'GLIBC_(2\.[0-9.]+)', dump))
     return max(versions, key=lambda v: tuple(map(int, v.split('.'))), default=None)
+
+
+# The project root (holds tools/, server/): two levels above this checkout, or EG_ROOT.
+ROOT = Path(os.environ.get('EG_ROOT') or PORT.parent.parent)
+PY_VERSION = '3.13.17'
+PY_SHA256 = '9e35319bffedab8b36ad44d8f377cb4f1733bcec257a0b6d04d94f01486ddb38'
+PY_PACKAGES = ('numpy', 'pillow', 'etcpak')
+ESRGAN_MODELS = ('realesrgan-x4plus.', 'realesr-animevideov3')
+SERVER_SKIP = re.compile(r'^(test_.*|.*_test)\.py$')
+
+
+def sha256(path):
+    digest = hashlib.sha256()
+    with path.open('rb') as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b''):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def prepare_python(cache):
+    """tools/python-embed/runtime: the embeddable Python with the texture tools' packages (built once)."""
+    runtime = cache / 'runtime'
+    if (runtime / 'python.exe').is_file() and (runtime / '.ready').is_file():
+        return runtime
+    archive = cache / f'python-{PY_VERSION}-embed-amd64.zip'
+    if not archive.is_file() or sha256(archive) != PY_SHA256:
+        raise SystemExit(f'{archive} missing or its SHA-256 is not {PY_SHA256} (see tools/manifest.json).')
+    shutil.rmtree(runtime, ignore_errors=True)
+    with zipfile.ZipFile(archive) as z:
+        z.extractall(runtime)
+    major_minor = '.'.join(PY_VERSION.split('.')[:2])
+    pth = runtime / f'python{major_minor.replace(".", "")}._pth'
+    text = pth.read_text(encoding='ascii').replace('#import site', 'import site')
+    lines = [line for line in text.splitlines() if line.strip()]
+    pth.write_bytes(('\n'.join([*lines, 'Lib\\site-packages']) + '\n').encode('ascii'))
+    subprocess.run([sys.executable, '-m', 'pip', 'install', '--target', str(runtime / 'Lib' / 'site-packages'),
+                    '--only-binary=:all:', '--python-version', major_minor, '--platform', 'win_amd64',
+                    '--no-compile', '--disable-pip-version-check', *PY_PACKAGES], check=True)
+    (runtime / '.ready').write_bytes(b'')
+    return runtime
+
+
+STREAMLINE_DLLS = ('sl.interposer.dll', 'sl.common.dll', 'sl.dlss_g.dll', 'sl.reflex.dll', 'sl.pcl.dll',
+                   'nvngx_dlssg.dll', 'NvLowLatencyVk.dll')
+
+
+def add_windows_tools(out, ship):
+    """tools/ of the release: Python, Real-ESRGAN, texture_pack.py and the online service."""
+    runtime = prepare_python(ROOT / 'tools' / 'python-embed')
+    shutil.rmtree(out / 'tools', ignore_errors=True)
+    for path in sorted(runtime.rglob('*')):
+        if path.is_file() and path.name != '.ready' and '__pycache__' not in path.parts:
+            ship(path, f'tools/python/{path.relative_to(runtime).as_posix()}')
+    esrgan = ROOT / 'tools' / 'realesrgan'
+    for name in ('realesrgan-ncnn-vulkan.exe', 'vcomp140.dll'):
+        ship(esrgan / name, f'tools/realesrgan/{name}')
+    for model in sorted((esrgan / 'models').iterdir()):
+        if model.name.startswith(ESRGAN_MODELS):
+            ship(model, f'tools/realesrgan/models/{model.name}')
+    ship(PORT / 'packaging' / 'windows' / 'LICENSE-realesrgan.txt', 'tools/realesrgan/LICENSE-realesrgan.txt')
+    ship(PORT / 'tools' / 'texture_pack.py', 'tools/scripts/texture_pack.py')
+    for script in sorted((ROOT / 'server').glob('*.py')):
+        if not SERVER_SKIP.match(script.name):
+            ship(script, f'tools/server/{script.name}')
+    ship(ROOT / 'analysis' / 'online' / 'title-url-map.tsv', 'tools/server/title-url-map.tsv')
+    # host.py builds the discovery fixture with OpenSSL's Blowfish (MSYS2 CLANG64's libcrypto, which
+    # needs only Windows' own DLLs).
+    clang64 = Path(os.environ.get('MSYS2_ROOT', r'C:\msys64')) / 'clang64'
+    ship(clang64 / 'bin' / 'libcrypto-4-x64.dll', 'tools/server/libcrypto-4-x64.dll')
+    ship(clang64 / 'share' / 'licenses' / 'openssl' / 'LICENSE', 'tools/server/LICENSE-openssl.txt')
+
+
+def build_installer(out, release):
+    iscc = next((c for c in (ROOT / 'tools' / 'innosetup' / 'ISCC.exe', shutil.which('ISCC')) if c and Path(c).is_file()), None)
+    if not iscc:
+        raise SystemExit('ISCC.exe not found (tools/innosetup or PATH).')
+    version = re.sub(r'[^0-9A-Za-z._-]', '-', release.removeprefix('everybodys-golf-pc-'))
+    subprocess.run([str(iscc), '/Qp', f'/DAppVersion={version}', f'/DSourceDir={out}', f'/O{out}',
+                    str(PORT / 'packaging' / 'windows' / 'installer.iss')], check=True)
+    print(f'{out / f"EverybodysGolfPC-Setup-{version}.exe"}')
 
 
 def git(*args):
@@ -313,10 +417,13 @@ def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument('--out', type=Path, help='the release folder (default dist). Use a fresh folder when dependencies change.')
     p.add_argument('--appimage', action='store_true', help='also build the Linux AppImage and tarball')
+    p.add_argument('--installer', action='store_true', help='also build the Windows installer (Inno Setup) in the release folder')
     p.add_argument('--zip', action='store_true', help='also write out/<release>.zip (and <release>-symbols.zip)')
     p.add_argument('--debug', action='store_true', help='keep debug info in the exes and ship the diagnose/ kit')
     a = p.parse_args()
     bin_dir = Path(os.environ.get('MSYS2_ROOT', r'C:\msys64')) / 'clang64' / 'bin'
+    if a.installer and LINUX:
+        p.error('--installer is for the Windows build')
     if a.appimage and (not LINUX or a.debug):
         p.error('--appimage requires a Linux player build')
     programs = {exe: PORT / 'out' / exe for exe in EXES}
@@ -334,9 +441,22 @@ def main():
     assets = {
         'settings.example.ini': PORT / 'settings.example.ini',
         'LICENSE.txt': PORT / 'LICENSE',
-        'Orbitron-OFL.txt': PORT / 'gpu/third_party/fonts/orbitron/OFL.txt',
+        'MPLUSRounded1c-OFL.txt': PORT / 'gpu/third_party/fonts/mplusrounded1c/OFL.txt',
         'recomplauncher.json': PORT / 'recomplauncher.json',
     }
+    # NVIDIA Streamline (DLSS Frame Generation), loaded beside the program only when frame generation
+    # is on: production DLLs from the SDK (RESOGUN_STREAMLINE_DIR, else tools/streamline-*/sdk/bin/x64).
+    if not LINUX:
+        sl_dir = os.environ.get('RESOGUN_STREAMLINE_DIR')
+        sl_bin = Path(sl_dir) if sl_dir else next(iter(sorted((ROOT / 'tools').glob('streamline-*/sdk/bin/x64'))), None)
+        if sl_bin and (sl_bin / 'sl.interposer.dll').is_file():
+            for name in STREAMLINE_DLLS:
+                assets[name] = sl_bin / name
+            assets['Streamline-LICENSE.txt'] = PORT / 'gpu/third_party/streamline/LICENSE.txt'
+            assets['NVIDIA-DLSS-LICENSE.txt'] = sl_bin / 'nvngx_dlss.license.txt'
+            assets['NVIDIA-Reflex-LICENSE.txt'] = sl_bin / 'reflex.license.txt'
+        else:
+            print('note: Streamline SDK not found; packaging without DLSS Frame Generation')
     outputs = [*programs, *assets, 'release.txt', 'README.txt']
     if LINUX:
         libs = so_closure(list(programs.values()))
@@ -349,6 +469,11 @@ def main():
         check_dependencies(out, 'libs', ['libs.manifest', *(dll.name for dll in dlls)])
         outputs.extend(f'libs/{dll.name}' for dll in dlls)
         outputs.append('libs/libs.manifest')
+        launcher = PORT / 'out' / 'EverybodysGolf.exe'
+        if launcher.is_file():
+            outputs.append(launcher.name)
+        else:
+            print('note: out/EverybodysGolf.exe not built yet; packaging without the launcher')
         if a.debug:
             check_output(out / 'diagnose', directory=True)
             for bat in sorted(DIAGNOSE.glob('*.bat')):
@@ -390,6 +515,10 @@ def main():
         (out / 'libs' / 'libs.manifest').write_bytes(LIBS_MANIFEST.format(files=files).replace('\n', '\r\n').encode())
         shipped.append('libs/libs.manifest')
 
+    if not LINUX:
+        if launcher.is_file():
+            ship(launcher, launcher.name)
+        add_windows_tools(out, ship)
     (out / 'release.txt').write_bytes(f'{release}\n'.encode())
     readme = README.format(release=release, exe=EXES[0], debug_note=DEBUG_NOTE if a.debug and not LINUX else '')
     (out / 'README.txt').write_bytes(readme.encode())
@@ -406,6 +535,8 @@ def main():
 
     if a.zip or a.appimage:
         archive_bundle(out, shipped, release, debug=a.debug, include_appimage=a.appimage)
+    if a.installer:
+        build_installer(out, release)
     return 0
 
 

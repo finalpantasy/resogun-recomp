@@ -66,6 +66,8 @@ int runtime_game_cheats(unsigned char *image);
  * load, before the image is protected; 0, with a log line, when the eboot is not 1.17. */
 int runtime_game_golf_sixty(unsigned char *image);
 int runtime_game_golf_resolution(unsigned char *image);
+int runtime_game_golf_set_render_height(int height);
+int runtime_game_golf_render_height_limit(void);
 uint32_t runtime_game_wide_width(const char *name, uint32_t width, uint32_t height, uint32_t width_4k);
 const char *runtime_import_name(const char *name);
 uintptr_t runtime_rwlock_resolve(const char *name);

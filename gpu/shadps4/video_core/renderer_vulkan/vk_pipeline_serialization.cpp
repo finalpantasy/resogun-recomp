@@ -33,6 +33,7 @@
 #include "core/emulator_settings.h"
 #include "shader_recompiler/frontend/fetch_shader.h"
 #include "shader_recompiler/info.h"
+#include "shader_recompiler/ir/passes/ir_passes.h"
 #include "video_core/cache_storage.h"
 #include "video_core/renderer_vulkan/vk_amd_paths.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
@@ -42,7 +43,9 @@
 
 namespace Serialization {
 /* You should increment versions below once corresponding serialization scheme is changed. */
-static constexpr u32 ShaderBinaryVersion = 8u; // resogun: v_writelane and spilled SGPR reloads (golf-fix v41)
+// resogun: 8 = v_writelane and spilled SGPR reloads (golf-fix v41); 10 = relative VGPR access
+// through a private array in programs with long select chains (VgprArrayPass).
+static constexpr u32 ShaderBinaryVersion = 11u;
 static constexpr u32 ShaderMetaVersion = 10u; // resogun: images and samplers specialize on golf-fix v22's LOD 0 sampling
 static constexpr u32 PipelineKeyVersion = 6u; // resogun: Info layout (larger image and sampler lists)
 } // namespace Serialization
@@ -53,7 +56,9 @@ namespace {
 // resogun: RESOGUN_AMD_PATHS_OFF=shaderext changes recompiled SPIR-V, so it gets its own shader
 // binary cache version (distinct from every plain version bump).
 u32 CurrentShaderBinaryVersion() {
-    return Serialization::ShaderBinaryVersion + (AmdPathsOff::Current().shaderext ? 32u : 0u);
+    // resogun: RESOGUN_VGPR_ARRAY also changes recompiled SPIR-V (VgprArrayPass).
+    return Serialization::ShaderBinaryVersion + (AmdPathsOff::Current().shaderext ? 32u : 0u) +
+           Shader::Optimization::VgprArrayMode() * 64u;
 }
 } // namespace
 
@@ -277,6 +282,7 @@ bool StoreShared(const std::filesystem::path& file, const Key& global, const Key
         if (const auto existing = Load(shared, global, binary.key, 0);
             existing && existing->size() == 1 && (*existing)[0].data == binary.data) {
             ++shared_reused;
+            Touch(shared);
             continue;
         }
         const auto encoded = Encode(global, binary.key, 0, {binary});
@@ -325,12 +331,191 @@ std::pair<u64, s64> ConvertToShared(const std::filesystem::path& directory,
     }
     return {files, freed};
 }
+void Touch(const std::filesystem::path& file) {
+    std::error_code error;
+    const auto now = std::filesystem::file_time_type::clock::now();
+    const auto time = std::filesystem::last_write_time(file, error);
+    if (!error && now - time > std::chrono::minutes{10}) {
+        std::filesystem::last_write_time(file, now, error);
+    }
+}
+std::pair<u64, u64> Prune(const std::filesystem::path& directory, const Key& global, u64 budget,
+                          const std::function<bool()>& stop) {
+    namespace fs = std::filesystem;
+    struct Shared {
+        u32 references = 0;
+        u64 size = 0;
+    };
+    struct Entry {
+        fs::file_time_type time;
+        fs::path path;
+        u64 size;
+        bool foreign;
+        std::vector<std::string> shared;
+    };
+    std::unordered_map<std::string, Shared> shared;
+    std::vector<Entry> entries;
+    std::vector<fs::path> temporary;
+    u64 total = 0;
+    // A pipeline file that could not be read (locked, or a read error) is skipped, not treated as
+    // foreign; its shared references are then unknown, so no shared file counts as an orphan.
+    bool unread = false;
+    std::error_code error;
+    for (fs::directory_iterator it(directory / "shared", error), end; !error && it != end;
+         it.increment(error)) {
+        std::error_code status;
+        if (!it->is_regular_file(status)) {
+            continue;
+        }
+        if (it->path().extension() == ".tmp") {
+            temporary.push_back(it->path());
+        } else if (it->path().extension() == ".bin") {
+            // A size that cannot be read counts as 0 (file_size returns -1, which would wrap total).
+            const u64 size = it->file_size(status);
+            shared[it->path().filename().string()].size = status ? 0 : size;
+            total += status ? 0 : size;
+        }
+    }
+    error.clear();
+    for (fs::directory_iterator it(directory, error), end; !error && it != end;
+         it.increment(error)) {
+        if (stop && stop()) {
+            return {};
+        }
+        std::error_code status;
+        if (!it->is_regular_file(status)) {
+            continue;
+        }
+        if (it->path().extension() == ".tmp") {
+            temporary.push_back(it->path());
+            continue;
+        }
+        if (it->path().extension() != ".bin") {
+            continue;
+        }
+        const auto bytes = ReadFile(it->path());
+        const auto time = it->last_write_time(status);
+        const u64 size = status ? 0 : it->file_size(status);
+        // Empty or oversized files are junk (foreign); any other failure to read is skipped.
+        if (status || (!bytes && size != 0 && size <= MaxFileSize)) {
+            unread = true;
+            continue;
+        }
+        const auto parsed = bytes ? Parse(*bytes) : std::nullopt;
+        Entry entry{time, it->path(), size, !parsed || parsed->global != global, {}};
+        total += entry.size;
+        if (parsed && parsed->version == 2) {
+            for (const auto& binary : parsed->binaries) {
+                auto name =
+                    SharedPath(directory, parsed->global, binary.key, binary.content).filename().string();
+                if (const auto found = shared.find(name); found != shared.end()) {
+                    ++found->second.references;
+                    entry.shared.push_back(std::move(name));
+                }
+            }
+        }
+        entries.push_back(std::move(entry));
+    }
+    // Writers put a shared file down before the pipeline file that names it, and Touch a shared
+    // file they reuse, so anything used in the last hour may have a reference this scan missed.
+    const auto recent = fs::file_time_type::clock::now() - std::chrono::hours{1};
+    u64 removed = 0, freed = 0;
+    const auto remove = [&](const fs::path& path, u64 size) {
+        std::error_code status;
+        const auto time = fs::last_write_time(path, status);
+        if (status || time > recent || !fs::remove(path, status)) {
+            return false;
+        }
+        ++removed;
+        freed += size;
+        total -= std::min(total, size);
+        return true;
+    };
+    const auto remove_pipeline = [&](const Entry& entry) {
+        if (!remove(entry.path, entry.size)) {
+            return;
+        }
+        std::error_code status;
+        fs::remove(fs::path{entry.path} += ".fp", status); // RESOGUN_BINARY_FINGERPRINT notes
+        for (const auto& name : entry.shared) {
+            auto& file = shared[name];
+            if (--file.references == 0) {
+                remove(directory / "shared" / name, file.size);
+            }
+        }
+    };
+    for (const auto& path : temporary) {
+        remove(path, 0);
+    }
+    for (const auto& [name, file] : shared) {
+        if (file.references == 0 && !unread) {
+            remove(directory / "shared" / name, file.size);
+        }
+    }
+    // Other drivers' files first, then the oldest.
+    std::ranges::sort(entries, [](const Entry& a, const Entry& b) {
+        return a.foreign != b.foreign ? a.foreign : a.time < b.time;
+    });
+    const bool over = budget && total > budget;
+    for (const auto& entry : entries) {
+        if (stop && stop()) {
+            break;
+        }
+        if (!entry.foreign && (!over || total <= budget / 4 * 3)) {
+            break;
+        }
+        remove_pipeline(entry);
+    }
+    return {removed, freed};
+}
 } // namespace PipelineBinaryCache
 
 namespace {
 std::atomic<u64> binary_hits{}, binary_misses{}, binary_rejected{}, binary_saved{}, binary_errors{};
 std::atomic<u64> binary_rejected_handles{}, binary_rejected_create{}, binary_key_shared{};
 std::atomic<u64> binary_rejected_from[3]{};
+// Hits and rejections split by whether the pipeline has a binary over 1 MiB (NVIDIA gives some
+// pipelines one of exactly 2 MiB), and RESOGUN_BINARY_SELFTEST's same-process restores.
+std::atomic<u64> binary_hits_big{}, binary_rejected_big{}, selftest_ok{}, selftest_rejected{},
+    selftest_rejected_big{};
+bool HasBigBinary(const std::vector<PipelineBinaryCache::Binary>& binaries) {
+    return std::ranges::any_of(binaries, [](const PipelineBinaryCache::Binary& b) { return b.data.size() > (1u << 20); });
+}
+// NVIDIA adds a ~2 MiB compression dictionary to some pipelines' binaries. Its key holds
+// "NVDICT_" and is the same in every process while its contents differ from run to run (newer
+// ones do not contain older ones), and a later process rejects most pipelines that use one, so
+// those compile again on every load. The device turns the driver's internal cache off
+// (vk_instance.cpp), which leaves fewer pipelines with a dictionary. Restores and captures are
+// counted per dictionary (by content hash).
+u64 DictionaryHash(const std::vector<PipelineBinaryCache::Binary>& binaries) {
+    static constexpr std::string_view tag{"NVDICT_"};
+    for (const auto& b : binaries) {
+        const std::string_view key{reinterpret_cast<const char*>(b.key.data()), b.key.size()};
+        if (key.find(tag) != std::string_view::npos) {
+            return XXH3_64bits(b.data.data(), b.data.size());
+        }
+    }
+    return 0;
+}
+struct DictionaryCounts {
+    u64 hits = 0, rejected = 0, captured = 0;
+};
+std::mutex dictionary_mutex;
+std::map<u64, DictionaryCounts> dictionary_counts;
+void CountDictionary(u64 hash, u64 DictionaryCounts::* field) {
+    if (!hash) {
+        return;
+    }
+    std::scoped_lock lock{dictionary_mutex};
+    ++(dictionary_counts[hash].*field);
+}
+bool SelftestEnabled() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("RESOGUN_BINARY_SELFTEST");
+        return value && value[0] == '1';
+    }();
+    return enabled;
+}
 std::atomic<u64> binary_restore_ns{}, binary_compile_ns{};
 std::atomic<u64> binary_restore_calls{}, binary_compile_calls{};
 std::atomic<u64> binary_key_ns{}, binary_load_ns{}, binary_handles_ns{};
@@ -605,6 +790,27 @@ std::optional<std::vector<PipelineBinaryCache::Binary>> LoadLegacyBinary(
 } // namespace
 
 void ReportPipelineBinaryCache() {
+    std::printf("Pipeline binaries over 1 MiB: %llu hits, %llu rejected",
+                static_cast<unsigned long long>(binary_hits_big.load()),
+                static_cast<unsigned long long>(binary_rejected_big.load()));
+    if (SelftestEnabled()) {
+        std::printf("; self-test restores: %llu ok, %llu rejected (%llu over 1 MiB)",
+                    static_cast<unsigned long long>(selftest_ok.load()),
+                    static_cast<unsigned long long>(selftest_rejected.load()),
+                    static_cast<unsigned long long>(selftest_rejected_big.load()));
+    }
+    std::printf("\n");
+    {
+        std::scoped_lock lock{dictionary_mutex};
+        std::string line;
+        for (const auto& [hash, c] : dictionary_counts) {
+            line += fmt::format(" {:04x}: {} hits, {} rejected, {} captured;", hash >> 48, c.hits,
+                                c.rejected, c.captured);
+        }
+        if (!line.empty()) {
+            std::printf("Pipeline binary dictionaries:%s\n", line.c_str());
+        }
+    }
     const auto hits = binary_hits.load();
     const auto misses = binary_misses.load();
     std::printf("Pipeline binary cache: %llu hits, %llu compiled, %llu rejected, %llu saved, "
@@ -656,7 +862,7 @@ vk::ResultValue<vk::UniquePipeline> CreateCachedGraphicsPipeline(
     }
     SCOPE_EXIT {
         const auto count = binary_hits.load() + binary_misses.load();
-        if (count && count % 256 == 0) {
+        if (count && count % 128 == 0) {
             ReportPipelineBinaryCache();
         }
     };
@@ -716,6 +922,44 @@ vk::ResultValue<vk::UniquePipeline> CreateCachedGraphicsPipeline(
         handles.clear();
     };
     SCOPE_EXIT { destroy(); };
+    // Creates the pipeline from binaries; nullopt when the driver refuses the binaries themselves.
+    const auto restore = [&](const std::vector<Binary>& binaries, VkResult& handles_result)
+        -> std::optional<vk::ResultValue<vk::UniquePipeline>> {
+        std::vector<VkPipelineBinaryKeyKHR> keys(binaries.size());
+        std::vector<VkPipelineBinaryDataKHR> data(binaries.size());
+        for (size_t i = 0; i < binaries.size(); ++i) {
+            keys[i].sType = VK_STRUCTURE_TYPE_PIPELINE_BINARY_KEY_KHR;
+            keys[i].keySize = u32(binaries[i].key.size());
+            std::ranges::copy(binaries[i].key, keys[i].key);
+            data[i] = {binaries[i].data.size(), const_cast<u8*>(binaries[i].data.data())};
+        }
+        VkPipelineBinaryKeysAndDataKHR stored{u32(keys.size()), keys.data(), data.data()};
+        VkPipelineBinaryCreateInfoKHR binary_info{VK_STRUCTURE_TYPE_PIPELINE_BINARY_CREATE_INFO_KHR};
+        binary_info.pKeysAndDataInfo = &stored;
+        destroy();
+        handles.resize(keys.size());
+        VkPipelineBinaryHandlesInfoKHR output{VK_STRUCTURE_TYPE_PIPELINE_BINARY_HANDLES_INFO_KHR};
+        output.pipelineBinaryCount = u32(handles.size());
+        output.pPipelineBinaries = handles.data();
+        const auto handles_started = std::chrono::steady_clock::now();
+        handles_result = dispatch.vkCreatePipelineBinariesKHR(device, &binary_info, nullptr, &output);
+        binary_handles_ns += ElapsedNs(handles_started);
+        if (handles_result != VK_SUCCESS) {
+            return std::nullopt;
+        }
+        VkPipelineBinaryInfoKHR restored{VK_STRUCTURE_TYPE_PIPELINE_BINARY_INFO_KHR};
+        // CAPTURE_DATA is only for compilation, never for binary-backed creation.
+        vk::PipelineCreateFlags2CreateInfoKHR plain{
+            .pNext = info.pNext,
+            .flags = vk::PipelineCreateFlags2{static_cast<VkPipelineCreateFlags>(info.flags)},
+        };
+        restored.pNext = &plain;
+        restored.binaryCount = u32(handles.size());
+        restored.pPipelineBinaries = handles.data();
+        auto restored_info = info;
+        restored_info.pNext = &restored;
+        return create(nullptr, restored_info, true);
+    };
     try {
         const auto load_started = std::chrono::steady_clock::now();
         int source = 0; // the state-named file, the driver-key-only file, a legacy file
@@ -733,50 +977,38 @@ vk::ResultValue<vk::UniquePipeline> CreateCachedGraphicsPipeline(
         }
         binary_load_ns += ElapsedNs(load_started);
         if (binaries) {
-            std::vector<VkPipelineBinaryKeyKHR> keys(binaries->size());
-            std::vector<VkPipelineBinaryDataKHR> data(binaries->size());
-            for (size_t i = 0; i < binaries->size(); ++i) {
-                keys[i].sType = VK_STRUCTURE_TYPE_PIPELINE_BINARY_KEY_KHR;
-                keys[i].keySize = u32((*binaries)[i].key.size());
-                std::ranges::copy((*binaries)[i].key, keys[i].key);
-                data[i] = {(*binaries)[i].data.size(), (*binaries)[i].data.data()};
-            }
-            VkPipelineBinaryKeysAndDataKHR stored{u32(keys.size()), keys.data(), data.data()};
-            VkPipelineBinaryCreateInfoKHR binary_info{
-                VK_STRUCTURE_TYPE_PIPELINE_BINARY_CREATE_INFO_KHR};
-            binary_info.pKeysAndDataInfo = &stored;
-            handles.resize(keys.size());
-            VkPipelineBinaryHandlesInfoKHR output{
-                VK_STRUCTURE_TYPE_PIPELINE_BINARY_HANDLES_INFO_KHR};
-            output.pipelineBinaryCount = u32(handles.size());
-            output.pPipelineBinaries = handles.data();
-            const auto handles_started = std::chrono::steady_clock::now();
-            const auto handles_result =
-                dispatch.vkCreatePipelineBinariesKHR(device, &binary_info, nullptr, &output);
-            binary_handles_ns += ElapsedNs(handles_started);
-            if (handles_result == VK_SUCCESS) {
-                VkPipelineBinaryInfoKHR restored{VK_STRUCTURE_TYPE_PIPELINE_BINARY_INFO_KHR};
-                restored.pNext = &flags;
-                restored.binaryCount = u32(handles.size());
-                restored.pPipelineBinaries = handles.data();
-                // CAPTURE_DATA is only for compilation, never for binary-backed creation.
-                flags.flags =
-                    vk::PipelineCreateFlags2{static_cast<VkPipelineCreateFlags>(info.flags)};
-                auto restored_info = info;
-                restored_info.pNext = &restored;
-                auto result = create(nullptr, restored_info, true);
+            VkResult handles_result = VK_SUCCESS;
+            if (auto restored = restore(*binaries, handles_result)) {
+                auto& result = *restored;
                 if (result.result == vk::Result::eSuccess) {
                     ++binary_hits;
-                    return result;
+                    if (source == 0) {
+                        Touch(file);
+                    }
+                    if (HasBigBinary(*binaries)) ++binary_hits_big;
+                    CountDictionary(DictionaryHash(*binaries), &DictionaryCounts::hits);
+                    return std::move(result);
                 }
                 ++binary_rejected_create;
+                if (HasBigBinary(*binaries)) ++binary_rejected_big;
+                CountDictionary(DictionaryHash(*binaries), &DictionaryCounts::rejected);
                 ++binary_rejected_from[source];
                 if (source == 0 && FingerprintEnabled()) {
                     ReportFingerprint(file, MakeFingerprint(info));
                 }
-                if (binary_rejected_create.load() <= 6) {
-                    std::printf("Pipeline binary rejected at pipeline creation: %s (%zu binaries)\n",
-                                vk::to_string(result.result).c_str(), handles.size());
+                if (binary_rejected_create.load() <= 12) {
+                    std::string sizes;
+                    for (const auto& b : *binaries) {
+                        sizes += fmt::format(" {}", b.data.size());
+                    }
+                    u32 stage_mask = 0;
+                    for (u32 i = 0; i < info.stageCount; ++i) {
+                        stage_mask |= u32(info.pStages[i].stage);
+                    }
+                    std::printf("Pipeline binary rejected at pipeline creation: %s (%zu binaries:%s; "
+                                "stages %#x; %s)\n",
+                                vk::to_string(result.result).c_str(), handles.size(),
+                                sizes.c_str(), stage_mask, file.filename().string().c_str());
                 }
             } else {
                 ++binary_rejected_handles;
@@ -795,7 +1027,9 @@ vk::ResultValue<vk::UniquePipeline> CreateCachedGraphicsPipeline(
     ++binary_misses;
     flags.flags = vk::PipelineCreateFlags2{static_cast<VkPipelineCreateFlags>(info.flags)} |
                   vk::PipelineCreateFlagBits2::eCaptureDataKHR;
+    const auto compile_started = std::chrono::steady_clock::now();
     auto result = create(nullptr, captured_info, false);
+    const double compile_ms = ElapsedNs(compile_started) / 1e6;
     if (result.result != vk::Result::eSuccess) {
         ++binary_errors;
         return create(cache, info, false);
@@ -852,6 +1086,37 @@ vk::ResultValue<vk::UniquePipeline> CreateCachedGraphicsPipeline(
             binary.key = BinaryKey(binary_key);
             binary.data.resize(size);
             binaries.push_back(std::move(binary));
+        }
+        CountDictionary(DictionaryHash(binaries), &DictionaryCounts::captured);
+        // resogun: a compile this long stalls a load when the GPU thread waits for it.
+        // RESOGUN_PIPELINE_SLOW_MS lowers the threshold (0 logs every compile).
+        static const double slow_ms = [] {
+            const char* const env = std::getenv("RESOGUN_PIPELINE_SLOW_MS");
+            return env ? std::atof(env) : 1000.0;
+        }();
+        if (compile_ms >= slow_ms) {
+            std::printf("Pipeline slow compile: %.0f ms, %s, dictionary %s, stages %016zx %016zx %016zx\n",
+                        compile_ms, file.filename().string().c_str(),
+                        DictionaryHash(binaries) ? "yes" : "no", key.stage_hashes[0],
+                        key.stage_hashes[1], key.stage_hashes[MaxShaderStages - 1]);
+        }
+        if (SelftestEnabled()) {
+            VkResult handles_result = VK_SUCCESS;
+            const auto again = restore(binaries, handles_result);
+            if (again && again->result == vk::Result::eSuccess) {
+                ++selftest_ok;
+            } else {
+                ++selftest_rejected;
+                if (HasBigBinary(binaries)) ++selftest_rejected_big;
+                if (selftest_rejected.load() <= 8) {
+                    std::printf("Pipeline binary self-test: rejected (%s), %zu binaries of",
+                                again ? vk::to_string(again->result).c_str() : "at binary creation",
+                                binaries.size());
+                    for (const auto& b : binaries) std::printf(" %zu", b.data.size());
+                    std::printf(" bytes\n");
+                }
+            }
+            destroy();
         }
         if (Store(file, global, pipeline_id, 0, binaries)) {
             ++binary_saved;
@@ -1263,7 +1528,7 @@ bool PipelineCache::LoadPipelineStage(Serialization::Archive& ar, size_t stage) 
                             perm_idx, program->info.hw_stage, program->info.pgm_hash, idx);
                 return false;
             }
-            module = it->module;
+            module = it->module ? it->module : CompileSPV(spv, instance.GetDevice());
         } else {
             module = CompileSPV(spv, instance.GetDevice());
         }
@@ -1471,31 +1736,40 @@ void PipelineCache::IndexDiskShaders() {
     }
 }
 
-// resogun: the saved files of one program, read off the GPU thread (DiskPrefetch) or on it.
+// resogun: the saved metas of one program, read off the GPU thread (DiskPrefetch) or on it. The
+// SPIR-V is read only when a permutation is first used (CreateDiskModule): the driver keeps a copy
+// of every module, so creating them all at load held about 0.8 GB for shaders never drawn.
 struct DiskBlob {
     u32 idx;
     std::vector<u8> meta;
-    std::vector<u32> spv;
 };
 
-static std::vector<DiskBlob> ReadDiskProgram(u64 hash, const std::vector<u32>& indices) {
+// With spv_bytes, the SPIR-V files are also read once (and dropped) so the OS file cache holds them.
+static std::vector<DiskBlob> ReadDiskProgram(u64 hash, const std::vector<u32>& indices,
+                                             u64* spv_bytes = nullptr) {
     auto& db = Storage::DataBase::Instance();
     std::vector<DiskBlob> blobs;
     for (const u32 idx : indices) {
         DiskBlob blob{idx};
         db.Load(Storage::BlobType::ShaderMeta, fmt::format("{:#018x}", HashCombine(hash, u64{idx})),
                 blob.meta);
-        db.Load(Storage::BlobType::ShaderBinary, fmt::format("{:#018x}_{}", hash, idx), blob.spv);
-        if (!blob.meta.empty() && !blob.spv.empty()) {
+        if (spv_bytes) {
+            std::vector<u32> spv;
+            db.Load(Storage::BlobType::ShaderBinary, fmt::format("{:#018x}_{}", hash, idx), spv);
+            *spv_bytes += spv.size() * sizeof(u32);
+        }
+        if (!blob.meta.empty()) {
             blobs.push_back(std::move(blob));
         }
     }
     return blobs;
 }
 
-// resogun: one low-priority thread reads every saved program into memory at startup (a few MB),
-// so the GPU thread only deserializes and creates the modules. A program the GPU thread needs
-// first is claimed and read there instead.
+// resogun: one low-priority thread reads every saved program at startup, so the GPU thread only
+// deserializes and creates the modules. A program the GPU thread needs first is claimed and read
+// there instead. Programs are kept in memory up to RESOGUN_SHADER_PREFETCH_MB (default 64); past
+// that they are only read once, so the GPU thread's read comes from the OS file cache (a golf
+// cache held 544 MB of SPIR-V, most of it for scenes not yet visited).
 struct PipelineCache::DiskPrefetch {
     std::mutex mutex;
     std::unordered_map<u64, std::vector<DiskBlob>> ready;
@@ -1517,7 +1791,11 @@ void PipelineCache::StartDiskPrefetch() {
         const auto started = std::chrono::steady_clock::now();
         const u32 total = u32(work.size());
         u32 done = 0;
-        u64 programs = 0, bytes = 0;
+        u64 programs = 0, bytes = 0, warmed = 0, warmed_bytes = 0;
+        u64 budget = 64ull << 20;
+        if (const char* mb = std::getenv("RESOGUN_SHADER_PREFETCH_MB")) {
+            budget = std::strtoull(mb, nullptr, 10) << 20;
+        }
         for (const auto& [hash, indices] : work) {
             if (stop.stop_requested()) {
                 ResogunOverlay::SetShaderPrefetch(0, 0);
@@ -1530,10 +1808,18 @@ void PipelineCache::StartDiskPrefetch() {
                     continue;
                 }
             }
-            auto blobs = ReadDiskProgram(hash, indices);
+            u64 spv_bytes = 0;
+            auto blobs = ReadDiskProgram(hash, indices, &spv_bytes);
+            warmed_bytes += spv_bytes;
+            u64 size = 0;
             for (const auto& blob : blobs) {
-                bytes += blob.meta.size() + blob.spv.size() * sizeof(u32);
+                size += blob.meta.size();
             }
+            if (bytes + size > budget) {
+                ++warmed; // the GPU thread reads these metas again, from the file cache
+                continue;
+            }
+            bytes += size;
             std::scoped_lock lock{prefetch->mutex};
             if (!prefetch->claimed.contains(hash)) {
                 prefetch->ready.emplace(hash, std::move(blobs));
@@ -1541,8 +1827,10 @@ void PipelineCache::StartDiskPrefetch() {
             }
         }
         ResogunOverlay::SetShaderPrefetch(total, total);
-        std::printf("Disk shaders: prefetch read %llu programs (%.1f MB) in %.0f ms\n",
+        std::printf("Disk shaders: prefetch kept the metas of %llu programs (%.1f MB), %llu more "
+                    "and %.1f MB of SPIR-V read for the file cache in %.0f ms\n",
                     static_cast<unsigned long long>(programs), bytes / 1048576.0,
+                    static_cast<unsigned long long>(warmed), warmed_bytes / 1048576.0,
                     std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() -
                                                               started)
                         .count());
@@ -1563,19 +1851,32 @@ void PipelineCache::StartBinaryConversion() {
     }
     const auto directory = Common::FS::GetShaderCachePath(Common::ElfInfo::Instance().GameSerial()) /
         "pipeline-binaries";
+    // RESOGUN_SHADER_STORE_MB caps the folder (default 1024; 0 keeps everything of this driver).
+    u64 budget = u64{1024} << 20;
+    if (const char* env = std::getenv("RESOGUN_SHADER_STORE_MB"); env && *env) {
+        budget = std::strtoull(env, nullptr, 10) << 20;
+    }
     binary_conversion = new BinaryConversion;
-    binary_conversion->thread = std::jthread{[directory](std::stop_token stop) {
+    binary_conversion->thread = std::jthread{[directory, budget,
+                                              global = BinaryKey(instance.GetPipelineBinaryGlobalKey())](
+                                                 std::stop_token stop) {
         Common::SetCurrentThreadName("resogun:BinaryConvert");
         Common::SetCurrentThreadPriority(Common::ThreadPriority::Low);
         const auto started = std::chrono::steady_clock::now();
-        const auto [files, freed] = PipelineBinaryCache::ConvertToShared(
-            directory, [&stop] { return stop.stop_requested(); });
+        const auto seconds = [&started] {
+            return std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
+        };
+        const auto stopped = [&stop] { return stop.stop_requested(); };
+        const auto [files, freed] = PipelineBinaryCache::ConvertToShared(directory, stopped);
         if (files) {
             std::printf("Pipeline binaries: %llu files moved to shared storage, %.0f MB freed "
                         "in %.1f s\n",
-                        static_cast<unsigned long long>(files), freed / 1048576.0,
-                        std::chrono::duration<double>(std::chrono::steady_clock::now() - started)
-                            .count());
+                        static_cast<unsigned long long>(files), freed / 1048576.0, seconds());
+        }
+        const auto [removed, pruned] = PipelineBinaryCache::Prune(directory, global, budget, stopped);
+        if (removed) {
+            std::printf("Pipeline binaries: %llu unused files removed, %.0f MB freed in %.1f s\n",
+                        static_cast<unsigned long long>(removed), pruned / 1048576.0, seconds());
         }
     }};
 }
@@ -1625,17 +1926,13 @@ bool PipelineCache::LoadDiskProgram(u64 hash) {
             info.pgm_hash != hash) {
             continue;
         }
-        const auto module = CompileSPV(blob.spv, instance.GetDevice());
-        if (!module) {
-            continue;
-        }
         if (!have_info) {
             program->info = std::move(info);
             have_info = true;
         }
         spec.info = &program->info;
-        program->InsertPermut(module, std::move(spec), blob.idx);
-        disk_modules_unused.insert(module);
+        program->InsertPermut(vk::ShaderModule{}, std::move(spec), blob.idx);
+        program->modules[blob.idx].on_disk = true;
         ++inserted;
         ++disk_stats.permutations;
     }
@@ -1645,18 +1942,36 @@ bool PipelineCache::LoadDiskProgram(u64 hash) {
         std::unique_lock lock{programs_mutex};
         program_cache.emplace(hash, std::move(program));
         ++disk_stats.programs;
-    } else {
-        for (const auto& module : program->modules) {
-            if (module.module) {
-                instance.GetDevice().destroyShaderModule(module.module);
-            }
-        }
     }
     disk_permutations.erase(found);
     disk_stats.load_ns += u64(std::chrono::duration_cast<std::chrono::nanoseconds>(
                                   std::chrono::steady_clock::now() - started)
                                   .count());
     return inserted != 0;
+}
+
+// resogun: GPU thread, on the first draw that uses a saved permutation (LoadDiskProgram).
+bool PipelineCache::CreateDiskModule(u64 hash, Program& program, size_t perm_idx) {
+    const auto started = std::chrono::steady_clock::now();
+    std::vector<u32> spv;
+    Storage::DataBase::Instance().Load(Storage::BlobType::ShaderBinary,
+                                       fmt::format("{:#018x}_{}", hash, perm_idx), spv);
+    const auto module = spv.empty() ? vk::ShaderModule{} : CompileSPV(spv, instance.GetDevice());
+    {
+        std::unique_lock lock{programs_mutex};
+        auto& slot = program.modules[perm_idx];
+        slot.on_disk = false;
+        if (module) {
+            slot.module = module;
+        } else {
+            slot = {};
+        }
+    }
+    disk_stats.load_ns += u64(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                  std::chrono::steady_clock::now() - started)
+                                  .count());
+    disk_stats.matched += bool(module);
+    return bool(module);
 }
 
 bool PipelineCache::NewPipelineKey(const std::string& name) {
@@ -1883,9 +2198,17 @@ bool PipelineCache::MergeWarmStage(WarmStage& stage) {
         if (size_t(std::distance(program.modules.begin(), it)) != stage.perm_idx) {
             return false;
         }
+        if (it->on_disk) {
+            // resogun: the warm-up built the saved permutation's module first; it is the slot's.
+            it->module = stage.module;
+            it->on_disk = false;
+            stage.module_kept = true;
+            ++disk_stats.matched;
+        }
         stage.result = it->module;
     } else {
-        if (stage.perm_idx < program.modules.size() && program.modules[stage.perm_idx].module) {
+        if (stage.perm_idx < program.modules.size() &&
+            (program.modules[stage.perm_idx].module || program.modules[stage.perm_idx].on_disk)) {
             return false;
         }
         stage.spec.info = &program.info;

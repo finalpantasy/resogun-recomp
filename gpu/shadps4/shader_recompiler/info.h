@@ -131,6 +131,7 @@ struct Info : InfoPersistent {
     VAddr pgm_base;
     bool has_storage_images{};
     bool has_discard{};
+    u32 vgpr_array_size{}; // resogun: VGPRs kept in a private array (VgprArrayPass)
     bool has_image_gather{};
     bool has_image_query{};
     bool has_readconst{};

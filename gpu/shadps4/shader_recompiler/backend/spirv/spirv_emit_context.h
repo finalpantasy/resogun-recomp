@@ -231,6 +231,8 @@ public:
 
     Id shared_u16{};
     Id shared_u32{};
+    Id vgpr_array{};         // resogun: private VGPR array (VgprArrayPass)
+    Id vgpr_array_pointer{}; // resogun: pointer to one of its u32 elements
     Id shared_u64{};
 
     Id input_u32{};
@@ -420,6 +422,7 @@ private:
     void DefineBuffers();
     void DefineImagesAndSamplers();
     void DefineSharedMemory();
+    void DefineVgprArray();
     void DefineFunctions();
     void GolfDebugSetup();
 

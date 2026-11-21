@@ -127,7 +127,8 @@ TexturePack::TexturePack(const Vulkan::Instance& instance_, Vulkan::Scheduler& s
         std::printf("Texture dump: new textures go to %s (%zu already there)\n", dir,
                     dumped.size());
     }
-    if (const char* dir = settings.texture_pack.c_str(); *dir) {
+    // hd_textures=0 at start: the pack is not read at all (no memory, no decoding).
+    if (const char* dir = settings.texture_pack.c_str(); *dir && settings.startup_hd_textures) {
         std::error_code ec;
         for (const auto& entry : std::filesystem::recursive_directory_iterator(dir, ec)) {
             const auto ext = entry.path().extension();

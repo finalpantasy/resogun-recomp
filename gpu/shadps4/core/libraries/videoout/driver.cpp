@@ -45,8 +45,10 @@ extern std::atomic<u64> g_resogun_compile_ns;
 extern std::atomic<u32> g_resogun_compiles;
 extern std::atomic<u64> g_resogun_capture_ns, g_resogun_async_ns, g_resogun_compile_wait_ns;
 extern std::atomic<u64> g_resogun_snapshot_ns, g_resogun_guest_wait_ns;
-extern std::atomic<u32> g_resogun_pending_draws, g_resogun_build_waits;
-extern std::atomic<u64> g_resogun_build_wait_ns;
+extern std::atomic<u32> g_resogun_pending_draws, g_resogun_build_waits, g_resogun_fresh_waits;
+extern std::atomic<u64> g_resogun_build_wait_ns, g_resogun_fresh_wait_ns;
+extern std::atomic<u32> g_resogun_shader_waits;
+extern std::atomic<u64> g_resogun_shader_wait_ns;
 } // namespace Vulkan
 
 // resogun: steady-clock ns of the last flip's start and of its event trigger, for the slow-wait
@@ -55,6 +57,9 @@ std::atomic<long long> g_resogun_flip_start_ns{0}, g_resogun_flip_trigger_ns{0};
 static long long resogun_mono_ns() {
     return std::chrono::steady_clock::now().time_since_epoch().count();
 }
+
+// resogun: the guest's longest sceGnmSubmitDone wait for the GPU since the last flip.
+std::atomic<s64> g_resogun_submit_wait_ns{0};
 
 namespace Libraries::VideoOut {
 
@@ -398,7 +403,24 @@ void VideoOutDriver::Flip(const Request& req) {
         }
         {
             const double period_ms = EmulatorSettings.GetVblankPeriod().count() / 1e6;
-            ++by_vblanks[std::min<u32>(5, u32(std::lround(frame_ms / period_ms)))];
+            const u32 vblanks = u32(std::lround(frame_ms / period_ms));
+            ++by_vblanks[std::min<u32>(5, vblanks)];
+            // resogun: RESOGUN_LATE_FLIPS=1 names each flip that came a vblank or more late: the
+            // gap between the game's two flip submits says whether the game was late (gap near
+            // the interval) or the flip waited here (gap near one vblank).
+            static const bool late_flips = EmulatorSettingsImpl::Flag("RESOGUN_LATE_FLIPS", false);
+            static s64 last_submit_ns;
+            if (late_flips && vblanks >= 2 && req.submit_ns && last_submit_ns) {
+                StatsPrintf(stdout, "Late flip: %.1f ms after the last; game submits %.1f ms apart, "
+                            "queued %.1f ms, waited %.1f ms for the vblank; SubmitDone waited %.1f ms "
+                            "for the GPU\n",
+                            frame_ms, (req.submit_ns - last_submit_ns) / 1e6,
+                            (req.queued_ns - req.submit_ns) / 1e6,
+                            (now.time_since_epoch().count() - req.queued_ns) / 1e6,
+                            g_resogun_submit_wait_ns.load() / 1e6);
+            }
+            if (req.submit_ns) last_submit_ns = req.submit_ns;
+            g_resogun_submit_wait_ns.store(0);
         }
         // Where each flip lands in the display's refresh (Windows): a thread stamps every refresh.
         static std::atomic<s64> refresh_ns{0};
@@ -582,6 +604,10 @@ void VideoOutDriver::Flip(const Request& req) {
             const u32 pending_draws = Vulkan::g_resogun_pending_draws.exchange(0);
             const u32 build_waits = Vulkan::g_resogun_build_waits.exchange(0);
             const double build_wait_ms = Vulkan::g_resogun_build_wait_ns.exchange(0) / 1e6;
+            const u32 fresh_waits = Vulkan::g_resogun_fresh_waits.exchange(0);
+            const double fresh_wait_ms = Vulkan::g_resogun_fresh_wait_ns.exchange(0) / 1e6;
+            const u32 shader_waits = Vulkan::g_resogun_shader_waits.exchange(0);
+            const double shader_wait_ms = Vulkan::g_resogun_shader_wait_ns.exchange(0) / 1e6;
             const u64 direct = Vulkan::Scheduler::direct_recordings.exchange(0);
             const u64 faults = ResogunStats::tracker_faults.exchange(0);
             // GPU command thread CPU time per draw: comparable between builds even when the scene
@@ -598,23 +624,33 @@ void VideoOutDriver::Flip(const Request& req) {
             StatsPrintf(stdout, "Frame stats: %.1f FPS, worst frame %.1f ms (vblank %u Hz); "
                         "%u shader/pipeline compiles, %.1f ms; async: capture %.1f ms, workers "
                         "%.1f ms, sync wait %.1f ms, snapshots %.1f ms, GPU capture wait %.1f ms, "
-                        "%u pending draws, %u build waits %.1f ms; %llu recorder syncs; "
+                        "%u pending draws, %u build waits %.1f ms (fresh targets %u, %.1f ms; shader "
+                        "programs %u, %.1f ms); "
+                        "%llu recorder syncs; "
                         "%.0f write faults/s, %lld hot pages; GPU thread %.2f us/draw, "
-                        "%.0f draws/frame, idle %.1f%%; blocked: recorder %.1f%%, host copies "
-                        "%.1f%% (%.0f/frame), copy threads %.1f%%, GPU ticks %.1f%%\n",
+                        "%.0f draws/frame, idle %.1f%%; blocked: recorder %.1f%% (submissions %.1f%%, "
+                        "large pushes %.1f%%), host copies "
+                        "%.1f%% (%.0f/frame), copy threads %.1f%%, GPU ticks %.1f%%; "
+                        "recorder pipeline waits %llu (%llu run there), %.1f ms\n",
                         frames / window, worst_ms, EmulatorSettings.GetVblankFrequency(), compiles,
                         compile_ns / 1e6, capture_ms, async_ms, wait_ms, snapshot_ms, guest_wait_ms,
-                        pending_draws, build_waits, build_wait_ms,
+                        pending_draws, build_waits, build_wait_ms, fresh_waits, fresh_wait_ms,
+                        shader_waits, shader_wait_ms,
                         static_cast<unsigned long long>(direct),
                         faults / window,
                         static_cast<long long>(ResogunStats::hot_pages.load()),
                         us_per_draw, draws_per_frame,
                         ResogunStats::gpu_idle_ns.exchange(0) / (window * 1e7),
                         ResogunStats::sync_recording_ns.exchange(0) / (window * 1e7),
+                        ResogunStats::sync_submit_ns.exchange(0) / (window * 1e7),
+                        ResogunStats::sync_large_ns.exchange(0) / (window * 1e7),
                         ResogunStats::host_copies_wait_ns.exchange(0) / (window * 1e7),
                         frames ? double(ResogunStats::host_copy_waits.exchange(0)) / frames : 0.0,
                         ResogunStats::copy_threads_wait_ns.exchange(0) / (window * 1e7),
-                        ResogunStats::tick_wait_ns.exchange(0) / (window * 1e7));
+                        ResogunStats::tick_wait_ns.exchange(0) / (window * 1e7),
+                        static_cast<unsigned long long>(ResogunStats::handle_waits.exchange(0)),
+                        static_cast<unsigned long long>(ResogunStats::handle_runs.exchange(0)),
+                        ResogunStats::handle_wait_ns.exchange(0) / 1e6);
             presenter->GetRasterizer().GetPipelineCache().ReportCompilerStats();
             Vulkan::WaitDiagnostics::Report();
             // Frame pacing: spread of the guest flip intervals (judder that the mean hides).

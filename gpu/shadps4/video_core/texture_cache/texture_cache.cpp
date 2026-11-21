@@ -113,6 +113,11 @@ void TextureCache::WatchReadback(VAddr address, u64 size) {
     }
 }
 
+void TextureCache::UnwatchReadback(const ReadbackEntry& entry) {
+    const auto [begin, end] = PendingReadbacks::WatchedPages(entry);
+    if (end > begin) WatchReadback<false>(begin, end - begin);
+}
+
 void TextureCache::RetireReadbacks() {
     pending_readbacks.Retire([this](u64 tick) { return scheduler.IsFree(tick); },
         [this](auto& entry) {
@@ -120,7 +125,7 @@ void TextureCache::RetireReadbacks() {
                 entry.payload.Invalidate();
                 Core::Memory::Instance()->TryWriteBacking(std::bit_cast<u8*>(entry.address),
                     entry.payload.mapped, entry.size);
-                if (entry.watched) WatchReadback<false>(entry.address, entry.size);
+                if (entry.watched) UnwatchReadback(entry);
                 ++readbacks_completed;
             }
             runtime.GetStagingPool().FreeDeferred(entry.payload);
@@ -144,7 +149,11 @@ bool TextureCache::ResolveReadbacks(VAddr address, u64 size, bool assume_locks,
         // copy only stops protecting its page and is still published when the GPU is done.
         if (stale_readbacks && source == ReadbackSource::CpuWrite) {
             readbacks_released += pending_readbacks.ReleaseOutside(address, size, 64_KB,
-                [this](auto& entry) { WatchReadback<false>(entry.address, entry.size); });
+                [this](auto& entry) { UnwatchReadback(entry); });
+        } else if (source == ReadbackSource::CpuWrite &&
+                   !ResogunToggle::Disabled(ResogunToggle::ReadbackEdgeWrites)) {
+            readbacks_released += pending_readbacks.ReleaseEdge(address, size,
+                [this](u64 page, u64 bytes) { WatchReadback<false>(page, bytes); });
         }
         if (!pending_readbacks.RequiredTick(address, size, exact)) {
             if (exact && pending_readbacks.RequiredTick(address, size)) ++readbacks_neighbors;
@@ -188,7 +197,7 @@ void TextureCache::CancelReadbacks(VAddr address, u64 size, bool exact) {
     if (!deferred_readbacks) return;
     std::scoped_lock lock{readback_mutex};
     pending_readbacks.Cancel(address, size, [this](auto& entry) {
-        if (entry.watched) WatchReadback<false>(entry.address, entry.size);
+        if (entry.watched) UnwatchReadback(entry);
         ++readbacks_canceled;
     }, exact);
 }
@@ -884,11 +893,13 @@ std::tuple<ImageId, int, int> TextureCache::ResolveOverlap(const ImageInfo& imag
             image_info.size == cache_image.info.size &&
             is_1d(image_info.type) != is_1d(cache_image.info.type) &&
             IsVulkanFormatCompatible(cache_image.info.pixel_format, image_info.pixel_format)) {
+            // The first 8, then every power of two, so a log shows how often this repeats.
             static std::atomic<u32> logged{};
-            if (logged.fetch_add(1) < 8) {
-                LOG_ERROR(Render_Vulkan, "resogun: {}x{} image at {:#x} recreated as type {}",
+            const u32 count = logged.fetch_add(1) + 1;
+            if (count <= 8 || (count & (count - 1)) == 0) {
+                LOG_ERROR(Render_Vulkan, "resogun: {}x{} image at {:#x} recreated as type {} ({} times)",
                           image_info.size.width, image_info.size.height, image_info.guest_address,
-                          static_cast<int>(image_info.type));
+                          static_cast<int>(image_info.type), count);
             }
             return {ExpandImage(image_info, cache_image_id), -1, -1};
         }
@@ -1544,12 +1555,17 @@ vk::Sampler TextureCache::GetSampler(const AmdGpu::Sampler& sampler,
                                      AmdGpu::BorderColorBuffer border_color_base,
                                      const bool is_depth, float extra_lod_bias) {
     // Compare and plain uses of one S# need separate samplers; so do extra LOD biases.
-    const u64 hash = HashCombine(HashCombine(XXH3_64bits(&sampler, sizeof(sampler)), is_depth),
-                                 u64(std::bit_cast<u32>(extra_lod_bias)));
+    // resogun: the texture LOD bias and anisotropy options are part of the key, so a change of
+    // either makes new samplers (the old ones age out).
+    if (!is_depth) extra_lod_bias += ResogunSettings::TextureLodBias();
+    const u32 aniso_override = u32(ResogunSettings::Get().anisotropy.load(std::memory_order_relaxed));
+    const u64 hash = HashCombine(HashCombine(HashCombine(XXH3_64bits(&sampler, sizeof(sampler)), is_depth),
+                                             u64(std::bit_cast<u32>(extra_lod_bias))),
+                                 u64(aniso_override));
 
     std::scoped_lock lock{samplers_mutex};
     const auto [it, new_sampler] = samplers.try_emplace(hash, instance, sampler, border_color_base,
-                                                        is_depth, extra_lod_bias);
+                                                        is_depth, extra_lod_bias, aniso_override);
     if (new_sampler) {
         samplers.at(hash).lru_id = sampler_lru_cache.Insert(hash, gc_tick);
     } else {

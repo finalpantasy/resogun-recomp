@@ -91,6 +91,31 @@ int main(void) {
     snprintf(path,sizeof(path),"%s/SAVE0001.sce_sys/icon0.png",base);
     struct stat st; assert(!stat(path,&st) && st.st_size==4);
 
+    /* Backup on a worker: unmount returns, the backup lands in <dir>.sce_backup equal to the save,
+     * a remount waits for it, and a second backup (changed file, unchanged file, two unmounts in a
+     * row) swaps in cleanly with no .tmp/.old left. */
+    char host[700], bfile[900];
+    snprintf(host,sizeof(host),"%s/SAVE0001",base);
+    snprintf(path,sizeof(path),"%s/other.bin",host); touch(path,T(10));
+    for (int round=0;round<2;++round) {
+        assert(save_mount2(&m2,&result)==0);
+        snprintf(path,sizeof(path),"%s/data.bin",host);
+        FILE *f=fopen(path,"wb"); assert(f); fprintf(f,"round %d",round); fclose(f);
+        assert(save_umount_backup(&result.point)==0);
+        if (round) { assert(save_mount2(&m2,&result)==0); assert(save_umount_backup(&result.point)==0); } /* remount waits; then unmount twice */
+        pthread_mutex_lock(&lock); backup_wait_locked(NULL); pthread_mutex_unlock(&lock);
+        snprintf(bfile,sizeof(bfile),"%s.sce_backup/data/data.bin",host);
+        assert(same_file(path,bfile));
+        snprintf(path,sizeof(path),"%s/other.bin",host); snprintf(bfile,sizeof(bfile),"%s.sce_backup/data/other.bin",host);
+        assert(same_file(path,bfile));
+        snprintf(bfile,sizeof(bfile),"%s.sce_backup/sce_sys/param.bin",host);
+        snprintf(path,sizeof(path),"%s/SAVE0001.sce_sys/param.bin",base);
+        assert(same_file(path,bfile));
+        snprintf(bfile,sizeof(bfile),"%s.sce_backup.tmp",host); assert(stat(bfile,&st));
+        snprintf(bfile,sizeof(bfile),"%s.sce_backup.old",host); assert(stat(bfile,&st));
+    }
+    assert(event_count>=2 && events[event_count-1].type==1 && events[event_count-1].error==0);
+
     remove_tree(user_dir);
     puts("savedata test: ok");
     return 0;

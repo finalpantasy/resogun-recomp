@@ -29,6 +29,8 @@ const char* runtime_current_thread_name() { return "host"; }
 void runtime_report() {}
 int runtime_memory_is_mapped(uintptr_t, uint64_t) { return 0; }
 void runtime_game_frame_rate() {}
+int runtime_game_golf_set_render_height(int) { return 0; }
+int runtime_game_golf_render_height_limit() { return 0; }
 void runtime_pad_title_movie(int) {}
 }
 

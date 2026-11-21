@@ -47,6 +47,15 @@ bool Store(const std::filesystem::path& file, const Key& global, const Key& pipe
 /// Rewrites every version 1 file of `directory` as version 2: {files, bytes freed}.
 std::pair<u64, s64> ConvertToShared(const std::filesystem::path& directory,
                                     const std::function<bool()>& stop = {});
+/// resogun: marks a file as used now for Prune; the time moves at most every 10 minutes.
+void Touch(const std::filesystem::path& file);
+/// resogun: nothing else ever removes a file, and every translator change leaves a new set behind.
+/// Removes pipeline files of another driver (global key) or that no longer parse, shared files no
+/// pipeline file names, and, while the folder is over `budget` bytes, the least recently used
+/// pipeline files until it is under three quarters of it; a shared file goes with the last
+/// pipeline file that names it. Files used in the last hour stay. {files removed, bytes freed}.
+std::pair<u64, u64> Prune(const std::filesystem::path& directory, const Key& global, u64 budget,
+                          const std::function<bool()>& stop = {});
 } // namespace PipelineBinaryCache
 
 vk::ResultValue<vk::UniquePipeline> CreateCachedGraphicsPipeline(

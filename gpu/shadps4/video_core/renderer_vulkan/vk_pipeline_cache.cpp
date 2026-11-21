@@ -4,6 +4,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdlib>
+#include <stdexcept>
 #include <cstdio>
 #include <cstring>
 #include <mutex>
@@ -78,6 +79,19 @@ struct AsyncGraphicsCompilation {
     GraphicsPipeline::SerializationSupport data;
     std::unique_ptr<GraphicsPipeline> pipeline;
 };
+
+// resogun: what a deferred pipeline's CreateHandles job reads (see DeferGraphicsPipeline).
+struct DeferredGraphicsBuild {
+    PipelineSelection selection;
+    GraphicsPipeline::SerializationSupport data;
+    GraphicsPipeline* pipeline{};
+};
+
+// resogun: a deferred pipeline whose build failed has no handle; its draws are skipped until
+// PublishGraphics hands the key to the GPU-thread retry.
+static const GraphicsPipeline* Usable(const GraphicsPipeline* pipeline) {
+    return pipeline && pipeline->HandlesReady() && !pipeline->Handle() ? nullptr : pipeline;
+}
 
 constexpr static auto SpirvVersion1_6 = 0x00010600U;
 
@@ -400,7 +414,11 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
     pipeline_cache = std::move(cache);
     // resogun: shaders and pipelines compile on these threads while the game runs.
     {
-        const auto count = std::clamp(ResogunThreads::Available() / 2, 1u, 6u);
+        // RESOGUN_COMPILE_THREADS=N (1..16) overrides the count, for measurements.
+        const char* threads_env = std::getenv("RESOGUN_COMPILE_THREADS");
+        const auto count = threads_env && std::atoi(threads_env) > 0
+                               ? std::clamp(unsigned(std::atoi(threads_env)), 1u, 16u)
+                               : std::clamp(ResogunThreads::Available() / 2, 1u, 6u);
         const auto capture_count = std::min(2u, std::max(1u, ResogunThreads::Available() / 4));
         for (unsigned i = 0; i < count; ++i) {
             auto [result, worker_cache] = instance.GetDevice().createPipelineCacheUnique({});
@@ -433,21 +451,33 @@ std::atomic<u32> g_resogun_compiles;
 std::atomic<u64> g_resogun_capture_ns, g_resogun_async_ns, g_resogun_compile_wait_ns;
 std::atomic<u64> g_resogun_snapshot_ns, g_resogun_guest_wait_ns;
 std::atomic<u32> g_resogun_pool_reuses;
+// resogun: compile-thread time per shader: SPIR-V emission and driver module creation.
+std::atomic<u64> g_resogun_emit_ns, g_resogun_module_ns;
+std::atomic<u32> g_resogun_async_shaders;
 std::atomic<u32> g_resogun_pending_draws;
 // resogun: waits of the GPU thread for an async build at the skip budget, and their time.
 std::atomic<u32> g_resogun_build_waits;
 std::atomic<u64> g_resogun_build_wait_ns;
+// resogun: the part of those waits for draws into a fresh target (no skip budget).
+std::atomic<u32> g_resogun_fresh_waits;
+std::atomic<u64> g_resogun_fresh_wait_ns;
+// resogun: the part of build waits for shader programs (the rest is pipelines).
+std::atomic<u32> g_resogun_shader_waits;
+std::atomic<u64> g_resogun_shader_wait_ns;
 namespace {
 struct PhaseTimer {
     std::atomic<u64>& counter;
     std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
     bool active = true;
+    u64 Elapsed() const {
+        return u64(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                       std::chrono::steady_clock::now() - start).count());
+    }
     void Stop() {
         if (!active) {
             return;
         }
-        counter += u64(std::chrono::duration_cast<std::chrono::nanoseconds>(
-                           std::chrono::steady_clock::now() - start).count());
+        counter += Elapsed();
         active = false;
     }
     ~PhaseTimer() { Stop(); }
@@ -466,14 +496,17 @@ struct CompileTimer {
 thread_local bool must_draw = false;
 
 // resogun: GPU frames a draw may be skipped while its build runs, after which the GPU thread
-// waits for it. Draws that must not be skipped have no budget, and RESOGUN_SYNC_PIPELINES=1
-// (diagnostic) gives none to any draw.
+// waits for it. No draw is skipped by default: a skipped draw leaves its object out of that
+// frame, which showed as textures flickering while the lobby loaded (4K, warm store: 641 to
+// 1255 skipped draws a run). Graphics pipelines then take the deferred path (handles built on
+// a compiler thread, waited for at record time), and lobby and course frame rates stayed the
+// same. RESOGUN_SKIP_PIPELINES=1 restores the one-frame skip.
 int SkipFrames() {
-    static const bool sync = [] {
-        const char* env = std::getenv("RESOGUN_SYNC_PIPELINES");
+    static const bool skip = [] {
+        const char* env = std::getenv("RESOGUN_SKIP_PIPELINES");
         return env && *env == '1';
     }();
-    return must_draw || sync ? 0 : 1;
+    return must_draw || !skip ? 0 : 1;
 }
 
 // resogun: whether draws needing a build were skipped for the budget of GPU frames, counted
@@ -491,7 +524,14 @@ template <typename Job>
 void WaitForBuild(const Job& job) {
     PhaseTimer waiting{g_resogun_build_wait_ns};
     ++g_resogun_build_waits;
+    const auto started = std::chrono::steady_clock::now();
     job.Wait();
+    if (must_draw) {
+        ++g_resogun_fresh_waits;
+        g_resogun_fresh_wait_ns += u64(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                           std::chrono::steady_clock::now() - started)
+                                           .count());
+    }
 }
 
 std::string ErrorText(const std::exception_ptr& error) {
@@ -549,6 +589,12 @@ bool PipelineCache::QueueShader(Program& program, HwStage stage, SwStage l_stage
                                                    build->runtime, profile));
         build->spec = Shader::StageSpecialization(build->info, build->runtime, profile, binding);
         build->fetch.Capture(build->info);
+        // resogun: the GPU thread waits for this translation, so a long one stalls the frame.
+        const double translate_ms = capture.Elapsed() / 1e6;
+        if (translate_ms >= 100.0) {
+            std::printf("Shader slow translate: %.0f ms, %#llx/%zu\n", translate_ms,
+                        static_cast<unsigned long long>(build->info.pgm_hash), build->permutation);
+        }
         return true;
     })) {
         return false;
@@ -571,14 +617,21 @@ bool PipelineCache::QueueShader(Program& program, HwStage stage, SwStage l_stage
     const bool queued = build->job.Start(*compiler, [this, build] {
         PhaseTimer compile{g_resogun_async_ns};
         Shader::Gcn::ScopedFetchShaderSnapshot snapshot{build->fetch};
+        const auto emit_start = std::chrono::steady_clock::now();
         auto spv = Shader::Backend::SPIRV::EmitSPIRV(profile, build->runtime, *build->ir,
                                                     build->binding);
+        const auto module_start = std::chrono::steady_clock::now();
+        g_resogun_emit_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                 module_start - emit_start).count();
         DumpShader(build->code, build->info.pgm_hash, build->info.hw_stage, build->permutation, "bin");
         DumpShader(spv, build->info.pgm_hash, build->info.hw_stage, build->permutation, "spv");
         auto patch = GetShaderPatch(build->info.pgm_hash, build->info.hw_stage,
                                     build->permutation, "spv");
         build->module = CompileSPV(patch && EmulatorSettings.IsPatchShaders() ? *patch : spv,
                                     instance.GetDevice());
+        g_resogun_module_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                   std::chrono::steady_clock::now() - module_start).count();
+        ++g_resogun_async_shaders;
         build->binary = std::move(spv);
         build->ir.reset();
         compiler_pools.Recycle(std::move(build->pools));
@@ -598,7 +651,12 @@ bool PipelineCache::BuildNow(Program& program, AsyncShaderCompilation* build) {
         return false;
     }
     if (build) {
+        const auto started = std::chrono::steady_clock::now();
         WaitForBuild(build->job);
+        ++g_resogun_shader_waits;
+        g_resogun_shader_wait_ns += u64(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                            std::chrono::steady_clock::now() - started)
+                                            .count());
         ++build_waits;
         PublishShaders();
     }
@@ -614,7 +672,7 @@ size_t PipelineCache::NewPermutationIndex(const Program& program) const {
     };
     if (DiskShadersActive()) {
         for (size_t i = 0; i < program.modules.size(); ++i) {
-            if (!program.modules[i].module && !taken(i)) {
+            if (!program.modules[i].module && !program.modules[i].on_disk && !taken(i)) {
                 return i;
             }
         }
@@ -696,6 +754,31 @@ void PipelineCache::PublishShaders(bool wait) {
 }
 
 void PipelineCache::PublishGraphics(bool wait) {
+    // Deferred pipelines are already published; once built, their data is saved.
+    std::erase_if(deferred_graphics, [&](const auto& entry) {
+        const auto& [key, build] = entry;
+        if (!build->pipeline->HandlesReady()) {
+            return false;
+        }
+        if (build->pipeline->Handle()) {
+            const auto hash = std::hash<GraphicsPipelineKey>{}(key);
+            if (NewPipelineKey(fmt::format("g_{:#018x}", hash))) {
+                RegisterPipelineData(key, hash, build->data);
+            }
+            ++num_new_pipelines;
+        } else if (const auto found = graphics_pipelines.find(key);
+                   found != graphics_pipelines.end() && found->second.get() == build->pipeline) {
+            // resogun: a failed deferred build gets the async failure's retry: the next draw
+            // builds it on the GPU thread. Recorded binds may still point at the failed one,
+            // so it is kept, not freed.
+            LOG_ERROR(Render_Vulkan, "resogun: deferred pipeline {:#x} failed; retrying on the GPU thread",
+                      std::hash<GraphicsPipelineKey>{}(key));
+            retired_graphics.push_back(std::move(found.value()));
+            graphics_pipelines.erase(found);
+            graphics_misses[key].failures = 1;
+        }
+        return true;
+    });
     for (auto it = pending_graphics.begin(); it != pending_graphics.end();) {
         auto build = it.value();
         if (wait) {
@@ -761,11 +844,34 @@ void PipelineCache::SeedWorkerCaches() {
 
 void PipelineCache::ReportCompilerStats() {
     if (compiler) {
+        extern std::atomic<u64> g_resogun_pipeline_total_ns, g_resogun_pipeline_driver_ns;
+        extern std::atomic<u32> g_resogun_pipelines_built;
+        // The totals also feed the warm-up report: take differences, not exchange.
+        static u32 last_pipelines;
+        static u64 last_pipeline_ns, last_driver_ns;
+        const u32 pipelines = g_resogun_pipelines_built.load() - last_pipelines;
+        const u64 pipeline_ns = g_resogun_pipeline_total_ns.load() - last_pipeline_ns;
+        const u64 driver_ns = g_resogun_pipeline_driver_ns.load() - last_driver_ns;
+        last_pipelines += pipelines;
+        last_pipeline_ns += pipeline_ns;
+        last_driver_ns += driver_ns;
+        const u32 shaders = g_resogun_async_shaders.exchange(0);
+        const u64 emit_ns = g_resogun_emit_ns.exchange(0), module_ns = g_resogun_module_ns.exchange(0);
+        if (pipelines || shaders) {
+            std::printf("Compile cost: %u graphics pipelines, %.1f ms each (driver %.1f ms); "
+                        "%u shaders, SPIR-V %.1f ms and module %.1f ms each\n",
+                        pipelines, pipelines ? pipeline_ns / 1e6 / pipelines : 0.0,
+                        pipelines ? driver_ns / 1e6 / pipelines : 0.0, shaders,
+                        shaders ? emit_ns / 1e6 / shaders : 0.0,
+                        shaders ? module_ns / 1e6 / shaders : 0.0);
+        }
         std::printf("Compiler stats: capture queue %zu, compile queue %zu; queue waits: capture "
-                    "%.1f ms, compile %.1f ms; pools retained %zu, reused %u\n",
+                    "%.1f ms, compile %.1f ms; pools retained %zu, reused %u; pipelines built "
+                    "behind their draws %llu\n",
                     capture_compiler->Depth(), compiler->Depth(),
                     capture_compiler->QueueWaitNs() / 1e6, compiler->QueueWaitNs() / 1e6,
-                    compiler_pools.Retained(), g_resogun_pool_reuses.exchange(0));
+                    compiler_pools.Retained(), g_resogun_pool_reuses.exchange(0),
+                    static_cast<unsigned long long>(deferred_pipelines));
     }
 }
 
@@ -807,7 +913,52 @@ const GraphicsPipeline* PipelineCache::TryPreparedPipeline(const PreparedDraw& p
         }
     }
     const auto it = graphics_pipelines.find(prepared.key);
-    return it != graphics_pipelines.end() ? it->second.get() : nullptr;
+    return it != graphics_pipelines.end() ? Usable(it->second.get()) : nullptr;
+}
+
+// resogun: a draw that may not be skipped would wait for its pipeline here, one build at a
+// time. Instead the pipeline is published at once with only its layout (all the GPU thread
+// needs to bind resources), its Vulkan pipelines are built on a compiler thread, and the draw's
+// recorded bind waits for them on the recording thread (GraphicsPipeline::WaitHandles). The GPU
+// thread goes on to the next draws, so their builds run alongside. Needs threaded recording and
+// dynamic vertex input (the build then reads no guest memory). RESOGUN_DEFER_PIPELINES=0: off.
+GraphicsPipeline* PipelineCache::DeferGraphicsPipeline() {
+    static const bool enabled = [] {
+        const char* env = std::getenv("RESOGUN_DEFER_PIPELINES");
+        return !(env && *env == '0');
+    }();
+    if (!enabled || !scheduler.IsRecordingDeferred() || !instance.IsVertexInputDynamicState() ||
+        !compiler->HasCapacity()) {
+        return nullptr;
+    }
+    auto build = std::make_shared<DeferredGraphicsBuild>();
+    build->selection = sel;
+    build->selection.regs = nullptr;
+    auto pipeline = std::make_unique<GraphicsPipeline>(
+        instance, scheduler, desc_heap, profile, sel.graphics_key, *pipeline_cache, sel.infos,
+        sel.runtime_infos, sel.fetch_shader, sel.modules, build->data, false, true);
+    build->pipeline = pipeline.get();
+    build->pipeline->StartHandles(*compiler, [this, build] {
+        // resogun: RESOGUN_FAIL_DEFERRED=N (diagnostic) fails every Nth deferred build, to
+        // exercise the GPU-thread retry in PublishGraphics.
+        static const u32 fail_every = [] {
+            const char* env = std::getenv("RESOGUN_FAIL_DEFERRED");
+            return env ? u32(std::strtoul(env, nullptr, 10)) : 0u;
+        }();
+        static std::atomic<u32> started{0};
+        if (fail_every && (started.fetch_add(1, std::memory_order_relaxed) + 1) % fail_every == 0) {
+            throw std::runtime_error("RESOGUN_FAIL_DEFERRED");
+        }
+        PhaseTimer compile{g_resogun_async_ns};
+        auto& s = build->selection;
+        build->pipeline->CreateHandles(*worker_pipeline_caches[AsyncCompiler::WorkerIndex()],
+                                       s.infos, s.runtime_infos, s.modules, build->data, false);
+    });
+    deferred_graphics.emplace_back(sel.graphics_key, build);
+    auto* published = build->pipeline;
+    graphics_pipelines.emplace(sel.graphics_key, std::move(pipeline));
+    ++deferred_pipelines;
+    return published;
 }
 
 const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectParams params,
@@ -845,12 +996,20 @@ const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectPar
     if (AsyncCompilation() && !sel.regs->stage_enable.hs_en && !EmulatorSettings.IsShaderCollect()) {
         const auto found = graphics_pipelines.find(sel.graphics_key);
         if (found != graphics_pipelines.end()) {
-            return found->second.get();
+            if (!Usable(found->second.get())) {
+                miss_reason = "pipeline failed";
+            }
+            return Usable(found->second.get());
         }
         // resogun: the draw is skipped while its pipeline builds, for at most
         // SkipFrames() GPU frames; then the GPU thread waits for the build, or builds
         // it here when none could be queued or the async one failed.
         const u8 failures = graphics_misses[sel.graphics_key].failures;
+        if (failures == 0 && SkipFrames() == 0 && !pending_graphics.contains(sel.graphics_key)) {
+            if (auto* deferred = DeferGraphicsPipeline()) {
+                return deferred;
+            }
+        }
         if (failures == 0 && !pending_graphics.contains(sel.graphics_key) && compiler->HasCapacity()) {
             PhaseTimer capture{g_resogun_snapshot_ns};
             auto build = std::make_shared<AsyncGraphicsCompilation>();
@@ -1294,7 +1453,7 @@ PipelineCache::Result PipelineCache::GetProgram(PipelineSelection& sel, HwStage 
         auto spec = Shader::StageSpecialization(info, runtime_info, profile, binding);
         runtime_fault_recover = nullptr;
         const auto it = std::ranges::find(program->modules, spec, &Program::Module::spec);
-        if (it == program->modules.end()) {
+        if (it == program->modules.end() || !it->module) {
             worker.failed = true;
             return {};
         }
@@ -1416,6 +1575,12 @@ PipelineCache::Result PipelineCache::GetProgram(PipelineSelection& sel, HwStage 
                   : std::ranges::find(program->modules, spec, &Program::Module::spec);
     if (it != program->modules.end()) {
         program->last_used = std::distance(program->modules.begin(), it);
+        // resogun: a saved permutation gets its module on first use (LoadDiskProgram).
+        if (it->on_disk && !CreateDiskModule(params.hash, *program, program->last_used)) {
+            it = program->modules.end();
+            perm_idx = NewPermutationIndex(*program);
+            perm_hash = HashCombine(params.hash, perm_idx);
+        }
     }
     // resogun: a new permutation compiles alongside the program's other pending ones; its draws
     // are skipped for at most SkipFrames() GPU frames, then it is waited for or built here.
@@ -1466,9 +1631,6 @@ PipelineCache::Result PipelineCache::GetProgram(PipelineSelection& sel, HwStage 
     } else {
         info.AddBindings(binding);
         module = it->module;
-        if (!disk_modules_unused.empty() && disk_modules_unused.erase(module)) {
-            ++disk_stats.matched;
-        }
         perm_idx = std::distance(program->modules.begin(), it);
         perm_hash = HashCombine(params.hash, perm_idx);
     }

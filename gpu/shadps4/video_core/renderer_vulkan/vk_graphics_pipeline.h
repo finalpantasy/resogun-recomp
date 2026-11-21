@@ -12,7 +12,11 @@
 #include "video_core/amdgpu/regs_color.h"
 #include "video_core/amdgpu/regs_depth.h"
 #include "video_core/amdgpu/regs_primitive.h"
+#include <atomic>
+#include <functional>
+#include "video_core/renderer_vulkan/vk_async_compiler.h"
 #include "video_core/renderer_vulkan/vk_pipeline_common.h"
+#include "resogun_toggles.h"
 
 namespace VideoCore {
 class BufferCache;
@@ -92,8 +96,38 @@ public:
                      std::span<const Shader::RuntimeInfo, MaxShaderStages> runtime_infos,
                      std::optional<const Shader::Gcn::FetchShaderData> fetch_shader,
                      std::span<const vk::ShaderModule> modules, SerializationSupport& sdata,
-                     bool preloading);
+                     bool preloading, bool defer_handles = false);
     ~GraphicsPipeline();
+
+    /// resogun: creates the Vulkan pipelines (the layout already exists). The constructor calls
+    /// it unless `defer_handles`; then StartHandles() runs it on a compiler thread. Only reads
+    /// whether each of `infos` is set.
+    void CreateHandles(vk::PipelineCache pipeline_cache,
+                       std::span<const Shader::Info* const, MaxShaderStages> infos,
+                       std::span<const Shader::RuntimeInfo, MaxShaderStages> runtime_infos,
+                       std::span<const vk::ShaderModule> modules, SerializationSupport& sdata,
+                       bool preloading);
+
+    /// resogun: queues `create` (a CreateHandles call) for a deferred pipeline, or runs it here
+    /// when the queue is full. A failure leaves the handles null.
+    void StartHandles(AsyncCompiler& compiler, std::function<void()> create);
+
+    /// resogun: whether the Vulkan pipelines exist (or failed); false while a deferred build runs.
+    bool HandlesReady() const noexcept {
+        return handles_ready.load(std::memory_order_acquire);
+    }
+
+    /// resogun: waits for a deferred build, or runs it here if no compiler thread has started it.
+    /// Draws record this on the recording thread, so the GPU thread can go on queueing builds.
+    void WaitHandles() const {
+        if (!HandlesReady()) {
+            ResogunStats::WaitTimer timer{ResogunStats::handle_wait_ns};
+            ResogunStats::handle_waits.fetch_add(1, std::memory_order_relaxed);
+            if (handle_job.Wait()) {
+                ResogunStats::handle_runs.fetch_add(1, std::memory_order_relaxed);
+            }
+        }
+    }
 
     // resogun: switch from compiler-owned snapshots to live stage data on publication.
     void PublishStages(std::span<const Shader::Info*, MaxShaderStages> infos) {
@@ -127,6 +161,8 @@ private:
     GraphicsPipelineKey key;
     std::optional<const Shader::Gcn::FetchShaderData> fetch_shader{};
     vk::UniquePipeline square_pipeline;
+    std::atomic<bool> handles_ready{true};
+    AsyncJob<bool> handle_job;
 };
 
 struct ClipDistanceShaderKey {

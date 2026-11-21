@@ -170,11 +170,13 @@ static ABI int32_t net_sock_info(int32_t s,void *info,int32_t n,int32_t flags) {
 /* sceNetCtlInit(void) (NID gky0+oaNM4k; Golf calls it with no arguments after sceNetPoolCreate and
  * only tests the result for < 0): nothing to set up for the offline state reported below. */
 static ABI int32_t netctl_init(void) { return 0; }
-/* GOLF_DISCOVERY_PORT (the local title server) makes the console look wired to a network: the game
- * asks sceNetCtlGetState before it sends anything. Without it the cable is out, as before. */
+/* The console looks wired to a network: the game asks sceNetCtlGetState before it sends anything.
+ * With the cable out it skips its boot check for unclaimed S Ticket purchases and shows an error
+ * dialog instead; with it in, that check (NpWebApi entitlements) is answered locally with an empty
+ * list and no dialog appears. GOLF_OFFLINE=1 pulls the cable again. */
 static int netctl_connected(void) {
     static int connected=-1;
-    if (connected<0) { const char *port=getenv("GOLF_DISCOVERY_PORT"); connected=port && *port; }
+    if (connected<0) { const char *off=getenv("GOLF_OFFLINE"); connected=!(off && *off=='1'); }
     return connected;
 }
 /* sceNetCtlGetState(out state): 3 is "IP obtained", 0 disconnected. */

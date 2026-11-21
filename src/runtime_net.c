@@ -1,10 +1,12 @@
 /* Networking for an offline console (the cable is unplugged, as in runtime_services.c): the
  * libSceHttp normally reports HTTP NETWORK. Golf's discovery and selected title routes
- * can replay over opt-in IPv4 loopback. The Second Screen server has no client. */
+ * can replay over opt-in IPv4: loopback, or the host in GOLF_SERVER_HOST (a friend's server). The Second Screen server has no client. */
 #ifdef _WIN32
 #include <winsock2.h>
+#include <ws2tcpip.h>
 #else
 #include <arpa/inet.h>
+#include <netdb.h>
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <unistd.h>
@@ -142,6 +144,23 @@ static unsigned discovery_port(void) {
     return port && port<=65535 ? (unsigned)port : 0;
 }
 
+/* GOLF_SERVER_HOST: name or IPv4 address of the title server (default 127.0.0.1). */
+static const char *discovery_host(void) {
+    const char *host=getenv("GOLF_SERVER_HOST");
+    return host && *host ? host : "127.0.0.1";
+}
+
+/* Resolves discovery_host() to one IPv4 address; the sockets layer is already started. */
+static int discovery_address(struct in_addr *address) {
+    struct addrinfo hints={0},*found=NULL;
+    hints.ai_family=AF_INET;
+    hints.ai_socktype=SOCK_STREAM;
+    if (getaddrinfo(discovery_host(),NULL,&hints,&found) || !found) return 0;
+    *address=((const struct sockaddr_in *)found->ai_addr)->sin_addr;
+    freeaddrinfo(found);
+    return 1;
+}
+
 #ifdef _WIN32
 typedef SOCKET DiscoverySocket;
 #define DISCOVERY_INVALID INVALID_SOCKET
@@ -167,7 +186,7 @@ static int discovery_send(DiscoverySocket sock,const void *data,int size) {
 
 static int discovery_exchange(ReplayRequest *req,const void *data,int size) {
     static const char request_format[]=
-        "%s %s HTTP/1.1\r\nHost: 127.0.0.1:%u\r\n"
+        "%s %s HTTP/1.1\r\nHost: %s:%u\r\n"
         "User-Agent: PS4Application nolib/0.0 (U-UP9000-CUSA04687_00-EVERYBODYSGOLF07/2017022700/1170)\r\n"
         "%sConnection: close\r\n\r\n";
     const ReplayRoute *route=req->route;
@@ -196,11 +215,11 @@ static int discovery_exchange(ReplayRequest *req,const void *data,int size) {
         setsockopt(sock,SOL_SOCKET,SO_RCVTIMEO,(const char *)&timeout,sizeof timeout)) goto done;
     struct sockaddr_in target={0};
     target.sin_family=AF_INET;
-    target.sin_addr.s_addr=htonl(INADDR_LOOPBACK);
+    if (!discovery_address(&target.sin_addr)) goto done;
     target.sin_port=htons((uint16_t)req->port);
     if (connect(sock,(const struct sockaddr *)&target,sizeof target)) goto done;
 
-    char request[384], headers[96]="";
+    char request[768], headers[96]="";
     if (size) {
         const char *type=route->content_type ? route->content_type : "multipart/form-data; boundary=xYzZY";
         int n=snprintf(headers,sizeof headers,"Content-Type: %s\r\nContent-Length: %d\r\n",type,size);
@@ -208,7 +227,7 @@ static int discovery_exchange(ReplayRequest *req,const void *data,int size) {
     }
     const char *method=size ? "POST" : "GET";
     const char *path=route->path ? route->path : req->login_path;
-    int request_size=snprintf(request,sizeof request,request_format,method,path,req->port,headers);
+    int request_size=snprintf(request,sizeof request,request_format,method,path,discovery_host(),req->port,headers);
     if (request_size<0 || (size_t)request_size>=sizeof request ||
         !discovery_send(sock,request,request_size) || !discovery_send(sock,data,size)) goto done;
 
@@ -386,8 +405,8 @@ static ABI int32_t http_send(int32_t id,const void *data,uint64_t length) {
         ok=0;
     }
     pthread_mutex_unlock(&discovery_lock);
-    printf("Runtime: http replay request %d sent to 127.0.0.1:%u: %s, status %d, %llu body bytes\n",
-           id,req.port,ok ? "answered" : "no valid answer",ok ? req.status : 0,
+    printf("Runtime: http replay request %d sent to %s:%u: %s, status %d, %llu body bytes\n",
+           id,discovery_host(),req.port,ok ? "answered" : "no valid answer",ok ? req.status : 0,
            ok ? (unsigned long long)req.length : 0ull);
     return ok ? 0 : HTTP_NETWORK;
 }

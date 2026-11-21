@@ -14,6 +14,8 @@
 #endif
 
 #include <vector>
+
+#include "resogun_streamline.h"
 #include <fmt/ranges.h>
 
 #include "common/assert.h"
@@ -276,7 +278,8 @@ vk::UniqueInstance CreateInstance(Frontend::WindowSystemType window_type, bool e
     setenv("VK_DRIVER_FILES", icd_path.c_str(), true);
 #endif
 
-    static vk::detail::DynamicLoader dl;
+    // resogun: with frame generation set at start, Vulkan comes from Streamline's interposer.
+    static vk::detail::DynamicLoader dl(ResogunStreamline::VulkanLibrary());
     VULKAN_HPP_DEFAULT_DISPATCHER.init(
         dl.getProcAddress<PFN_vkGetInstanceProcAddr>("vkGetInstanceProcAddr"));
 

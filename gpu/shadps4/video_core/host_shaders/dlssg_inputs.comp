@@ -1,0 +1,49 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+// resogun: DLSS Frame Generation inputs (shim/resogun_streamline.cpp). From the scene depth
+// (copied to a buffer as 32-bit floats) writes the depth image DLSS-G reads and camera motion
+// vectors: each pixel's depth puts it back in the world through this frame's camera, and the
+// previous frame's camera says where it was then. `to_prev` does both in one step on
+// (pixel x, pixel y, depth value, 1) and gives the previous screen position (homogeneous).
+// Moving objects get only the camera's motion.
+#version 450
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(std430, binding = 0) readonly buffer Depth {
+    float depth[];
+};
+layout(binding = 1, r32f) uniform writeonly image2D out_depth;
+layout(binding = 2, rg16f) uniform writeonly image2D out_mvec;
+
+layout(push_constant) uniform Push {
+    mat4 to_prev;
+    uvec2 size;
+    float far_depth; // without a camera: the depth written everywhere, and zero motion
+    uint has_camera;
+} pc;
+
+void main() {
+    const uvec2 p = gl_GlobalInvocationID.xy;
+    if (any(greaterThanEqual(p, pc.size))) {
+        return;
+    }
+    const ivec2 ip = ivec2(p);
+    if (pc.has_camera == 0u) {
+        imageStore(out_depth, ip, vec4(pc.far_depth));
+        imageStore(out_mvec, ip, vec4(0.0));
+        return;
+    }
+    const float d = depth[p.y * pc.size.x + p.x];
+    const vec2 pixel = vec2(p) + 0.5;
+    const vec4 prev = pc.to_prev * vec4(pixel, d, 1.0);
+    vec2 mvec = vec2(0.0);
+    // Behind the previous camera (or on its plane) there is no previous position.
+    if (prev.w > 1e-7) {
+        mvec = prev.xy / prev.w - pixel;
+        if (any(isnan(mvec)) || any(isinf(mvec))) {
+            mvec = vec2(0.0);
+        }
+    }
+    imageStore(out_depth, ip, vec4(d));
+    imageStore(out_mvec, ip, vec4(clamp(mvec, vec2(-32768.0), vec2(32768.0)), 0.0, 0.0));
+}

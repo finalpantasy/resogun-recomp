@@ -14,16 +14,19 @@
  *   WASD left stick, IJKL right stick, arrow keys d-pad (menus),
  *   Space/Enter Cross, Escape/Backspace/; Circle, F Square, H Triangle,
  *   Q L1, O R1, E L2, U R2 (Page Up/Page Down are L1/R1 too), X L3, M R3,
- *   Tab/P Options, T touchpad click. */
+ *   Tab/P Options, T touchpad click.
+ * Every button's keys can be rebound with settings.ini key_<button> (see pad_config_load). */
 #define _GNU_SOURCE
 #include "runtime.h"
 #include "gpu/resogun_gpu.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <pthread.h>
 #include <stdatomic.h>
 #include <time.h>
+#include <math.h>
 #include <SDL3/SDL.h>
 
 #define ERR_INVALID_ARG ((int32_t)0x80920001)
@@ -113,6 +116,24 @@ static void note_call(int kind, uint64_t start) {
         printf("Runtime: slow pad %s %.1f ms at %.3f s\n",names[kind],us/1e3,(start-__atomic_load_n(&slow_epoch,__ATOMIC_RELAXED))/1e6);
 }
 static uint8_t axis(int16_t v) { int x=(v+32768)>>8; return (uint8_t)(x<0 ? 0 : x>255 ? 255 : x); }
+/* settings.ini pad_* keys (pad_config_load); defaults keep the raw SDL stick/trigger feel. */
+static int cfg_deadzone=0;          /* pad_deadzone: percent of stick travel ignored around center */
+static int cfg_outer=0;             /* pad_outer_zone: percent at the rim that reads as full */
+static int cfg_trigger=30;          /* pad_trigger_threshold: 0..255, where L2/R2 count as pressed */
+static int cfg_rumble=100;          /* rumble_strength: percent */
+static int cfg_swap_face;           /* pad_swap_cross_circle: 1 swaps Cross and Circle */
+/* A stick as the game reads it: a radial dead zone (so a diagonal is not cut square), rescaled so
+ * the swing starts at zero just outside it and reaches full at the outer zone. */
+static void stick(uint8_t *ox, uint8_t *oy, int16_t rx, int16_t ry) {
+    const float x=rx/32768.0f, y=ry/32768.0f, m=sqrtf(x*x+y*y);
+    const float lo=cfg_deadzone/100.0f, hi=1.0f-cfg_outer/100.0f;
+    if (!cfg_deadzone && !cfg_outer) { *ox=axis(rx); *oy=axis(ry); return; }
+    if (m<=lo || hi<=lo) { *ox=*oy=128; return; }
+    float k=(m<hi ? (m-lo)/(hi-lo) : 1.0f)/m;
+    float ax=x*k, ay=y*k;
+    *ox=axis((int16_t)fmaxf(-32768.0f,fminf(32767.0f,ax*32768.0f)));
+    *oy=axis((int16_t)fmaxf(-32768.0f,fminf(32767.0f,ay*32768.0f)));
+}
 static uint8_t trigger(int16_t v) { int x=v>>7; return (uint8_t)(x<0 ? 0 : x>255 ? 255 : x); }
 static uint16_t touch_axis(float v, int max) {
     return (uint16_t)(v<=0.0f ? 0 : v>=1.0f ? max : (int)(v*max+0.5f));
@@ -237,7 +258,7 @@ static const struct { const char *name; uint32_t ps; } ps_names[]={
 /* Button sources: a gamepad button or key and the PS4 button it presses. Gamepads map by
  * position; the keyboard layout is the one in the comment at the top. */
 typedef struct { int source; uint32_t ps; } ButtonSource;
-typedef struct { ButtonSource entries[32]; size_t count; } ButtonMap;
+typedef struct { ButtonSource entries[96]; size_t count; } ButtonMap;
 static const ButtonMap pad_map={{
     {SDL_GAMEPAD_BUTTON_SOUTH,BTN_CROSS}, {SDL_GAMEPAD_BUTTON_EAST,BTN_CIRCLE},
     {SDL_GAMEPAD_BUTTON_WEST,BTN_SQUARE}, {SDL_GAMEPAD_BUTTON_NORTH,BTN_TRIANGLE},
@@ -248,7 +269,7 @@ static const ButtonMap pad_map={{
     {SDL_GAMEPAD_BUTTON_DPAD_UP,BTN_UP}, {SDL_GAMEPAD_BUTTON_DPAD_DOWN,BTN_DOWN},
     {SDL_GAMEPAD_BUTTON_DPAD_LEFT,BTN_LEFT}, {SDL_GAMEPAD_BUTTON_DPAD_RIGHT,BTN_RIGHT},
 },15};
-static const ButtonMap key_map={{
+static ButtonMap key_map={{
     {SDL_SCANCODE_W,LSTICK_UP}, {SDL_SCANCODE_S,LSTICK_DOWN}, {SDL_SCANCODE_A,LSTICK_LEFT}, {SDL_SCANCODE_D,LSTICK_RIGHT},
     {SDL_SCANCODE_I,RSTICK_UP}, {SDL_SCANCODE_K,RSTICK_DOWN}, {SDL_SCANCODE_J,RSTICK_LEFT}, {SDL_SCANCODE_L,RSTICK_RIGHT},
     {SDL_SCANCODE_UP,BTN_UP}, {SDL_SCANCODE_DOWN,BTN_DOWN}, {SDL_SCANCODE_LEFT,BTN_LEFT}, {SDL_SCANCODE_RIGHT,BTN_RIGHT},
@@ -293,12 +314,16 @@ static void host_read(PadData *d, int slot, SDL_Gamepad *g, uint8_t connected_co
     if (g) {
         for (size_t i=0;i<pad_map.count;++i)
             if (SDL_GetGamepadButton(g,(SDL_GamepadButton)pad_map.entries[i].source)) d->buttons|=pad_map.entries[i].ps;
+        if (cfg_swap_face) {
+            const uint32_t x=d->buttons & (BTN_CROSS|BTN_CIRCLE);
+            d->buttons=(d->buttons & ~(BTN_CROSS|BTN_CIRCLE)) | (x & BTN_CROSS ? BTN_CIRCLE : 0) | (x & BTN_CIRCLE ? BTN_CROSS : 0);
+        }
         const uint32_t mapped=d->buttons;
-        d->left_x=axis(SDL_GetGamepadAxis(g,SDL_GAMEPAD_AXIS_LEFTX)); d->left_y=axis(SDL_GetGamepadAxis(g,SDL_GAMEPAD_AXIS_LEFTY));
-        d->right_x=axis(SDL_GetGamepadAxis(g,SDL_GAMEPAD_AXIS_RIGHTX)); d->right_y=axis(SDL_GetGamepadAxis(g,SDL_GAMEPAD_AXIS_RIGHTY));
+        stick(&d->left_x,&d->left_y,SDL_GetGamepadAxis(g,SDL_GAMEPAD_AXIS_LEFTX),SDL_GetGamepadAxis(g,SDL_GAMEPAD_AXIS_LEFTY));
+        stick(&d->right_x,&d->right_y,SDL_GetGamepadAxis(g,SDL_GAMEPAD_AXIS_RIGHTX),SDL_GetGamepadAxis(g,SDL_GAMEPAD_AXIS_RIGHTY));
         d->l2=trigger(SDL_GetGamepadAxis(g,SDL_GAMEPAD_AXIS_LEFT_TRIGGER)); d->r2=trigger(SDL_GetGamepadAxis(g,SDL_GAMEPAD_AXIS_RIGHT_TRIGGER));
-        if (d->l2>30) d->buttons|=BTN_L2;
-        if (d->r2>30) d->buttons|=BTN_R2;
+        if (d->l2>cfg_trigger) d->buttons|=BTN_L2;
+        if (d->r2>cfg_trigger) d->buttons|=BTN_R2;
         if (mapped & BTN_L2) d->l2=255;
         if (mapped & BTN_R2) d->r2=255;
         if (SDL_GetNumGamepadTouchpads(g)>0) {
@@ -418,7 +443,7 @@ static void *host_thread(void *arg) {
         for (int i=0;i<PADS;++i) {
             if (!g[i]) continue;
             if (r[i].serial!=rumble_serial[i] || ((r[i].large || r[i].small) && start-rumble_sent[i]>=500000)) {
-                SDL_RumbleGamepad(g[i],(uint16_t)(r[i].large*257u),(uint16_t)(r[i].small*257u),1000);
+                SDL_RumbleGamepad(g[i],(uint16_t)(r[i].large*257u*cfg_rumble/100),(uint16_t)(r[i].small*257u*cfg_rumble/100),1000);
                 rumble_serial[i]=r[i].serial; rumble_sent[i]=start;
             }
             if (l[i].serial!=light_serial[i]) {
@@ -458,8 +483,15 @@ static void read_inject(void) {
     PadInjection next[PADS]={{0,{-1,-1,-1,-1}},{0,{-1,-1,-1,-1}}};
     char token[64];
     bool reconnect=false, replay=false;
+    SDL_Keycode keys[8]; int key_count=0;
     while (fscanf(f,"%63s",token)==1) {
         if (!strcmp(token,"replay")) replay=true;
+        /* "key=Name" (SDL key name: F10, Down, Escape) presses that key once, for scripted menu checks. */
+        if (!strncmp(token,"key=",4) && key_count<8) {
+            const SDL_Keycode key=SDL_GetKeyFromName(token+4);
+            if (key!=SDLK_UNKNOWN) keys[key_count++]=key;
+            continue;
+        }
         if (!strcmp(token,"reconnect")) reconnect=true;
         const int u=!strncmp(token,"p2:",3);
         const char *t=token+(u ? 3 : 0);
@@ -475,6 +507,11 @@ static void read_inject(void) {
     if (replay) ++replay_revision;
     pthread_mutex_unlock(&host_lock);
     if (reconnect) __atomic_store_n(&reconnect_wanted,1,__ATOMIC_RELEASE); /* host_gamepads closes them */
+    for (int i=0;i<key_count;++i) {
+        SDL_Event e; SDL_zero(e);
+        e.type=SDL_EVENT_KEY_DOWN; e.key.key=keys[i]; e.key.down=true; SDL_PushEvent(&e);
+        e.type=SDL_EVENT_KEY_UP; e.key.down=false; SDL_PushEvent(&e);
+    }
     for (int u=0;u<PADS;++u) {
         const int *k=next[u].stick;
         if (!u || next[u].buttons || k[0]>=0 || k[1]>=0 || k[2]>=0 || k[3]>=0)
@@ -577,20 +614,6 @@ static void title_press(PadData *d) {
     if (t>=1000000 && (t-1000000)%500000<100000) d->buttons|=BTN_CROSS;
 }
 
-/* Game's pad read (sample): L3 and R3 pressed together (the stick clicks; the keyboard's X and M)
- * open the Cheats page, on either player's pad. That press does not reach the game; a chord held
- * while an overlay had the input counts as held, so closing the page with it does not reopen it. */
-static void cheat_chord(PadData *d, int slot, bool captured) {
-    static bool was_down[PADS];
-    const bool down=(d->buttons & (BTN_L3|BTN_R3))==(BTN_L3|BTN_R3);
-    const bool pressed=down && !was_down[slot] && !captured;
-    was_down[slot]=down || (captured && was_down[slot]);
-    if (!pressed) return;
-    d->buttons&=~(uint32_t)(BTN_L3|BTN_R3);
-    resogun_cheats_open();
-    printf("Runtime: L3+R3 on pad %d; Cheats opened\n",slot+1);
-}
-
 /* After a dialog closes, buttons still held (the Cross that accepted a name) stay hidden until
  * released: the game would take them as a new press. A replay and the title screen's presses are
  * user 1's; the pad file presses for either user. */
@@ -609,7 +632,6 @@ static void sample(PadData *d, int slot) {
     d->timestamp=now_us();
     if (resogun_gpu_overlay_captures_input()) {
         hold_after_capture[slot]=1; clicks[slot].active=false;
-        cheat_chord(d,slot,true);
         if (!slot) title_back(d);
         return;
     }
@@ -630,7 +652,6 @@ static void sample(PadData *d, int slot) {
     if (inj & BTN_R2) d->r2=255;
     uint8_t *axes[4]={&d->left_x,&d->left_y,&d->right_x,&d->right_y};
     for (int i=0;i<4;++i) if (injection.stick[i]>=0) *axes[i]=(uint8_t)injection.stick[i];
-    cheat_chord(d,slot,false);
     if (!slot) title_back(d);
     play_click(d,&clicks[slot]);
     if (!slot) title_press(d);
@@ -640,7 +661,78 @@ static void sample(PadData *d, int slot) {
     }
 }
 
+
+/* settings.ini (RESOGUN_CONFIG names the file) and environment overrides, read once at pad open:
+ *   key_<button>=Key[,Key...]  replaces that button's keyboard keys (SDL key names: "Space",
+ *                              "Left Shift", "Return", "F5"); <button> is any name in ps_names
+ *                              (cross circle square triangle l1 r1 l2 r2 l3 r3 options touchpad
+ *                              up down left right, lstick_up.. rstick_right). "none" unbinds.
+ *   pad_deadzone, pad_outer_zone, pad_trigger_threshold, rumble_strength, pad_swap_cross_circle.
+ * The environment variable is the key upper-cased (RESOGUN_KEY_CROSS, RESOGUN_PAD_DEADZONE). */
+static const char *cfg_value(const char *key, char *buf, size_t n, FILE *f) {
+    char env[96]="RESOGUN_"; size_t e=strlen(env);
+    for (const char *c=key;*c && e<sizeof(env)-1;++c) env[e++]=(char)(*c>='a' && *c<='z' ? *c-32 : *c);
+    env[e]=0;
+    const char *v=getenv(env);
+    if (v && *v) return v;
+    if (!f) return NULL;
+    rewind(f);
+    const size_t kl=strlen(key);
+    char line[256];
+    while (fgets(line,sizeof(line),f)) {
+        char *p=line; while (*p==' ' || *p=='\t') ++p;
+        if (*p=='#' || strncmp(p,key,kl)) continue;
+        p+=kl; while (*p==' ' || *p=='\t') ++p;
+        if (*p!='=') continue;
+        ++p; while (*p==' ' || *p=='\t') ++p;
+        char *hash=strchr(p,'#'); if (hash) *hash=0;
+        size_t len=strlen(p); while (len && (p[len-1]=='\n' || p[len-1]=='\r' || p[len-1]==' ' || p[len-1]=='\t')) p[--len]=0;
+        snprintf(buf,n,"%s",p);
+        return buf;
+    }
+    return NULL;
+}
+static int cfg_int(const char *key, int def, int lo, int hi, FILE *f) {
+    char buf[64]; const char *v=cfg_value(key,buf,sizeof(buf),f);
+    if (!v) return def;
+    int x=atoi(v); return x<lo ? lo : x>hi ? hi : x;
+}
+static void pad_config_load(void) {
+    /* The save folder's settings.ini, else the setup's default next to the exe (resogun_settings.cpp). */
+    const char *path=getenv("RESOGUN_CONFIG"), *fallback=getenv("RESOGUN_CONFIG_DEFAULT");
+    FILE *f=fopen(path && *path ? path : "settings.ini","r");
+    if (!f && fallback && *fallback) f=fopen(fallback,"r");
+    cfg_deadzone=cfg_int("pad_deadzone",cfg_deadzone,0,50,f);
+    cfg_outer=cfg_int("pad_outer_zone",cfg_outer,0,40,f);
+    cfg_trigger=cfg_int("pad_trigger_threshold",cfg_trigger,1,254,f);
+    cfg_rumble=cfg_int("rumble_strength",cfg_rumble,0,100,f);
+    cfg_swap_face=cfg_int("pad_swap_cross_circle",0,0,1,f);
+    for (size_t a=0;a<sizeof(ps_names)/sizeof(ps_names[0]);++a) {
+        char key[48], buf[160];
+        snprintf(key,sizeof(key),"key_%s",ps_names[a].name);
+        const char *v=cfg_value(key,buf,sizeof(buf),f);
+        if (!v) continue;
+        char list[160]; snprintf(list,sizeof(list),"%s",v);
+        SDL_Scancode codes[8]; int n=0;
+        for (char *tok=strtok(list,","); tok && n<8; tok=strtok(NULL,",")) {
+            while (*tok==' ') ++tok;
+            size_t len=strlen(tok); while (len && tok[len-1]==' ') tok[--len]=0;
+            if (!len || !strcasecmp(tok,"none")) continue;
+            const SDL_Scancode sc=SDL_GetScancodeFromName(tok);
+            if (sc==SDL_SCANCODE_UNKNOWN) { printf("Runtime: %s: unknown key \"%s\"\n",key,tok); continue; }
+            codes[n++]=sc;
+        }
+        size_t out=0;
+        for (size_t i=0;i<key_map.count;++i) if (key_map.entries[i].ps!=ps_names[a].ps) key_map.entries[out++]=key_map.entries[i];
+        key_map.count=out;
+        for (int i=0;i<n && key_map.count<sizeof(key_map.entries)/sizeof(key_map.entries[0]);++i)
+            key_map.entries[key_map.count++]=(ButtonSource){codes[i],ps_names[a].ps};
+        printf("Runtime: %s rebound (%d key%s)\n",key,n,n==1 ? "" : "s");
+    }
+    if (f) fclose(f);
+}
 static void start_host_thread(void) {
+    pad_config_load();
     pthread_t thread;
     if (pthread_create(&thread,NULL,host_thread,NULL)==0) pthread_detach(thread);
     else puts("Runtime: pad host thread failed to start; the pad reads neutral");

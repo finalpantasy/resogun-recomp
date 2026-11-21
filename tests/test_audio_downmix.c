@@ -13,6 +13,8 @@ uintptr_t runtime_lookup(const RuntimeExport *table, size_t count, const char *n
 /* The menu's setting, as resogun_gpu.cpp would serve it. */
 static int stub_mode=MODE_AUTO;
 int resogun_gpu_audio_channels(void) { return stub_mode; }
+static int stub_volume=100;
+int resogun_gpu_audio_volume(void) { return stub_volume; }
 /* The menu's pause (resogun_gpu.cpp): never paused here. */
 void resogun_gpu_wait_while_paused(void) {}
 /* The controller speaker (runtime_pad.c): no controller here. */
@@ -96,44 +98,44 @@ static void test_shape_buffer(void) {
     /* PS4 order L R C LFE SL SR BL BR in: channel 4 (SL) must come out as SDL's SL (index 6). */
     const float ps4[8]={0.1f,0.2f,0.3f,0.4f,0.5f,0.6f,0.7f,0.8f};
     Port p=make_port(8,1,0,8,1);
-    shape_buffer(&p,ps4,out);
+    shape_buffer(&p,ps4,out,1.0f,1.0f);
     const float sdl[8]={0.1f,0.2f,0.3f,0.4f,0.7f,0.8f,0.5f,0.6f};
     for (int c=0;c<8;++c) assert(out[c]==sdl[c]);
     /* The standard-layout formats (6, 7) are already in SDL order. */
     p=make_port(8,1,1,8,1);
-    shape_buffer(&p,ps4,out);
+    shape_buffer(&p,ps4,out,1.0f,1.0f);
     for (int c=0;c<8;++c) assert(out[c]==ps4[c]);
 
     /* Stereo: the PS4 side channel (4) and back channel (6) both reach the left ear at -3 dB. */
     p=make_port(8,1,0,OUT_STEREO,1);
-    shape_buffer(&p,(const float[8]){0,0,0,0,0.5f,0,0,0},out); assert(near(out[0],0.35355f) && near(out[1],0));
-    shape_buffer(&p,(const float[8]){0,0,0,0,0,0,0.5f,0},out); assert(near(out[0],0.35355f) && near(out[1],0));
+    shape_buffer(&p,(const float[8]){0,0,0,0,0.5f,0,0,0},out,1.0f,1.0f); assert(near(out[0],0.35355f) && near(out[1],0));
+    shape_buffer(&p,(const float[8]){0,0,0,0,0,0,0.5f,0},out,1.0f,1.0f); assert(near(out[0],0.35355f) && near(out[1],0));
     /* 5.1: the PS4 side channel lands on the left surround as it is. */
     p=make_port(8,1,0,OUT_51,1);
-    shape_buffer(&p,(const float[8]){0,0,0,0,0.5f,0,0,0},out); assert(near(out[4],0.5f) && near(out[5],0));
+    shape_buffer(&p,(const float[8]){0,0,0,0,0.5f,0,0,0},out,1.0f,1.0f); assert(near(out[4],0.5f) && near(out[5],0));
     assert(near(out[0],0) && near(out[1],0) && near(out[2],0) && near(out[3],0));
 
     /* A hot mix folded to stereo bends instead of clipping: left = 0.8 + 0.7071 * 0.8 (center) = 1.37. */
     p=make_port(8,1,0,OUT_STEREO,1);
-    shape_buffer(&p,(const float[8]){0.8f,0.8f,0.8f,0,0,0,0,0},out);
+    shape_buffer(&p,(const float[8]){0.8f,0.8f,0.8f,0,0,0,0,0},out,1.0f,1.0f);
     assert(out[0]>0.9f && out[0]<1.0f && out[0]==out[1]);
 
     /* Per-channel volumes scale each channel. */
     p=make_port(2,1,0,2,1);
     p.volume[0]=VOLUME_0DB/2;
-    shape_buffer(&p,(const float[2]){0.5f,0.5f},out); assert(near(out[0],0.25f) && near(out[1],0.5f));
+    shape_buffer(&p,(const float[2]){0.5f,0.5f},out,1.0f,1.0f); assert(near(out[0],0.25f) && near(out[1],0.5f));
     /* A port that is passed on as it is stays bit-exact, even near full scale. */
     p=make_port(2,1,0,2,1);
-    shape_buffer(&p,(const float[2]){0.95f,-1.0f},out); assert(out[0]==0.95f && out[1]==-1.0f);
+    shape_buffer(&p,(const float[2]){0.95f,-1.0f},out,1.0f,1.0f); assert(out[0]==0.95f && out[1]==-1.0f);
 
     /* s16: exact at unity. */
     int16_t in16[2]={16384,-32768}, out16[2];
     p=make_port(2,0,0,2,1);
-    shape_buffer(&p,in16,out16); assert(out16[0]==16384 && out16[1]==-32768);
+    shape_buffer(&p,in16,out16,1.0f,1.0f); assert(out16[0]==16384 && out16[1]==-32768);
     /* s16 8ch folded to stereo, several frames in one buffer. */
     int16_t in8[2*8]={16384,0,0,0,0,0,0,0, 32767,32767,32767,0,32767,32767,32767,32767}, st[2*2];
     p=make_port(8,0,0,OUT_STEREO,2);
-    shape_buffer(&p,in8,st);
+    shape_buffer(&p,in8,st,1.0f,1.0f);
     assert(st[0]==16384 && st[1]==0);
     assert(st[2]>29000 && st[2]<=32767 && st[3]>29000 && st[3]<=32767);
 }
@@ -221,19 +223,41 @@ static void test_pad_speaker(void) {
     for (int c=0;c<8;++c) p.volume[c]=VOLUME_0DB;
     float in[256], out[256*4];
     for (int i=0;i<256;++i) in[i]=0.5f;
-    shape_buffer(&p,in,out);
+    shape_buffer(&p,in,out,1.0f,1.0f);
     assert(near(out[0],0.5f) && near(out[1],0.5f) && near(out[2],0) && near(out[3],0) && near(out[255*4+1],0.5f));
     p.on_pad=0; p.out_channels=1;                    /* on the main output it is turned down */
-    shape_buffer(&p,in,out);
+    shape_buffer(&p,in,out,1.0f,1.0f);
     assert(near(out[0],0.5f*PAD_SPEAKER_GAIN));
 }
 
+static void test_master_volume(void) {
+    float out[16];
+    Port p=make_port(2,1,0,2,2);
+    const float in[4]={0.5f,-0.5f,0.5f,-0.5f};
+    /* The gain is the slider squared: 100 is unity, 50 is a quarter, 0 is silence, out of range clamps. */
+    stub_volume=100; assert(near(master_gain(),1.0f));
+    stub_volume=50;  assert(near(master_gain(),0.25f));
+    stub_volume=0;   assert(near(master_gain(),0.0f));
+    stub_volume=250; assert(near(master_gain(),1.0f));
+    stub_volume=-5;  assert(near(master_gain(),0.0f));
+    stub_volume=100;
+    /* A constant gain scales every sample; the passthrough path is exact otherwise. */
+    shape_buffer(&p,in,out,0.25f,0.25f);
+    assert(near(out[0],0.125f) && near(out[1],-0.125f) && near(out[2],0.125f) && near(out[3],-0.125f));
+    /* A change between buffers ramps across the buffer: first frame at the old gain, then toward the new. */
+    shape_buffer(&p,in,out,1.0f,0.0f);
+    assert(near(out[0],0.5f) && near(out[2],0.25f));
+    /* Folded mixes scale too. */
+    p=make_port(8,1,0,OUT_STEREO,1);
+    shape_buffer(&p,(const float[8]){0,0,0,0,0.5f,0,0,0},out,0.0f,0.0f); assert(near(out[0],0) && near(out[1],0));
+}
 int main(void) {
     test_layout_choice();
     test_pad_speaker();
     test_soft_limit();
     test_fold();
     test_shape_buffer();
+    test_master_volume();
     test_peaks();
     test_end_to_end();
     puts("audio downmix ok");

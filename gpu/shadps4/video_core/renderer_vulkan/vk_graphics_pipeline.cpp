@@ -48,7 +48,8 @@ GraphicsPipeline::GraphicsPipeline(
     vk::PipelineCache pipeline_cache, std::span<const Shader::Info*, MaxShaderStages> infos,
     std::span<const Shader::RuntimeInfo, MaxShaderStages> runtime_infos,
     std::optional<const Shader::Gcn::FetchShaderData> fetch_shader_,
-    std::span<const vk::ShaderModule> modules, SerializationSupport& sdata, bool preloading)
+    std::span<const vk::ShaderModule> modules, SerializationSupport& sdata, bool preloading,
+    bool defer_handles)
     : Pipeline{instance, scheduler, desc_heap, profile, pipeline_cache}, key{key_},
       fetch_shader{std::move(fetch_shader_)} {
     const auto started = Clock::now();
@@ -75,6 +76,39 @@ GraphicsPipeline::GraphicsPipeline(
                "Failed to create graphics pipeline layout: {}", vk::to_string(layout_result));
     pipeline_layout = std::move(layout);
     SetObjectName(device, *pipeline_layout, "Graphics PipelineLayout {}", debug_str);
+    g_resogun_pipeline_total_ns += NsSince(started);
+    if (defer_handles) {
+        handles_ready.store(false, std::memory_order_relaxed);
+        return;
+    }
+    CreateHandles(pipeline_cache, infos, runtime_infos, modules, sdata, preloading);
+}
+
+void GraphicsPipeline::StartHandles(AsyncCompiler& compiler, std::function<void()> create) {
+    auto run = [this, create = std::move(create)] {
+        try {
+            create();
+        } catch (...) {
+            pipeline.reset();
+            square_pipeline.reset();
+            LOG_ERROR(Render_Vulkan, "resogun: deferred graphics pipeline failed");
+        }
+        handles_ready.store(true, std::memory_order_release);
+        return true;
+    };
+    if (!handle_job.Start(compiler, run, true)) {
+        run();
+    }
+}
+
+void GraphicsPipeline::CreateHandles(vk::PipelineCache pipeline_cache,
+                                     std::span<const Shader::Info* const, MaxShaderStages> infos,
+                                     std::span<const Shader::RuntimeInfo, MaxShaderStages> runtime_infos,
+                                     std::span<const vk::ShaderModule> modules,
+                                     SerializationSupport& sdata, bool preloading) {
+    const auto started = Clock::now();
+    const vk::Device device = instance.GetDevice();
+    const auto debug_str = GetDebugString();
 
     if (!preloading) {
         VertexInputs<AmdGpu::Buffer> guest_buffers;
@@ -284,7 +318,7 @@ GraphicsPipeline::GraphicsPipeline(
     }
 
     std::array<vk::SampleCountFlagBits, AmdGpu::NUM_COLOR_BUFFERS> color_samples;
-    std::ranges::transform(key.color_samples, color_samples.begin(), [&instance](u8 num_samples) {
+    std::ranges::transform(key.color_samples, color_samples.begin(), [this](u8 num_samples) {
         return num_samples ? LiverpoolToVK::NumSamples(num_samples, instance.GetColorSampleCounts())
                            : vk::SampleCountFlagBits::e1;
     });
@@ -457,7 +491,9 @@ GraphicsPipeline::GraphicsPipeline(
     ++g_resogun_pipelines_built;
 }
 
-GraphicsPipeline::~GraphicsPipeline() = default;
+GraphicsPipeline::~GraphicsPipeline() {
+    WaitHandles(); // a deferred build writes into this object
+}
 
 template <typename Attribute, typename Binding>
 void GraphicsPipeline::GetVertexInputs(

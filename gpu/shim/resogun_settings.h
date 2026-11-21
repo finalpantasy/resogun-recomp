@@ -157,12 +157,21 @@ struct Values {
     /// (src/loader.c); read once, before the game starts. On by default.
     bool skip_intro = true;
     /// Everybody's Golf: the game's display option reads as frame rate priority, its 60 FPS mode
-    /// (src/runtime_game.c); read once, before the game starts. On by default.
-    bool frame_rate_priority = true;
+    /// (src/runtime_game.c); read once, before the game starts (startup_frame_rate_priority). On by
+    /// default. The Display Settings panel saves a change for the next start.
+    bool startup_frame_rate_priority = true;
+    std::atomic<bool> frame_rate_priority{true};
     /// Everybody's Golf in PS4 Pro mode: the height the game renders its scene at, 16:9 (1080,
     /// 1440, 1800, 2160 or 2880), in either display mode (src/runtime_game.c); 0 leaves it to the
-    /// game: 3200x1800 in resolution priority, 1920x1080 in frame rate priority. Read once.
-    int render_height = 0;
+    /// game: 3200x1800 in resolution priority, 1920x1080 in frame rate priority. Read once at start
+    /// (startup_render_height); the Display Settings panel changes it live up to what the memory
+    /// pool set up at start holds (runtime_game_golf_set_render_height).
+    int startup_render_height = 0;
+    std::atomic<int> render_height{0};
+    /// Whether the texture pack is drawn (key hd_textures, on by default). With a pack indexed at
+    /// start the Display Settings panel switches it live; off at start, the pack is not read.
+    bool startup_hd_textures = true;
+    std::atomic<bool> hd_textures{true};
     /// Texture packs (gpu/shadps4/video_core/texture_cache/texture_pack.h): the folder of
     /// replacement PNGs, and a folder to dump the game's textures into; empty: off. Read once.
     std::string texture_pack, texture_dump;
@@ -175,6 +184,8 @@ struct Values {
     std::atomic<int> frame_rate{60};
     /// Speaker layout of the game's audio (AudioChannels), read when the game opens its ports.
     std::atomic<int> audio_channels{AudioChannelsAuto};
+    /// Master volume of the game's audio, 0..100 percent (settings.ini audio_volume); live, applied per buffer.
+    std::atomic<int> audio_volume{100};
     /// RenderResolution, 4k by default; read once, before the game starts.
     int startup_render_resolution = Render4k;
     /// What the Display Settings pages save for the next start.
@@ -182,6 +193,15 @@ struct Values {
     /// FSR 1 RCAS sharpening of the picture as the window shows it (key sharpening,
     /// RESOGUN_SHARPENING; on by default): the presenter reads it at each frame.
     std::atomic<bool> sharpening{true};
+    /// RCAS strength (key sharpening_strength: soft, default, strong; RESOGUN_SHARPENING_STRENGTH):
+    /// an index into SharpeningStrengths; the presenter reads it at each frame.
+    std::atomic<int> sharpening_strength{1};
+    /// Anisotropic filtering override of the game's linear samplers (key anisotropy: off, 4, 8, 16;
+    /// RESOGUN_ANISOTROPY): 0 keeps the game's own, else the level it is raised to at least.
+    std::atomic<int> anisotropy{0};
+    /// Texture LOD bias for render sizes above 1080 lines (key texture_lod_bias: off, auto;
+    /// RESOGUN_TEXTURE_LOD_BIAS): auto sharpens by half a mip level above 1080 lines.
+    std::atomic<bool> texture_lod_auto{false};
     /// SMAA 1x anti-aliasing of the game's picture at its render size (key smaa, RESOGUN_SMAA;
     /// off by default, the game's own look): the presenter reads it at each frame.
     std::atomic<bool> smaa{false};
@@ -189,6 +209,11 @@ struct Values {
     /// BT.2020 PQ and switches its own output to HDR. Read once, before the game starts.
     bool startup_hdr = false;
     std::atomic<bool> hdr{false};
+    /// NVIDIA DLSS Frame Generation (key frame_generation, RESOGUN_FRAME_GENERATION; off by
+    /// default): a generated frame before each game frame (resogun_streamline.cpp). Vulkan has to
+    /// come from Streamline's interposer, so turning it on takes a restart; off is at once.
+    bool startup_frame_generation = false;
+    std::atomic<bool> frame_generation{false};
     /// Whether the window's display offers an HDR10 surface: -1 not known yet, set by the
     /// swapchain (vk_swapchain.cpp).
     std::atomic<int> hdr_display{-1};
@@ -213,6 +238,12 @@ void SaveDisplayIfChanged();
 
 /// Refresh rate of the window's display in Hz (0 unknown), looked up at most every 500 ms.
 double DisplayRefresh();
+
+/// Sharpness values of RCAS (FSR's exp2(-stops)): soft (1 stop), the default (0.25 stop), strong (none).
+inline constexpr float SharpeningStrengths[3] = {0.5f, 0.8409f, 1.0f};
+/// The mip bias the texture LOD option adds to the game's samplers at the current render height
+/// (0 when off, or at 1080 lines and below).
+float TextureLodBias();
 
 /// The frame rate the game runs at: frame_rate, lowered to the highest of FrameRates the window's
 /// display refreshes at, since a frame shown later than the engine's target slows the game (it

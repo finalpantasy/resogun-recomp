@@ -127,6 +127,7 @@ private:
     vk::Format view_format;
     vk::PresentModeKHR present_mode;
     bool vsync = true;     ///< the settings present_mode was chosen for
+    bool frame_generation = false; ///< resogun: presenting for DLSS Frame Generation (no VSync)
     bool tearing = false;
     int display_mode = -1; ///< resogun: the display mode the swapchain was made for (UpdateVsync)
     vk::Extent2D extent;

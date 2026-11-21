@@ -78,6 +78,7 @@ add_host_shader(fault_buffer_process.comp fault_buffer_process_comp)
 add_host_shader(fs_tri.vert fs_tri_vert)
 add_host_shader(post_process.frag post_process_frag)
 add_host_shader(rcas.frag rcas_frag)
+add_host_shader(dlssg_inputs.comp dlssg_inputs_comp)
 add_host_shader(buffer_multi_copy.comp buffer_multi_copy_comp)
 add_host_shader(depth_resample.frag depth_resample_frag)
 add_host_shader(depth_resample.frag depth_stencil_resample_frag HAS_STENCIL=1)
@@ -143,15 +144,17 @@ target_sources(resogun_gpu PRIVATE third_party/imgui/imgui.cpp third_party/imgui
 target_include_directories(resogun_gpu PRIVATE third_party/imgui third_party/imgui/backends)
 target_compile_definitions(resogun_gpu PRIVATE IMGUI_IMPL_VULKAN_NO_PROTOTYPES
     RESOGUN_FONT_PATH="${CMAKE_CURRENT_SOURCE_DIR}/third_party/fonts/DejaVuSans.ttf"
-    RESOGUN_EXIT_FONT_PATH="${CMAKE_CURRENT_SOURCE_DIR}/third_party/fonts/orbitron/Orbitron[wght].ttf")
+    RESOGUN_EXIT_FONT_PATH="${CMAKE_CURRENT_SOURCE_DIR}/third_party/fonts/mplusrounded1c/MPLUSRounded1c-Bold.ttf")
 set_source_files_properties(shim/resogun_overlay.cpp PROPERTIES
-    OBJECT_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/fonts/DejaVuSans.ttf;${CMAKE_CURRENT_SOURCE_DIR}/third_party/fonts/orbitron/Orbitron[wght].ttf")
+    OBJECT_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/fonts/DejaVuSans.ttf;${CMAKE_CURRENT_SOURCE_DIR}/third_party/fonts/mplusrounded1c/MPLUSRounded1c-Bold.ttf")
 target_include_directories(resogun_gpu PRIVATE shim shadps4 ${SHADER_INCLUDE} third_party/half/include)
 target_compile_definitions(resogun_gpu PRIVATE BOOST_ASIO_STANDALONE NDEBUG)
 target_compile_options(resogun_gpu PRIVATE -Wno-deprecated-declarations -Wno-missing-field-initializers)
 target_link_libraries(resogun_gpu PUBLIC Vulkan::Headers fmt::fmt Boost::headers magic_enum::magic_enum
     tsl::robin_map GPUOpen::VulkanMemoryAllocator PkgConfig::XXHASH PkgConfig::SDL3 Resogun::FFmpeg miniz::miniz Zydis::Zydis sirit)
 target_include_directories(resogun_gpu PRIVATE third_party/xbyak)
+# NVIDIA Streamline headers (MIT) for DLSS Frame Generation; its DLLs are loaded at run time.
+target_include_directories(resogun_gpu SYSTEM PRIVATE third_party/streamline/include)
 if (WIN32)
     # Guest code is entered with the System V ABI; NOMINMAX/WIN32_LEAN_AND_MEAN keep
     # <windows.h> out of the way of std::min/max and the Vulkan/SDL headers.
@@ -192,7 +195,7 @@ if (WIN32)
     target_link_options(resogun PRIVATE -Wl,--disable-high-entropy-va "SHELL:-Xlinker --stack -Xlinker 16777216,16777216")
     # Its manifest names the libs assembly (res/libs.manifest), which must sit beside it: libs/.
     set_property(SOURCE ../res/resogun.rc APPEND PROPERTY OBJECT_DEPENDS
-        ${CMAKE_CURRENT_SOURCE_DIR}/../res/resogun.manifest ${CMAKE_CURRENT_SOURCE_DIR}/../res/resogun.ico)
+        ${CMAKE_CURRENT_SOURCE_DIR}/../res/resogun.manifest ${CMAKE_CURRENT_SOURCE_DIR}/../res/golf.ico)
     add_custom_command(TARGET resogun POST_BUILD COMMAND ${CMAKE_COMMAND} -E copy_if_different
         ${CMAKE_CURRENT_SOURCE_DIR}/../res/libs.manifest $<TARGET_FILE_DIR:resogun>/libs/libs.manifest)
     # resogun-setup.exe (setup/): sets up a release folder (tools/package.py) from a player's dump.
@@ -201,6 +204,14 @@ if (WIN32)
     target_compile_definitions(resogun-setup PRIVATE UNICODE _UNICODE)
     target_link_options(resogun-setup PRIVATE -municode -static)
     target_link_libraries(resogun-setup PRIVATE comctl32 ole32 shell32 uuid gdi32 msimg32 dwmapi)
+    # EverybodysGolf.exe (launcher_gui/): the player's launcher window. Static, so it starts without
+    # the MSYS2 DLLs.
+    add_executable(golf-launcher WIN32 ../launcher_gui/main.cpp ../launcher_gui/launcher.rc)
+    set_target_properties(golf-launcher PROPERTIES OUTPUT_NAME EverybodysGolf CXX_STANDARD 20)
+    target_compile_definitions(golf-launcher PRIVATE UNICODE _UNICODE)
+    target_compile_options(golf-launcher PRIVATE -Wall -Wextra -Werror -Wno-missing-field-initializers)
+    target_link_options(golf-launcher PRIVATE -municode -static)
+    target_link_libraries(golf-launcher PRIVATE comctl32 ole32 oleaut32 shell32 uuid iphlpapi)
 else()
     # Not PIE: host heap objects handed to the guest stay in the brk heap, below 1 TiB (loader.c main).
     set_target_properties(resogun PROPERTIES POSITION_INDEPENDENT_CODE OFF)

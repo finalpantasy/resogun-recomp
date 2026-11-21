@@ -87,6 +87,7 @@ EmitContext::EmitContext(const Profile& profile_, const RuntimeInfo& runtime_inf
     DefineArithmeticTypes();
     DefineInterfaces();
     DefineSharedMemory();
+    DefineVgprArray();
     DefineBuffers();
     DefineImagesAndSamplers();
     DefineFunctions();
@@ -1267,6 +1268,21 @@ void EmitContext::DefineImagesAndSamplers() {
         samplers.push_back(id);
         sampler_same_minmag.push_back(GolfSameMinMag(samp_desc.GetSharp(info)));
         interfaces.push_back(id);
+    }
+}
+
+// resogun: registers that relative addressing (v_movrels/v_movreld) reaches, indexed at run time.
+void EmitContext::DefineVgprArray() {
+    if (info.vgpr_array_size == 0) {
+        return;
+    }
+    const Id type = TypeArray(U32[1], ConstU32(info.vgpr_array_size));
+    vgpr_array_pointer = TypePointer(spv::StorageClass::Private, U32[1]);
+    vgpr_array = AddGlobalVariable(TypePointer(spv::StorageClass::Private, type),
+                                   spv::StorageClass::Private);
+    Name(vgpr_array, "vgpr_array");
+    if (profile.supported_spirv >= 0x00010400) {
+        interfaces.push_back(vgpr_array);
     }
 }
 

@@ -99,7 +99,9 @@ private:
     std::vector<std::thread> workers;
 };
 
-// resogun: one job per cache entry; failures are terminal until the next session.
+// resogun: one job per cache entry; failures are terminal until the next session. Whoever claims
+// the task first runs it: a worker, or a thread in Wait() while the task is still queued, so a
+// waiting GPU thread builds what it needs instead of waiting behind the whole queue.
 template <typename T>
 class AsyncJob {
 public:
@@ -108,22 +110,26 @@ public:
         if (started) {
             return false;
         }
-        auto task = std::make_shared<std::packaged_task<T()>>(std::forward<F>(function));
-        auto completion = task->get_future();
-        if (!compiler.Submit([task] { (*task)(); }, priority)) {
+        auto claimable = std::make_shared<Claimable>(std::forward<F>(function));
+        auto completion = claimable->task.get_future();
+        if (!compiler.Submit([claimable] { claimable->Run(); }, priority)) {
             return false;
         }
         future = std::move(completion);
+        task = std::move(claimable);
         started = true;
         return true;
     }
     bool Pending() const { return future.valid(); }
     bool Failed() const { return failed; }
     const std::string& Error() const { return error; }
-    void Wait() const {
+    /// True when this thread ran the task itself (it was still queued).
+    bool Wait() const {
+        const bool ran = task && task->Run(); // no-op once a worker has it
         if (future.valid()) {
             future.wait();
         }
+        return ran;
     }
     std::optional<T> Poll() {
         if (!future.valid() || future.wait_for(std::chrono::seconds{0}) != std::future_status::ready) {
@@ -141,6 +147,21 @@ public:
     }
 
 private:
+    struct Claimable {
+        template <typename F>
+        explicit Claimable(F&& function) : task{std::forward<F>(function)} {}
+        bool Run() {
+            if (claimed.exchange(true, std::memory_order_acq_rel)) {
+                return false;
+            }
+            task();
+            task = {}; // drops the callable, whose captures often own this job (a cycle)
+            return true;
+        }
+        std::packaged_task<T()> task;
+        std::atomic<bool> claimed{false};
+    };
+    std::shared_ptr<Claimable> task;
     std::future<T> future;
     bool started = false;
     bool failed = false;

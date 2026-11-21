@@ -706,6 +706,33 @@ bool Instance::CreateDevice() {
         device_chain.unlink<vk::PhysicalDeviceShaderClockFeaturesKHR>();
     }
 
+    // resogun: NVIDIA compresses some pipeline binaries against a ~2 MiB dictionary made anew in
+    // each process, and a later process rejects most of them (VK_PIPELINE_COMPILE_REQUIRED). With
+    // the driver's internal pipeline cache off, fewer pipelines get a dictionary (none of 16 on
+    // the island, 93 of 179 on Eagle City), so more binaries restore in the next run, and a
+    // restore takes about 0.5 ms instead of 4.5. RESOGUN_BINARY_INTERNAL_CACHE=1 keeps it on.
+    vk::DevicePipelineBinaryInternalCacheControlKHR binary_cache_control{
+        .disableInternalCache = vk::True};
+    if (pipeline_binaries) {
+        const auto binary_props = physical_device
+                                      .getProperties2<vk::PhysicalDeviceProperties2,
+                                                      vk::PhysicalDevicePipelineBinaryPropertiesKHR>()
+                                      .get<vk::PhysicalDevicePipelineBinaryPropertiesKHR>();
+        std::printf("Pipeline binary properties: internal cache %u, cache control %u, prefers "
+                    "internal cache %u, precompiled internal cache %u, compressed data %u\n",
+                    binary_props.pipelineBinaryInternalCache,
+                    binary_props.pipelineBinaryInternalCacheControl,
+                    binary_props.pipelineBinaryPrefersInternalCache,
+                    binary_props.pipelineBinaryPrecompiledInternalCache,
+                    binary_props.pipelineBinaryCompressedData);
+        const char* keep_internal = std::getenv("RESOGUN_BINARY_INTERNAL_CACHE");
+        if (!(keep_internal && keep_internal[0] == '1') &&
+            binary_props.pipelineBinaryInternalCacheControl) {
+            binary_cache_control.pNext = device_chain.get().pNext;
+            device_chain.get().pNext = &binary_cache_control;
+            std::printf("Pipeline binary: driver internal cache off\n");
+        }
+    }
     auto [device_result, dev] = physical_device.createDeviceUnique(device_chain.get());
     if (device_result != vk::Result::eSuccess) {
         LOG_CRITICAL(Render_Vulkan, "Failed to create device: {}", vk::to_string(device_result));

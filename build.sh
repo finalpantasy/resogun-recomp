@@ -57,6 +57,14 @@ if [[ $source_identity != "$("$python" tools/source_identity.py .)" ]]; then
     echo 'Source changed during this build. Run bash build.sh again.' >&2; exit 1
 fi
 cp "out/gpu/everybodys-golf$exe" out/
+# Windows: the launcher window (launcher_gui/).
+if [[ -n $exe ]]; then
+    if ! ninja -j "$jobs" -C out/gpu golf-launcher >> out/gpu-build.log 2>&1; then
+        grep -v '^[[]' out/gpu-build.log | tail -40 >&2
+        echo 'Launcher build failed (full log: out/gpu-build.log)' >&2; exit 1
+    fi
+    cp out/gpu/EverybodysGolf.exe out/
+fi
 cp settings.example.ini out/
 [[ -n $exe ]] && mkdir -p out/libs && cp out/gpu/libs/libs.manifest out/libs/
 runner="out/everybodys-golf$exe"

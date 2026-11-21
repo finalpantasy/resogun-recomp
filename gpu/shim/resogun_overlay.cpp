@@ -23,6 +23,7 @@
 #include "imgui.h"
 #include "imgui_internal.h" // RegisterUserTexture (save pictures)
 #include "imgui_impl_vulkan.h"
+#include "resogun_streamline.h"
 #include "../resogun_gpu.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
@@ -149,23 +150,12 @@ int exit_focus = 0;
 std::atomic<bool> cheats_open{false};
 int cheat_row = 0;
 bool cheats_dirty = false;
-enum DisplayRow : int { RowAspect, RowMode, RowResolution, RowMonitor, RowVsync, RowFps, RowRender, RowSharpen, RowSmaa, RowHdr, RowCount };
-
-// The colours of the game's own menus (Main Menu, Options): teal bars on a dark, see-through
-// backdrop inside a thin cyan frame.
-namespace PageInk {
-constexpr ImU32 Rgb(int r, int g, int b, int a = 255) { return IM_COL32(r, g, b, a); }
-// Shade dims the game behind Display Settings and the exit prompt, 30% see-through.
-constexpr ImU32 Shade = Rgb(0x02, 0x08, 0x0e, 0xb3), Panel = Rgb(0x04, 0x16, 0x1e, 0xd8);
-constexpr ImU32 Frame = Rgb(0x8c, 0xec, 0xf4, 0xe6), FrameDim = Rgb(0x3a, 0x9c, 0xb0, 0xa0);
-constexpr ImU32 Row = Rgb(0x0c, 0x4c, 0x5c, 0xe0), RowLow = Rgb(0x06, 0x2c, 0x38, 0xe0);
-// The overlay draws to an sRGB image: these are linear, Focus shows as #2ac0d6 to #0a6e86.
-constexpr ImU32 Focus = Rgb(0x06, 0x86, 0xab), FocusLow = Rgb(0x01, 0x28, 0x3c);
-constexpr ImU32 Text = Rgb(0xff, 0xff, 0xff), TextDim = Rgb(0xc4, 0xe8, 0xee), Shadow = Rgb(0x00, 0x18, 0x22, 0xc0);
-constexpr ImU32 Help = Rgb(0xb0, 0xe4, 0xec);
-// A setting that does not apply in the current mode: greyed out and passed over by Up/Down.
-constexpr ImU32 RowOff = Rgb(0x0a, 0x26, 0x2e, 0xb0), RowOffLow = Rgb(0x05, 0x16, 0x1c, 0xb0), TextOff = Rgb(0x5c, 0x7c, 0x84);
-} // namespace PageInk
+// Everybody's Golf has no aspect ratio or frame rate patch (Resogun's rows), so those are not listed.
+enum DisplayRow : int { RowMode, RowResolution, RowMonitor, RowVsync, RowRender, RowSixty, RowFrameGen, RowSharpen, RowSharpness, RowAniso, RowLod, RowSmaa, RowHd, RowHdr, RowVolume, RowCount };
+// The render heights the panel steps through (settings.ini render_height; 0 is the game's own).
+constexpr std::array<int, 6> kRenderHeights = {0, 1080, 1440, 1800, 2160, 2880};
+extern "C" int runtime_game_golf_set_render_height(int height);
+extern "C" int runtime_game_golf_render_height_limit(void);
 
 s64 NowMs() {
     return std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -372,13 +362,6 @@ void ChangeDisplayRow(int row, int delta) {
     auto& s = ResogunSettings::Get();
     switch (row) {
     case RowMode: s.display_mode = (s.display_mode + delta + G::DisplayModeCount) % G::DisplayModeCount; break;
-    case RowAspect: { // the window moves to the new shape's size nearest in height
-        const int next = (ShownAspect() + delta + ResogunSettings::AspectRatioCount) % ResogunSettings::AspectRatioCount;
-        pending_aspect = next;
-        pending_resolution = ResogunSettings::NearestHeight(s.resolutions[next], ShownResolution().second);
-        pending_since = std::chrono::steady_clock::now();
-        break;
-    }
     case RowResolution: { // windowed only, listed largest first: right steps up to a larger size
         const auto& sizes = s.resolutions[ShownAspect()];
         if (sizes.empty() || s.display_mode != G::Windowed) return;
@@ -407,14 +390,35 @@ void ChangeDisplayRow(int row, int delta) {
         s.tearing = next == 2;
         break;
     }
-    case RowFps: s.frame_rate = StepValue(G::FrameRates, s.frame_rate.load(), delta); break;
-    case RowRender:
-        s.render_resolution = s.render_resolution == ResogunSettings::Render4k ? ResogunSettings::Render1080p
-                                                                                   : ResogunSettings::Render4k;
+    case RowRender: { // live when the memory pool holds it, else for the next start
+        const int i = ResogunGraphics::IndexOf(kRenderHeights, s.render_height.load(), 0);
+        const int next = kRenderHeights[(i + delta + int(kRenderHeights.size())) % int(kRenderHeights.size())];
+        s.render_height = next;
+        if (next) s.render_resolution = ResogunSettings::Render4k; // the size patch needs the Pro mode
+        runtime_game_golf_set_render_height(next);
         break;
+    }
+    case RowSixty: s.frame_rate_priority = !s.frame_rate_priority; break;
+    case RowHd: s.hd_textures = !s.hd_textures; break;
+    case RowFrameGen: s.frame_generation = !s.frame_generation; break;
     case RowSharpen: s.sharpening = !s.sharpening; break;
+    case RowSharpness: s.sharpening_strength = (s.sharpening_strength.load() + delta + 3) % 3; break;
+    case RowAniso: { // Game's own, 4x, 8x, 16x
+        static constexpr int kLevels[4] = {0, 4, 8, 16};
+        int i = 0;
+        while (i < 3 && kLevels[i] != s.anisotropy.load()) ++i;
+        s.anisotropy = kLevels[(i + delta + 4) % 4];
+        break;
+    }
+    case RowLod: s.texture_lod_auto = !s.texture_lod_auto; break;
     case RowSmaa: s.smaa = !s.smaa; break;
     case RowHdr: s.hdr = !s.hdr; break;
+    case RowVolume: { // 10% steps, no wrap: Right at 100 stays loud
+        const int next = std::clamp((s.audio_volume.load() + 5) / 10 * 10 + delta * 10, 0, 100);
+        if (next == s.audio_volume.load()) return;
+        s.audio_volume = next;
+        break;
+    }
     default: return;
     }
     display_dirty = true;
@@ -451,17 +455,6 @@ DisplayRowText DisplayRowAt(int row) {
         }
         return {"Window mode", names[std::clamp(s.display_mode.load(), 0, 2)], help};
     }
-    case RowAspect: {
-        const int ratio = ShownAspect();
-        std::string text(ResogunSettings::AspectRatioKeys[ratio]);
-        if (ratio == ResogunSettings::Aspect16x9) text += "  (PS4)";
-        if (ratio != s.startup_aspect_ratio) text += "  (after restart)";
-        return {"Aspect ratio", text,
-                "The picture's shape. 21:9 and 32:9 show more of the level to the sides, for ultrawide screens, "
-                "16:10 and 4:3 more above and below; "
-                "the menus stay 16:9. A window takes sizes of this shape; fullscreen picks one from the screen. "
-                "The game takes a new shape after a restart."};
-    }
     case RowResolution: {
         const auto [w, h] = ShownResolution();
         const bool windowed = s.display_mode == ResogunGraphics::Windowed;
@@ -480,33 +473,69 @@ DisplayRowText DisplayRowAt(int row) {
                 "On waits for the monitor: no tearing, slightly more input delay. Off shows the newest frame "
                 "at each refresh, still without tearing. Off, tearing allowed shows each frame at once: the "
                 "least delay, and the only way past twice the refresh rate."};
-    case RowFps: {
-        const int chosen = s.frame_rate.load(), runs = ResogunSettings::EffectiveFrameRate();
-        std::string value = std::to_string(chosen) + " FPS";
-        if (const char* env = std::getenv("RESOGUN_VBLANK_HZ"); env && env[0]) {
-            value += "  (RESOGUN_VBLANK_HZ overrides)";
-        } else if (runs != chosen) {
-            value += "  (display is " + std::to_string(int(ResogunSettings::DisplayRefresh() + 0.5)) +
-                     " Hz: runs at " + std::to_string(runs) + ")";
-        }
-        return {"Max FPS", value,
-                "The game's frame rate, at normal game speed: 60 is the PS4's, 30 for PCs that cannot hold it. "
-                "Applies at once. It is held "
-                "to what the display refreshes at, and the PC must keep up with it: when it cannot, the "
-                "game runs slower instead of skipping frames."};
-    }
     case RowRender: {
-        const int value = s.render_resolution;
-        std::string text = value == ResogunSettings::Render4k ? "4K (3840 x 2160)" : "1080p";
-        if (value != s.startup_render_resolution) text += "  (after restart)";
+        const int value = s.render_height.load(), limit = runtime_game_golf_render_height_limit();
+        std::string text = value ? std::to_string(value * 16 / 9) + " x " + std::to_string(value)
+                                 : std::string(s.frame_rate_priority ? "Game's own (1920 x 1080)" : "Game's own (3200 x 1800)");
+        if (value != s.startup_render_height && (!limit || value > limit)) text += "  (after restart)";
         return {"Render resolution", text,
-                "4K as on PS4 Pro, filtered down to the window: sharper. 1080p as on PS4: lighter on the GPU. "
-                "Applies after a restart."};
+                "The size the game draws its scenes at, scaled to the window: higher is sharper and needs a "
+                "faster GPU (at 2160 some courses drop below 60 FPS). Applies at once up to " +
+                    std::to_string(limit ? limit : 1800) +
+                    " lines; larger sizes need more memory, set up at the next start."};
+    }
+    case RowSixty: {
+        std::string text = s.frame_rate_priority ? "On" : "Off";
+        if (s.frame_rate_priority != s.startup_frame_rate_priority) text += "  (after restart)";
+        return {"60 FPS mode", text,
+                "The game's frame rate priority mode held on in every scene: 60 FPS at the tee, in shots and "
+                "flyovers. Off gives the game's own choice from its Options menu. Applies after a restart."};
+    }
+    case RowHd: {
+        const bool pack = !s.texture_pack.empty();
+        std::string text = !pack ? "No pack" : s.hd_textures ? "On" : "Off";
+        if (pack && s.hd_textures && !s.startup_hd_textures) text += "  (after restart)";
+        return {"HD textures", text,
+                pack ? "Draws the upscaled texture pack built in the launcher (HD textures tab) instead of the "
+                       "game's own textures. Switches at once."
+                     : "No texture pack is set up: build one in the launcher's HD textures tab.",
+                pack, pack};
+    }
+    case RowFrameGen: {
+        std::string text = s.frame_generation ? "DLSS 2x" : "Off";
+        if (s.frame_generation && !ResogunStreamline::Loaded()) {
+            text += "  (after restart)";
+        } else if (s.frame_generation && std::string_view(ResogunStreamline::StatusText()) == "Not supported") {
+            text += "  (not supported here)";
+        }
+        return {"Frame generation", text,
+                "NVIDIA DLSS Frame Generation (GeForce RTX 40 and 50 series): a generated frame between each two "
+                "of the game's, for up to twice the frames on a high refresh rate display. Fast-moving objects can "
+                "smear. Turning it on applies after a restart; off applies at once. Paused while a menu is open."};
     }
     case RowSharpen:
         return {"Sharpening", s.sharpening ? "On" : "Off",
                 "AMD FSR 1 RCAS sharpening of the picture at the window's size: crisper edges and detail, "
                 "without halos. Costs well under a millisecond a frame. Applies at once; F9 switches it over the game."};
+    case RowSharpness: {
+        static const char* const names[3] = {"Soft", "Default", "Strong"};
+        return {"Sharpening strength", names[std::clamp(s.sharpening_strength.load(), 0, 2)],
+                "How hard the RCAS pass sharpens: Soft is half the default's strength before halos, "
+                "Strong is the most the filter allows. Applies at once; no effect with Sharpening off.",
+                s.sharpening.load(), s.sharpening.load()};
+    }
+    case RowAniso: {
+        const int level = s.anisotropy.load();
+        return {"Anisotropic filtering", level ? std::to_string(level) + "x" : std::string("Game's own"),
+                "Keeps textures sharp at a slant, like fairways and greens far ahead. Raises the game's "
+                "linear texture filtering to at least this level; Game's own leaves it as the game sets it. "
+                "Applies to new draws within moments; costs little on a modern GPU."};
+    }
+    case RowLod:
+        return {"High-res texture detail", s.texture_lod_auto ? "Auto" : "Off",
+                "Auto picks sharper texture detail levels when the render resolution is above 1080 lines "
+                "(half a level from 1620 lines up), so fine texture detail holds at native 4K; it can add a "
+                "little shimmer. Off keeps the game's own. Applies to new draws within moments."};
     case RowSmaa:
         return {"Anti-aliasing", s.smaa ? "SMAA" : "Off",
                 "SMAA 1x smooths jagged edges of the game's picture at its render size, before it is scaled "
@@ -522,45 +551,114 @@ DisplayRowText DisplayRowAt(int row) {
                 "The game's own HDR output, for an HDR display (in Windows, turn on Use HDR in Display "
                 "settings first). Applies after a restart."};
     }
+    case RowVolume: {
+        const int v = s.audio_volume.load();
+        return {"Master volume", v ? std::to_string(v) + "%" : std::string("Muted"),
+                "Volume of all the game's sound: music, effects and voices. 50% is 12 dB quieter than "
+                "100%, the game's own level. Applies at once."};
+    }
     default: return {"", "", ""};
     }
 }
 
-// Text as the game's menus draw it: white, with a soft dark shadow below and to the right.
-void PageText(ImDrawList* dl, ImFont* font, float size, ImVec2 at, const char* text, ImU32 color = PageInk::Text) {
-    const float d = std::max(1.0f, size * 0.05f);
-    dl->AddText(font, size, ImVec2(at.x + d, at.y + d), PageInk::Shadow, text);
+// Everybody's Golf's own menu look (its Menu screen): a dark band across the top with the title
+// on a light tab and the button hints, a dark see-through panel with a light rounded frame, the
+// focused row on a blue bar with a pointer, and the focused item's help on a dark band at the
+// bottom. The overlay draws to an sRGB image, so colours go through Lin().
+namespace GolfInk {
+inline u8 LinByte(int c) {
+    const float v = float(c) / 255.0f;
+    const float l = v <= 0.04045f ? v / 12.92f : std::pow((v + 0.055f) / 1.055f, 2.4f);
+    return u8(std::clamp(l * 255.0f + 0.5f, 0.0f, 255.0f));
+}
+inline ImU32 Lin(int r, int g, int b, int a = 255) { return IM_COL32(LinByte(r), LinByte(g), LinByte(b), a); }
+inline ImU32 Shade() { return Lin(0, 0, 0, 0x70); }
+inline ImU32 Band() { return Lin(0, 0, 0, 0xc0); }
+inline ImU32 Panel() { return Lin(0x08, 0x0c, 0x14, 0xb4); }
+inline ImU32 Frame() { return Lin(0xe4, 0xe4, 0xe4); }
+inline ImU32 Rule() { return Lin(0xff, 0xff, 0xff, 0x3c); }
+inline ImU32 TabTop() { return Lin(0xf0, 0xf0, 0xf0); }
+inline ImU32 TabLow() { return Lin(0xa8, 0xaa, 0xae); }
+inline ImU32 BarEdge(int a = 0xf0) { return Lin(0x14, 0x34, 0x7a, a); }
+inline ImU32 BarMid() { return Lin(0x4a, 0x86, 0xd8, 0xf0); }
+inline ImU32 Text() { return Lin(0xff, 0xff, 0xff); }
+inline ImU32 TextOff() { return Lin(0x86, 0x88, 0x8c); }
+inline ImU32 Outline() { return Lin(0x10, 0x12, 0x18, 0xe0); }
+inline ImU32 Green() { return Lin(0x8c, 0xe0, 0x3c); }
+} // namespace GolfInk
+
+// Text with a dark outline all round, as the game draws its titles; `thick` in pixels.
+void OutlinedText(ImDrawList* dl, ImFont* font, float size, ImVec2 at, const char* text, ImU32 color, float thick) {
+    static const float dirs[8][2] = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}, {0.7f, 0.7f}, {-0.7f, 0.7f}, {0.7f, -0.7f}, {-0.7f, -0.7f}};
+    for (const auto& d : dirs) {
+        dl->AddText(font, size, ImVec2(at.x + d[0] * thick, at.y + d[1] * thick), GolfInk::Outline(), text);
+    }
     dl->AddText(font, size, at, color, text);
 }
 
-// An arrow ("<" for dir -1, ">" for 1) as one stroke, centred on `at`.
-void Chevron(ImDrawList* dl, ImVec2 at, float size, int dir, ImU32 color, float thickness) {
-    const float w = size * 0.28f * float(dir), h = size * 0.5f;
-    const ImVec2 points[3] = {ImVec2(at.x - w, at.y - h), ImVec2(at.x + w, at.y), ImVec2(at.x - w, at.y + h)};
-    dl->AddPolyline(points, 3, color, ImDrawFlags_None, thickness);
+// A filled triangle pointing left (dir -1) or right (1), centred on `at`.
+void Pointer(ImDrawList* dl, ImVec2 at, float size, int dir, ImU32 color) {
+    const float w = size * 0.42f * float(dir), h = size * 0.5f;
+    dl->AddTriangleFilled(ImVec2(at.x - w, at.y - h), ImVec2(at.x + w, at.y), ImVec2(at.x - w, at.y + h), color);
 }
 
-// The game's bar: a band whose ends slant inward by `slant` at the bottom (its menu items, the
-// header tab and the button hints), filled top to bottom from `top` to `low`.
-void SlantedBar(ImDrawList* dl, ImVec2 a, ImVec2 b, float slant, ImU32 top, ImU32 low) {
+// The top band: the title on a light tab at the left, "Everybody's Golf" in green and the
+// button hints on the right. Returns the band's bottom edge.
+float GolfHeader(ImDrawList* dl, ImFont* font, ImVec2 o, ImVec2 size, float px, const char* title,
+                 const char* const (&hints)[3]) {
+    const float band_h = 92.0f * px, tab_h = 64.0f * px, title_size = 44.0f * px;
+    dl->AddRectFilled(o, ImVec2(o.x + size.x, o.y + band_h), GolfInk::Band());
+    const float title_w = font->CalcTextSizeA(title_size, FLT_MAX, 0.0f, title).x;
+    const float tab_w = title_w + 96.0f * px, slant = 26.0f * px;
+    const ImVec2 points[4] = {o, ImVec2(o.x + tab_w + slant, o.y), ImVec2(o.x + tab_w, o.y + tab_h), ImVec2(o.x, o.y + tab_h)};
     const int first = dl->VtxBuffer.Size;
-    const ImVec2 points[4] = {a, ImVec2(b.x, a.y), ImVec2(b.x - slant, b.y), ImVec2(a.x + slant, b.y)};
-    dl->AddConvexPolyFilled(points, 4, top);
-    ImGui::ShadeVertsLinearColorGradientKeepAlpha(dl, first, dl->VtxBuffer.Size, a, ImVec2(a.x, b.y), top, low);
-}
-void SlantedOutline(ImDrawList* dl, ImVec2 a, ImVec2 b, float slant, ImU32 color, float thickness) {
-    const ImVec2 points[4] = {a, ImVec2(b.x, a.y), ImVec2(b.x - slant, b.y), ImVec2(a.x + slant, b.y)};
-    dl->AddPolyline(points, 4, color, ImDrawFlags_Closed, thickness);
+    dl->AddConvexPolyFilled(points, 4, GolfInk::TabTop());
+    ImGui::ShadeVertsLinearColorGradientKeepAlpha(dl, first, dl->VtxBuffer.Size, o, ImVec2(o.x, o.y + tab_h),
+                                                  GolfInk::TabTop(), GolfInk::TabLow());
+    OutlinedText(dl, font, title_size, ImVec2(o.x + 34.0f * px, o.y + (tab_h - title_size) * 0.5f - 2.0f * px), title,
+                 GolfInk::Text(), std::max(1.5f, 3.0f * px));
+
+    const float right = o.x + size.x - 40.0f * px;
+    const float brand_size = 28.0f * px;
+    const char* brand = "Everybody's Golf";
+    const float brand_w = font->CalcTextSizeA(brand_size, FLT_MAX, 0.0f, brand).x;
+    OutlinedText(dl, font, brand_size, ImVec2(right - brand_w, o.y + 8.0f * px), brand, GolfInk::Green(),
+                 std::max(1.0f, 2.0f * px));
+    const float hint_size = 25.0f * px, hint_gap = 44.0f * px, hint_y = o.y + band_h - hint_size - 14.0f * px;
+    float x = right;
+    for (int i = 2; i >= 0; --i) {
+        const float w = font->CalcTextSizeA(hint_size, FLT_MAX, 0.0f, hints[i]).x;
+        x -= w;
+        dl->AddText(font, hint_size, ImVec2(x, hint_y), GolfInk::Text(), hints[i]);
+        x -= hint_gap;
+    }
+    return o.y + band_h;
 }
 
-// A tick box at the right end of a bar: a frame, filled with a check mark when `on`.
-void CheckBox(ImDrawList* dl, ImVec2 centre, float size, bool on, ImU32 color, float thickness) {
-    const float h = size * 0.5f;
-    dl->AddRect(ImVec2(centre.x - h, centre.y - h), ImVec2(centre.x + h, centre.y + h), color, 0.0f, 0, thickness);
-    if (!on) return;
-    const ImVec2 points[3] = {ImVec2(centre.x - h * 0.55f, centre.y + h * 0.02f), ImVec2(centre.x - h * 0.12f, centre.y + h * 0.48f),
-                              ImVec2(centre.x + h * 0.6f, centre.y - h * 0.5f)};
-    dl->AddPolyline(points, 3, color, ImDrawFlags_None, thickness * 1.6f);
+// The bottom band with the focused item's help, wrapped; it grows to fit two or three lines.
+void GolfHelpBand(ImDrawList* dl, ImFont* font, ImVec2 o, ImVec2 size, float px, const std::string& help) {
+    const float text_size = 26.0f * px, margin = 40.0f * px, wrap = size.x - margin * 2.0f;
+    const ImVec2 text = font->CalcTextSizeA(text_size, FLT_MAX, wrap, help.c_str());
+    const float band_h = std::max(60.0f * px, text.y + 28.0f * px), top = o.y + size.y - band_h;
+    dl->AddRectFilled(ImVec2(o.x, top), ImVec2(o.x + size.x, o.y + size.y), GolfInk::Band());
+    dl->AddText(font, text_size, ImVec2(o.x + margin, top + (band_h - text.y) * 0.5f), GolfInk::Text(), help.c_str(),
+                nullptr, wrap);
+}
+
+// The panel: dark, see-through, with a light rounded frame.
+void GolfPanel(ImDrawList* dl, ImVec2 a, ImVec2 b, float px) {
+    const float round = 10.0f * px;
+    dl->AddRectFilled(a, b, GolfInk::Panel(), round);
+    dl->AddRect(a, b, GolfInk::Frame(), round, 0, std::max(1.5f, 2.5f * px));
+}
+
+// The focused row's bar: blue, brightest a third of the way across, fading toward both ends.
+void GolfFocusBar(ImDrawList* dl, ImVec2 a, ImVec2 b) {
+    const float mid = a.x + (b.x - a.x) * 0.35f;
+    dl->AddRectFilledMultiColor(a, ImVec2(mid, b.y), GolfInk::BarEdge(), GolfInk::BarMid(), GolfInk::BarMid(),
+                                GolfInk::BarEdge());
+    dl->AddRectFilledMultiColor(ImVec2(mid, a.y), b, GolfInk::BarMid(), GolfInk::BarEdge(0x50), GolfInk::BarEdge(0x50),
+                                GolfInk::BarMid());
 }
 
 // One bar of a page: a setting's name, and its value (with arrows around it when focused) or a
@@ -573,9 +671,17 @@ struct PageRow {
     int check = -1;
 };
 
-// A page drawn like the game's own menus over the dimmed game: a framed panel with the title on a
-// tab above it, one teal bar per row (the focused one bright), the focused row's help below, and
-// the buttons on tabs at the bottom. Display Settings and Cheats.
+// A tick box at the right end of a row: a frame, filled with a check mark when `on`.
+void CheckBox(ImDrawList* dl, ImVec2 centre, float size, bool on, ImU32 color, float thickness) {
+    const float h = size * 0.5f;
+    dl->AddRect(ImVec2(centre.x - h, centre.y - h), ImVec2(centre.x + h, centre.y + h), color, 3.0f, 0, thickness);
+    if (!on) return;
+    const ImVec2 points[3] = {ImVec2(centre.x - h * 0.55f, centre.y + h * 0.02f), ImVec2(centre.x - h * 0.12f, centre.y + h * 0.48f),
+                              ImVec2(centre.x + h * 0.6f, centre.y - h * 0.5f)};
+    dl->AddPolyline(points, 3, color, ImDrawFlags_None, thickness * 1.6f);
+}
+
+// A page in the game's menu look over the dimmed game. Display Settings and Cheats.
 void PageBox(const char* id, const char* title, const std::vector<PageRow>& rows, int focused,
              const std::string& help, const char* const (&hints)[3]) {
     const ImGuiViewport* viewport = ImGui::GetMainViewport();
@@ -589,80 +695,48 @@ void PageBox(const char* id, const char* title, const std::vector<PageRow>& rows
     ImDrawList* dl = ImGui::GetWindowDrawList();
     ImFont* font = exit_font;
     const ImVec2 o = viewport->Pos, size = viewport->Size;
-    const float right = o.x + size.x, bottom = o.y + size.y, line = std::max(1.0f, 2.0f * px);
-    dl->AddRectFilled(o, ImVec2(right, bottom), PageInk::Shade);
+    dl->AddRectFilled(o, ImVec2(o.x + size.x, o.y + size.y), GolfInk::Shade());
+    const float header = GolfHeader(dl, font, o, size, px, title, hints);
 
-    // The panel, centred, and the title tab on its top edge.
+    // The panel, centred between the bands.
     const int count = int(rows.size());
-    const float row_h = 64.0f * px, gap = 12.0f * px, pad = 30.0f * px;
-    const float panel_w = std::min(size.x - 80.0f * px, 1180.0f * px);
-    const float panel_h = pad * 2.0f + float(count) * row_h + float(count - 1) * gap;
+    const float pad = 18.0f * px;
+    const float room = size.y - (header - o.y) - 110.0f * px;
+    // Rows shrink from 62 px (at 1080 lines) when a long page would run under the help band.
+    const float row_h = std::min(62.0f * px, (room - 24.0f * px - pad * 2.0f) / float(std::max(count, 1)));
+    const float panel_w = std::min(size.x - 80.0f * px, 1120.0f * px);
+    const float panel_h = pad * 2.0f + float(count) * row_h;
     const float x0 = o.x + (size.x - panel_w) * 0.5f, x1 = x0 + panel_w;
-    const float top = o.y + std::max(110.0f * px, (size.y - panel_h) * 0.42f);
-    dl->AddRectFilled(ImVec2(x0, top), ImVec2(x1, top + panel_h), PageInk::Panel);
-    dl->AddRect(ImVec2(x0, top), ImVec2(x1, top + panel_h), PageInk::Frame, 0.0f, 0, line);
+    const float top = header + std::max(24.0f * px, (room - panel_h) * 0.45f);
+    GolfPanel(dl, ImVec2(x0, top), ImVec2(x1, top + panel_h), px);
 
-    const float title_size = 46.0f * px, title_w = font->CalcTextSizeA(title_size, FLT_MAX, 0.0f, title).x;
-    const float tab_w = title_w + 120.0f * px, tab_h = 62.0f * px, tab_x = o.x + (size.x - tab_w) * 0.5f;
-    const ImVec2 tab_a(tab_x, top - tab_h + 8.0f * px), tab_b(tab_x + tab_w, top + 8.0f * px);
-    SlantedBar(dl, tab_a, tab_b, 18.0f * px, PageInk::RowLow, PageInk::Panel);
-    SlantedOutline(dl, tab_a, tab_b, 18.0f * px, PageInk::Frame, line);
-    PageText(dl, font, title_size, ImVec2(tab_x + (tab_w - title_w) * 0.5f, tab_a.y + (tab_h - title_size) * 0.5f),
-             title);
-
-    // One bar per row: its name on the left, its value or tick box on the right.
-    const float label = 32.0f * px, value = 30.0f * px, slant = 14.0f * px;
-    const float bx0 = x0 + pad, bx1 = x1 - pad;
+    const float text_size = 32.0f * px, inset = 14.0f * px, label_x = x0 + 74.0f * px, value_r = x1 - 64.0f * px;
     float y = top + pad;
     for (int row = 0; row < count; ++row) {
         const PageRow& text = rows[size_t(row)];
         const bool focus = row == focused;
-        const ImVec2 a(bx0, y), b(bx1, y + row_h);
-        const float mid = y + row_h * 0.5f;
-        const bool off = !text.enabled;
-        SlantedBar(dl, a, b, slant, focus ? PageInk::Focus : off ? PageInk::RowOff : PageInk::Row,
-                   focus ? PageInk::FocusLow : off ? PageInk::RowOffLow : PageInk::RowLow);
-        SlantedOutline(dl, a, b, slant, focus ? PageInk::Frame : PageInk::FrameDim, focus ? line * 1.5f : line);
-        const ImU32 ink = focus ? PageInk::Text : off ? PageInk::TextOff : PageInk::TextDim;
-        PageText(dl, font, label, ImVec2(bx0 + slant + 28.0f * px, mid - label * 0.56f), text.label, ink);
+        const float mid = y + row_h * 0.5f, ty = mid - text_size * 0.55f;
+        if (row > 0) dl->AddLine(ImVec2(x0 + inset, y), ImVec2(x1 - inset, y), GolfInk::Rule(), std::max(1.0f, px));
+        if (focus) {
+            GolfFocusBar(dl, ImVec2(x0 + inset * 0.5f, y + 4.0f * px), ImVec2(x1 - inset * 0.5f, y + row_h - 4.0f * px));
+            Pointer(dl, ImVec2(x0 + 40.0f * px, mid), 26.0f * px, 1, GolfInk::Text());
+        }
+        const ImU32 ink = text.enabled ? GolfInk::Text() : GolfInk::TextOff();
+        dl->AddText(font, text_size, ImVec2(label_x, ty), ink, text.label);
         if (text.check >= 0) {
-            CheckBox(dl, ImVec2(bx1 - slant - 50.0f * px, mid), row_h * 0.46f, text.check != 0, ink,
-                     focus ? 3.0f * px : 2.0f * px);
-            y += row_h + gap;
-            continue;
+            CheckBox(dl, ImVec2(value_r - 14.0f * px, mid), row_h * 0.46f, text.check != 0, ink, 2.5f * px);
+        } else {
+            const float vw = font->CalcTextSizeA(text_size, FLT_MAX, 0.0f, text.value.c_str()).x;
+            const float value_x = value_r - vw;
+            dl->AddText(font, text_size, ImVec2(value_x, ty), ink, text.value.c_str());
+            if (focus && text.changes) {
+                Pointer(dl, ImVec2(value_x - 26.0f * px, mid), 22.0f * px, -1, GolfInk::Text());
+                Pointer(dl, ImVec2(value_r + 26.0f * px, mid), 22.0f * px, 1, GolfInk::Text());
+            }
         }
-        const float vw = font->CalcTextSizeA(value, FLT_MAX, 0.0f, text.value.c_str()).x;
-        const float value_x = bx1 - slant - 70.0f * px - vw;
-        PageText(dl, font, value, ImVec2(value_x, mid - value * 0.56f), text.value.c_str(), ink);
-        if (focus && text.changes) {
-            const float chevron = row_h * 0.36f, stroke = 3.0f * px;
-            Chevron(dl, ImVec2(value_x - 26.0f * px, mid), chevron, -1, PageInk::Text, stroke);
-            Chevron(dl, ImVec2(bx1 - slant - 40.0f * px, mid), chevron, 1, PageInk::Text, stroke);
-        }
-        y += row_h + gap;
+        y += row_h;
     }
-
-    // The focused setting's help under the panel, wrapped to its width.
-    const float help_size = 26.0f * px;
-    dl->AddText(font, help_size, ImVec2(x0 + 8.0f * px, top + panel_h + 22.0f * px), PageInk::Help, help.c_str(), nullptr,
-                panel_w - 16.0f * px);
-
-    // The buttons, each on a tab, along the bottom.
-    const float hint_size = 24.0f * px, hint_h = 46.0f * px, hint_gap = 24.0f * px;
-    float hint_w[3], total = 0.0f;
-    for (int i = 0; i < 3; ++i) {
-        hint_w[i] = font->CalcTextSizeA(hint_size, FLT_MAX, 0.0f, hints[i]).x + 70.0f * px;
-        total += hint_w[i] + (i ? hint_gap : 0.0f);
-    }
-    float hx = o.x + (size.x - total) * 0.5f;
-    const float hy = bottom - hint_h - 30.0f * px;
-    for (int i = 0; i < 3; ++i) {
-        const ImVec2 a(hx, hy), b(hx + hint_w[i], hy + hint_h);
-        SlantedBar(dl, a, b, 12.0f * px, PageInk::Row, PageInk::RowLow);
-        SlantedOutline(dl, a, b, 12.0f * px, PageInk::FrameDim, line);
-        PageText(dl, font, hint_size, ImVec2(hx + 35.0f * px, hy + (hint_h - hint_size) * 0.5f), hints[i]);
-        hx += hint_w[i] + hint_gap;
-    }
+    GolfHelpBand(dl, font, o, size, px, help);
     ImGui::End();
     ImGui::PopStyleVar();
 }
@@ -678,7 +752,7 @@ void DisplaySettingsBox() {
     }
     static const char* const hints[3] = {"Up/Down  Choose", "Left/Right, Cross (A)  Change",
                                          "Circle (B), Select, Esc  Back"};
-    PageBox("##display_settings", "DISPLAY SETTINGS", rows, display_row, help, hints);
+    PageBox("##display_settings", "Display Settings", rows, display_row, help, hints);
 }
 
 // The Cheats page: one tick box per cheat (ResogunSettings::Cheat order).
@@ -705,11 +779,11 @@ void CheatsBox() {
     const std::string help = kCheats[cheat_row].help;
     static const char* const hints[3] = {"Up/Down  Choose", "Cross (A), Left/Right  Switch",
                                          "Circle (B), L3+R3, Esc  Back"};
-    PageBox("##cheats", "CHEATS", rows, cheat_row, help, hints);
+    PageBox("##cheats", "Cheats", rows, cheat_row, help, hints);
 }
 
-// The exit prompt, drawn like the Display Settings panel: the question on a tab over a small
-// framed panel holding No and Yes, the focused one bright, and the buttons on tabs at the bottom.
+// The exit prompt in the same look: a small panel holding the question, No and Yes, the
+// focused answer on the blue bar.
 void ExitPromptBox() {
     const ImGuiViewport* viewport = ImGui::GetMainViewport();
     const float px = viewport->Size.y / 1080.0f;
@@ -722,56 +796,36 @@ void ExitPromptBox() {
     ImDrawList* dl = ImGui::GetWindowDrawList();
     ImFont* font = exit_font;
     const ImVec2 o = viewport->Pos, size = viewport->Size;
-    const float right = o.x + size.x, bottom = o.y + size.y, line = std::max(1.0f, 2.0f * px);
-    dl->AddRectFilled(o, ImVec2(right, bottom), PageInk::Shade);
+    dl->AddRectFilled(o, ImVec2(o.x + size.x, o.y + size.y), GolfInk::Shade());
+    static const char* const hints[3] = {"Up/Down  Choose", "Cross (A), Enter  Confirm", "Circle (B), Esc  Cancel"};
+    GolfHeader(dl, font, o, size, px, "Quit", hints);
 
-    const float row_h = 64.0f * px, gap = 12.0f * px, pad = 30.0f * px;
-    const float panel_w = std::min(size.x - 80.0f * px, 640.0f * px), panel_h = pad * 2.0f + row_h * 2.0f + gap;
+    const char* question = "Quit Everybody's Golf?";
+    const float q_size = 34.0f * px, text_size = 32.0f * px, row_h = 62.0f * px, pad = 18.0f * px;
+    const float panel_w = std::min(size.x - 80.0f * px, 620.0f * px);
+    const float panel_h = pad * 3.0f + q_size + row_h * 2.0f;
     const float x0 = o.x + (size.x - panel_w) * 0.5f, x1 = x0 + panel_w;
     const float top = o.y + (size.y - panel_h) * 0.5f;
-    dl->AddRectFilled(ImVec2(x0, top), ImVec2(x1, top + panel_h), PageInk::Panel);
-    dl->AddRect(ImVec2(x0, top), ImVec2(x1, top + panel_h), PageInk::Frame, 0.0f, 0, line);
-
-    const char* title = "EXIT RESOGUN?";
-    const float title_size = 46.0f * px, title_w = font->CalcTextSizeA(title_size, FLT_MAX, 0.0f, title).x;
-    const float tab_w = title_w + 120.0f * px, tab_h = 62.0f * px, tab_x = o.x + (size.x - tab_w) * 0.5f;
-    const ImVec2 tab_a(tab_x, top - tab_h + 8.0f * px), tab_b(tab_x + tab_w, top + 8.0f * px);
-    SlantedBar(dl, tab_a, tab_b, 18.0f * px, PageInk::RowLow, PageInk::Panel);
-    SlantedOutline(dl, tab_a, tab_b, 18.0f * px, PageInk::Frame, line);
-    PageText(dl, font, title_size, ImVec2(tab_x + (tab_w - title_w) * 0.5f, tab_a.y + (tab_h - title_size) * 0.5f),
-             title);
+    GolfPanel(dl, ImVec2(x0, top), ImVec2(x1, top + panel_h), px);
+    const float qw = font->CalcTextSizeA(q_size, FLT_MAX, 0.0f, question).x;
+    dl->AddText(font, q_size, ImVec2(x0 + (panel_w - qw) * 0.5f, top + pad), GolfInk::Text(), question);
 
     const char* const answers[2] = {"No", "Yes"};
-    const float text_size = 34.0f * px, slant = 14.0f * px;
-    float y = top + pad;
+    float y = top + pad * 2.0f + q_size;
     for (int i = 0; i < 2; ++i) {
         const bool focus = i == exit_focus;
-        const ImVec2 a(x0 + pad, y), b(x1 - pad, y + row_h);
-        SlantedBar(dl, a, b, slant, focus ? PageInk::Focus : PageInk::Row, focus ? PageInk::FocusLow : PageInk::RowLow);
-        SlantedOutline(dl, a, b, slant, focus ? PageInk::Frame : PageInk::FrameDim, focus ? line * 1.5f : line);
+        const float mid = y + row_h * 0.5f;
+        dl->AddLine(ImVec2(x0 + 14.0f * px, y), ImVec2(x1 - 14.0f * px, y), GolfInk::Rule(), std::max(1.0f, px));
+        if (focus) {
+            GolfFocusBar(dl, ImVec2(x0 + 7.0f * px, y + 4.0f * px), ImVec2(x1 - 7.0f * px, y + row_h - 4.0f * px));
+        }
         const float tw = font->CalcTextSizeA(text_size, FLT_MAX, 0.0f, answers[i]).x;
-        PageText(dl, font, text_size, ImVec2((a.x + b.x - tw) * 0.5f, y + (row_h - text_size) * 0.5f), answers[i],
-                 focus ? PageInk::Text : PageInk::TextDim);
-        y += row_h + gap;
+        const float tx = x0 + (panel_w - tw) * 0.5f;
+        if (focus) Pointer(dl, ImVec2(tx - 34.0f * px, mid), 26.0f * px, 1, GolfInk::Text());
+        dl->AddText(font, text_size, ImVec2(tx, mid - text_size * 0.55f), GolfInk::Text(), answers[i]);
+        y += row_h;
     }
-
-    const char* const hints[3] = {"Up/Down  Choose", "Cross (A), Enter  Confirm",
-                                  "Circle (B), Esc  Cancel"};
-    const float hint_size = 24.0f * px, hint_h = 46.0f * px, hint_gap = 24.0f * px;
-    float hint_w[3], total = 0.0f;
-    for (int i = 0; i < 3; ++i) {
-        hint_w[i] = font->CalcTextSizeA(hint_size, FLT_MAX, 0.0f, hints[i]).x + 70.0f * px;
-        total += hint_w[i] + (i ? hint_gap : 0.0f);
-    }
-    float hx = o.x + (size.x - total) * 0.5f;
-    const float hy = bottom - hint_h - 30.0f * px;
-    for (int i = 0; i < 3; ++i) {
-        const ImVec2 a(hx, hy), b(hx + hint_w[i], hy + hint_h);
-        SlantedBar(dl, a, b, 12.0f * px, PageInk::Row, PageInk::RowLow);
-        SlantedOutline(dl, a, b, 12.0f * px, PageInk::FrameDim, line);
-        PageText(dl, font, hint_size, ImVec2(hx + 35.0f * px, hy + (hint_h - hint_size) * 0.5f), hints[i]);
-        hx += hint_w[i] + hint_gap;
-    }
+    GolfHelpBand(dl, font, o, size, px, "Progress since the game's last auto save is lost.");
     ImGui::End();
     ImGui::PopStyleVar();
 }
@@ -1273,6 +1327,24 @@ bool HandleEvent(const SDL_Event& event) {
         auto& s = ResogunSettings::Get();
         s.sharpening = !s.sharpening;
         ShowNotice(s.sharpening ? "Sharpening: On" : "Sharpening: Off", 1500);
+        ResogunSettings::SaveDisplay();
+        return true;
+    }
+    // F11 or Alt+Enter switches between a window and the last full-screen mode (borderless at
+    // first); the window thread applies the change (WindowSDL, display_mode), saved at once.
+    if (event.type == SDL_EVENT_KEY_DOWN && !event.key.repeat && !text_entry_active &&
+        (event.key.key == SDLK_F11 ||
+         ((event.key.key == SDLK_RETURN || event.key.key == SDLK_KP_ENTER) && (event.key.mod & SDL_KMOD_ALT)))) {
+        auto& s = ResogunSettings::Get();
+        static int full_mode = ResogunGraphics::Borderless;
+        if (s.display_mode == ResogunGraphics::Windowed) {
+            s.display_mode = full_mode;
+            ShowNotice(full_mode == ResogunGraphics::Fullscreen ? "Fullscreen" : "Borderless fullscreen", 1500);
+        } else {
+            full_mode = s.display_mode;
+            s.display_mode = ResogunGraphics::Windowed;
+            ShowNotice("Windowed", 1500);
+        }
         ResogunSettings::SaveDisplay();
         return true;
     }

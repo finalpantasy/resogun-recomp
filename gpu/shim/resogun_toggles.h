@@ -71,6 +71,12 @@ enum : std::uint64_t {
     /// Pipeline binaries are stored once each in pipeline-binaries/shared, the per-pipeline
     /// files hold their keys only; old files are converted at start (vk_pipeline_serialization).
     SharedBinaries = 1ull << 61,
+    /// A CPU write next to a pending GPU-to-RAM copy, on its first or last page but not its bytes,
+    /// releases that page instead of waiting for the copy (readback_queue.h, ReleaseEdge).
+    ReadbackEdgeWrites = 1ull << 63,
+    /// A read-only arena buffer read waits for pending GPU-to-RAM image copies only where it
+    /// uploads guest memory, not over its whole range (buffer_cache.cpp, ObtainBuffer).
+    ArenaReadNoWait = 1ull << 62,
 };
 inline bool Disabled(std::uint64_t bit) {
     return (__atomic_load_n(&runtime_disabled_optimizations, __ATOMIC_RELAXED) & bit) != 0;
@@ -124,6 +130,9 @@ struct Timer {
 inline std::atomic<std::uint64_t> gpu_idle_ns{0};
 /// Wall time spent blocked in the scheduler (ns): waiting for the recording thread to drain,
 /// for host copies before a submission or fence, and for GPU ticks.
+/// sync_submit_ns and sync_large_ns: the parts of sync_recording_ns spent before a submission
+/// and before a descriptor push or data block too large for a recording chunk.
+inline std::atomic<std::uint64_t> sync_submit_ns{0}, sync_large_ns{0};
 inline std::atomic<std::uint64_t> sync_recording_ns{0}, host_copies_wait_ns{0}, tick_wait_ns{0},
     copy_threads_wait_ns{0}, host_copy_waits{0};
 struct WaitTimer {
@@ -135,6 +144,10 @@ struct WaitTimer {
                         std::memory_order_relaxed);
     }
 };
+/// Recording-thread waits for a deferred graphics pipeline's handles (GraphicsPipeline::WaitHandles):
+/// count and wall time (ns). The GPU thread's host-copy waits include them. handle_runs: those
+/// where the build was still queued, so the recording thread ran it itself.
+inline std::atomic<std::uint64_t> handle_waits{0}, handle_wait_ns{0}, handle_runs{0};
 /// GPU thread rusage, refreshed after each graphics submission.
 inline std::atomic<std::uint64_t> gpu_sys_us{0}, gpu_user_us{0}, gpu_invol_switches{0},
     gpu_vol_switches{0}, gpu_minor_faults{0};

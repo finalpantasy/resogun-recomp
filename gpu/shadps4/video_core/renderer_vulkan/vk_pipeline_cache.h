@@ -46,11 +46,14 @@ class Scheduler;
 class ShaderCache;
 struct AsyncShaderCompilation;
 struct AsyncGraphicsCompilation;
+struct DeferredGraphicsBuild;
 
 struct Program {
     struct Module {
         vk::ShaderModule module;
         Shader::StageSpecialization spec;
+        /// resogun: saved in the disk store, module not created yet (PipelineCache::CreateDiskModule)
+        bool on_disk = false;
     };
     static constexpr size_t MaxPermutations = 8;
     using ModuleList = boost::container::small_vector<Module, MaxPermutations>;
@@ -252,6 +255,10 @@ private:
     /// resogun: StartBackgroundWarmUp state; owned here, deleted by StopWarmUp.
     BackgroundWarmup* background = nullptr;
     tsl::robin_map<GraphicsPipelineKey, std::shared_ptr<AsyncGraphicsCompilation>> pending_graphics;
+    /// resogun: pipelines published before their Vulkan pipelines exist (DeferGraphicsPipeline).
+    std::vector<std::pair<GraphicsPipelineKey, std::shared_ptr<DeferredGraphicsBuild>>> deferred_graphics;
+    GraphicsPipeline* DeferGraphicsPipeline();
+    u64 deferred_pipelines = 0;
     /// resogun: graphics keys whose draws are skipped: GPU frame of the first skip, and
     /// failures (1: the async build failed, the next draw builds it here; 2: that failed too).
     struct GraphicsMiss {
@@ -268,6 +275,8 @@ private:
     const char* miss_reason = "";
     tsl::robin_map<ComputePipelineKey, std::unique_ptr<ComputePipeline>> compute_pipelines;
     tsl::robin_map<GraphicsPipelineKey, std::unique_ptr<GraphicsPipeline>> graphics_pipelines;
+    /// resogun: failed deferred pipelines, kept alive for binds already recorded.
+    std::vector<std::unique_ptr<GraphicsPipeline>> retired_graphics;
     PipelineSelection sel{}; ///< GPU thread selection state
     ComputePipelineKey compute_key{};
     u32 num_new_pipelines{}; // new pipelines added to the cache since the game start
@@ -278,7 +287,6 @@ private:
     bool disk_store_untrusted = false; ///< the bit went off live: marker reset to 0
     std::unordered_map<u64, std::vector<u32>> disk_permutations; ///< pgm hash -> saved indices
     std::unordered_set<std::string> disk_pipeline_keys;          ///< "g_0x..."/"c_0x..." saved
-    std::unordered_set<VkShaderModule> disk_modules_unused;      ///< loaded, not used yet
     struct DiskShaderStats {
         u64 programs, permutations, matched, compiled, keys_skipped, keys_written, load_ns;
     } disk_stats{}, disk_reported{};
@@ -294,6 +302,8 @@ private:
     void StartBinaryConversion();
     void StopBinaryConversion();
     bool LoadDiskProgram(u64 hash);
+    /// Creates the module of a saved permutation on its first use. False leaves the slot empty.
+    bool CreateDiskModule(u64 hash, Program& program, size_t perm_idx);
     /// Index for a new permutation: a slot the store left empty, else the next one.
     [[nodiscard]] size_t NewPermutationIndex(const Program& program) const;
     /// False when this pipeline key is already in the store (nothing to write).

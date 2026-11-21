@@ -11,13 +11,25 @@
 namespace VideoCore {
 
 Sampler::Sampler(const Vulkan::Instance& instance, const AmdGpu::Sampler& sampler,
-                 const AmdGpu::BorderColorBuffer border_color_base, const bool is_depth, float extra_lod_bias) {
+                 const AmdGpu::BorderColorBuffer border_color_base, const bool is_depth, float extra_lod_bias, u32 aniso_override) {
     using namespace Vulkan;
-    const bool anisotropy_enable = instance.IsAnisotropicFilteringSupported() &&
-                                   (AmdGpu::IsAnisoFilter(sampler.xy_mag_filter) ||
-                                    AmdGpu::IsAnisoFilter(sampler.xy_min_filter));
-    const float max_anisotropy =
-        anisotropy_enable ? std::clamp(sampler.MaxAniso(), 1.0f, instance.MaxSamplerAnisotropy()) : 1.0f;
+    const bool game_aniso = instance.IsAnisotropicFilteringSupported() &&
+                            (AmdGpu::IsAnisoFilter(sampler.xy_mag_filter) ||
+                             AmdGpu::IsAnisoFilter(sampler.xy_min_filter));
+    // resogun: the anisotropy override (key anisotropy) raises samplers that filter linearly in
+    // both directions to at least its level; point samplers, depth compares and samplers that ask
+    // for the base level only (no mip filter) are left alone.
+    const bool linear = LiverpoolToVK::Filter(sampler.xy_mag_filter) == vk::Filter::eLinear &&
+                        LiverpoolToVK::Filter(sampler.xy_min_filter) == vk::Filter::eLinear;
+    const bool override_aniso = aniso_override > 1 && instance.IsAnisotropicFilteringSupported() &&
+                                linear && !is_depth && sampler.mip_filter != AmdGpu::MipFilter::None;
+    const bool anisotropy_enable = game_aniso || override_aniso;
+    float max_anisotropy = 1.0f;
+    if (anisotropy_enable) {
+        max_anisotropy = game_aniso ? sampler.MaxAniso() : 1.0f;
+        if (override_aniso) max_anisotropy = std::max(max_anisotropy, float(aniso_override));
+        max_anisotropy = std::clamp(max_anisotropy, 1.0f, instance.MaxSamplerAnisotropy());
+    }
     auto border_color = LiverpoolToVK::BorderColor(sampler.border_color_type);
     if (border_color == vk::BorderColor::eFloatCustomEXT &&
         !instance.IsCustomBorderColorSupported()) {
