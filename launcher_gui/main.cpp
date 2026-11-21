@@ -567,12 +567,23 @@ std::wstring browse_folder(const wchar_t* title) {
     return result;
 }
 
+// The file a "Prepare: <path>: <why>" line names. The path may hold a drive colon ("A:/x"), so the
+// split is at the first ": " (colon and space), not the first ':'.
+std::string problem_file(const std::string& problem) { return problem.substr(0, problem.find(": ")); }
+
+// A pasted folder: surrounding spaces and quotes ("D:\dumps\golf") removed.
+fs::path pasted_folder(std::wstring text) {
+    const wchar_t* trim = L" \t\r\n\"";
+    size_t a = text.find_first_not_of(trim), b = text.find_last_not_of(trim);
+    return a == std::wstring::npos ? fs::path() : fs::path(text.substr(a, b - a + 1));
+}
+
 // What to do about a failed preparation, in plain words, from the preparer's last complaint.
 std::wstring prepare_advice(const std::string& problem, int code) {
     const std::wstring log = L" Details are in data\\logs\\launcher.log.";
     auto has = [&](const char* text) { return problem.find(text) != std::string::npos; };
     if (has("encrypted") || has("expected a plaintext"))
-        return L"A game file in your dump is still encrypted (" + wide(problem.substr(0, problem.find(':'))) +
+        return L"A game file in your dump is still encrypted (" + wide(problem_file(problem)) +
                L"). The port needs a decrypted dump: dump the game again with a tool that decrypts it." + log;
     if (has("EBOOT hash differs"))
         return L"This eboot.bin is not the one from update 1.17. Choose the 1.17 update folder (or a dump with the update "
@@ -581,7 +592,7 @@ std::wstring prepare_advice(const std::string& problem, int code) {
         return L"This dump is not Everybody's Golf (CUSA04687) with update 1.17. Choose that dump, or add the 1.17 update "
                L"folder." + log;
     if (has("cannot open") || has("cannot read") || has("empty or oversized"))
-        return L"A file the game needs is missing or unreadable in your dump (" + wide(problem.substr(0, problem.find(':'))) +
+        return L"A file the game needs is missing or unreadable in your dump (" + wide(problem_file(problem)) +
                L"). Choose the whole game folder, the one with eboot.bin, sce_module and sce_sys." + log;
     if (code == -1) return L"everybodys-golf.exe could not be started. Unpack the whole release again into a new folder.";
     if (!problem.empty())
@@ -590,10 +601,15 @@ std::wstring prepare_advice(const std::string& problem, int code) {
 }
 
 void set_up_game() {
-    fs::path base = text_of(ID_BASE), update = text_of(ID_UPDATE), dlc = text_of(ID_DLC);
+    fs::path base = pasted_folder(text_of(ID_BASE)), update = pasted_folder(text_of(ID_UPDATE)), dlc = pasted_folder(text_of(ID_DLC));
     std::error_code ec;
     if (base.empty() || !fs::exists(base / L"eboot.bin", ec)) {
         MessageBoxW(window, L"Choose the folder of your game dump: the one that holds eboot.bin and sce_sys.", kTitle, MB_ICONWARNING);
+        return;
+    }
+    if (!fs::is_directory(base / L"sce_module", ec)) {
+        MessageBoxW(window, L"This folder has eboot.bin but no sce_module folder, so it is not the whole game. Choose the complete dump "
+                            L"(eboot.bin, sce_module, sce_sys and the game's data).", kTitle, MB_ICONWARNING);
         return;
     }
     if (!update.empty() && !fs::exists(update / L"eboot.bin", ec)) {
@@ -2131,7 +2147,8 @@ LRESULT CALLBACK proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_UPDATE_STATUS: {
         std::unique_ptr<std::wstring> text((std::wstring*)lp);
         update_checking = false;
-        SetWindowTextW(controls[ID_VERSION], (L"Version " + wide(kVersion) + L"\r\n" + *text).c_str());
+        // A failed automatic check (offline, rate limit) says nothing: the player just plays.
+        SetWindowTextW(controls[ID_VERSION], (L"Version " + wide(kVersion) + (wp || text->rfind(L"You have", 0) == 0 ? L"\r\n" + *text : std::wstring())).c_str());
         if (wp) MessageBoxW(hwnd, text->c_str(), kTitle, MB_ICONINFORMATION);
         return 0;
     }

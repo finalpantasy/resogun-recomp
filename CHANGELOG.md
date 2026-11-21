@@ -5,6 +5,14 @@ Each release's section becomes the text of its GitHub release (`tools/release_no
 without one does not publish. Keep each entry on one line: GitHub shows a line break in release
 text as a break. Sections from v0.15 down are from the Resogun runner this port is built on.
 
+## v0.1.1
+
+- Updates now clean up after themselves: a refused, failed, canceled or finished update leaves no empty staging folder or half-downloaded file in dataPdate, and your saves, settings, logs and prepared game are never touched
+- The update check ignores draft and pre-release versions and development builds, and stays silent when GitHub is unreachable or limiting requests, so it never gets in the way of Play
+- Game files: a dump folder without sce_module is caught before setup starts, the advice for a missing or unreadable file now names the file, and folder paths pasted with quotes or spaces around them work
+- Short timed waits in the game are more accurate (the process asks Windows for a 1 ms timer) and thread waits cost less, which smooths frame pacing
+- The 60 FPS mode row in Display Settings says it needs PS4 Pro mode and a restart
+
 ## v0.1.0
 
 - First public Windows release of the Everybody's Golf (PS4) PC port. You need your own decrypted dump of CUSA04687 with update 1.17; nothing from the game is included
