@@ -19,6 +19,8 @@
 #include <unistd.h>
 #ifndef _WIN32
 #include <ftw.h>
+#else
+#include <windows.h>
 #endif
 
 #define ERR_PARAMETER ((int32_t)0x809F0000)
@@ -72,6 +74,7 @@ static int initialized;
 static char title_id[16]="UNKNOWN";
 static struct { int used; int32_t user; uint64_t blocks; char host[700], meta[700]; } slots[SLOTS];
 static size_t mounts_done, memory_writes, backups_done;
+static void backup_wait_locked(const char *host);
 
 void runtime_savedata_configure(const char *title) {
     if (title && *title) snprintf(title_id,sizeof(title_id),"%s",title);
@@ -186,6 +189,7 @@ static int32_t mount(int32_t user, const char *title, const DirName *dir, uint32
     if ((mode & MODE_CREATE) && exists) return ERR_EXISTS;
     if (!(mode & (MODE_CREATE|MODE_CREATE2)) && !exists) return ERR_NOT_FOUND;
     pthread_mutex_lock(&lock);
+    backup_wait_locked(host); /* the save's backup reads its files: finish it before the game writes */
     int slot=-1;
     for (int i=0;i<SLOTS;++i) {
         if (slots[i].used && !strcmp(slots[i].host,host)) { pthread_mutex_unlock(&lock); return ERR_BAD_MOUNTED; }
@@ -274,6 +278,9 @@ static ABI int32_t save_delete(const Delete *d) {
     snprintf(meta,sizeof(meta),"%s/%s.sce_sys",base,d->dir->data);
     struct stat st;
     if (stat(host,&st)) return ERR_NOT_FOUND;
+    pthread_mutex_lock(&lock);
+    backup_wait_locked(host);
+    pthread_mutex_unlock(&lock);
     remove_tree(host);
     remove_tree(meta);
     printf("Runtime: save data '%s' deleted\n",d->dir->data);
@@ -341,19 +348,126 @@ static void queue_event(uint32_t type, int32_t error, int32_t user, const char *
     snprintf(e->title.data,sizeof(e->title.data),"%.9s",title_id);
     snprintf(e->dir.data,sizeof(e->dir.data),"%.31s",dir);
 }
-/* host is <base>/<dir>; the backup is <base>/<dir>.sce_backup/{data,sce_sys}. Called with the lock. */
-static int32_t backup_locked(const char *host, const char *meta) {
-    char to[900];
-    snprintf(to,sizeof(to),"%s.sce_backup",host); remove_tree(to);
-    snprintf(to,sizeof(to),"%s.sce_backup/data",host);
-    if (copy_tree(host,to)) return ERR_INTERNAL;
-    snprintf(to,sizeof(to),"%s.sce_backup/sce_sys",host);
-    if (copy_tree(meta,to)) return ERR_INTERNAL;
-    ++backups_done;
+/* Backup worker. PS4 contract: sceSaveDataUmountWithBackup returns at once and the backup runs
+ * in the background; its result is event 1. Jobs are keyed by save host path. A job for a save
+ * already waiting replaces the waiting one (two unmounts in a row coalesce into one backup). The
+ * backup is built in <dir>.sce_backup.tmp and swapped in by renames, so an exit mid-backup leaves
+ * the old backup intact (a crash between the two renames leaves <dir>.sce_backup.old, recovered
+ * by backup_recover). Files byte-identical to the old backup are hard-linked, not copied.
+ * Functions named "_locked" run with the lock held. */
+typedef struct { char host[700], meta[700]; int32_t user; } BackupJob;
+static BackupJob job_pending, job_running;
+static int have_pending, have_running, worker_started;
+static pthread_cond_t backup_cv=PTHREAD_COND_INITIALIZER;
+
+static int same_file(const char *a, const char *b) {
+    struct stat sa, sb;
+    if (stat(a,&sa) || stat(b,&sb) || sa.st_size!=sb.st_size) return 0;
+    FILE *fa=fopen(a,"rb"), *fb=fopen(b,"rb");
+    int same=fa && fb;
+    char x[32768], y[32768];
+    size_t n;
+    while (same && (n=fread(x,1,sizeof(x),fa))) same=fread(y,1,n,fb)==n && !memcmp(x,y,n);
+    if (fa) fclose(fa);
+    if (fb) fclose(fb);
+    return same;
+}
+static int link_file(const char *from, const char *to) {
+#ifdef _WIN32
+    return CreateHardLinkA(to,from,NULL) ? 0 : -1;
+#else
+    return link(from,to);
+#endif
+}
+/* copy_tree that reuses identical files of the previous backup (old may be missing). */
+static int copy_tree_delta(const char *from, const char *to, const char *old) {
+    if (make_dirs(to)) return -1;
+    DIR *d=opendir(from);
+    if (!d) return -1;
+    int r=0;
+    for (struct dirent *e; !r && (e=readdir(d));) {
+        if (!strcmp(e->d_name,".") || !strcmp(e->d_name,"..")) continue;
+        char a[1000], b[1000], c[1000]; struct stat st;
+        if ((size_t)snprintf(a,sizeof(a),"%s/%s",from,e->d_name)>=sizeof(a) ||
+            (size_t)snprintf(b,sizeof(b),"%s/%s",to,e->d_name)>=sizeof(b) ||
+            (size_t)snprintf(c,sizeof(c),"%s/%s",old,e->d_name)>=sizeof(c) || stat(a,&st)) { r=-1; break; }
+        if (S_ISDIR(st.st_mode)) r=copy_tree_delta(a,b,c);
+        else if (same_file(a,c) && !link_file(c,b)) r=0;
+        else r=copy_file(a,b);
+    }
+    closedir(d);
+    return r;
+}
+/* A crash between the swap's renames leaves only <dir>.sce_backup.old: put it back. */
+static void backup_recover(const char *host) {
+    char cur[900], old[900]; struct stat st;
+    snprintf(cur,sizeof(cur),"%s.sce_backup",host); snprintf(old,sizeof(old),"%s.sce_backup.old",host);
+    if (stat(cur,&st) && !stat(old,&st)) rename(old,cur);
+}
+/* host is <base>/<dir>; the backup is <base>/<dir>.sce_backup/{data,sce_sys}. Runs unlocked. */
+static int32_t backup_run(const BackupJob *j) {
+    char cur[900], tmp[900], old[900], a[1000], c[1000];
+    backup_recover(j->host);
+    snprintf(cur,sizeof(cur),"%s.sce_backup",j->host); snprintf(tmp,sizeof(tmp),"%s.sce_backup.tmp",j->host);
+    snprintf(old,sizeof(old),"%s.sce_backup.old",j->host);
+    remove_tree(tmp);
+    snprintf(a,sizeof(a),"%s/data",tmp); snprintf(c,sizeof(c),"%s/data",cur);
+    if (copy_tree_delta(j->host,a,c)) { remove_tree(tmp); return ERR_INTERNAL; }
+    snprintf(a,sizeof(a),"%s/sce_sys",tmp); snprintf(c,sizeof(c),"%s/sce_sys",cur);
+    if (copy_tree_delta(j->meta,a,c)) { remove_tree(tmp); return ERR_INTERNAL; }
+    remove_tree(old);
+    struct stat st;
+    if (!stat(cur,&st) && rename(cur,old)) { remove_tree(tmp); return ERR_INTERNAL; }
+    if (rename(tmp,cur)) { rename(old,cur); remove_tree(tmp); return ERR_INTERNAL; }
+    remove_tree(old);
     return 0;
 }
-/* sceSaveDataUmountWithBackup(mount point): sceSaveDataUmount, then the backup; its result is
- * event 1. Everybody's Golf calls it at 0xba01c4. */
+static void *backup_worker(void *arg) {
+    (void)arg;
+    pthread_mutex_lock(&lock);
+    for (;;) {
+        while (!have_pending) pthread_cond_wait(&backup_cv,&lock);
+        job_running=job_pending; have_pending=0; have_running=1;
+        pthread_cond_broadcast(&backup_cv);
+        pthread_mutex_unlock(&lock);
+        const int32_t r=backup_run(&job_running);
+        pthread_mutex_lock(&lock);
+        const char *dir=strrchr(job_running.host,'/');
+        dir=dir ? dir+1 : job_running.host;
+        if (!r) ++backups_done;
+        queue_event(1,r,job_running.user,dir);
+        printf("Runtime: save data '%s' backed up (0x%x)\n",dir,(unsigned)r);
+        have_running=0;
+        pthread_cond_broadcast(&backup_cv);
+    }
+    return NULL;
+}
+/* Waits until no backup of this save (host; NULL: of any save) is queued or running. */
+static void backup_wait_locked(const char *host) {
+    while ((have_pending && (!host || !strcmp(job_pending.host,host))) ||
+           (have_running && (!host || !strcmp(job_running.host,host))))
+        pthread_cond_wait(&backup_cv,&lock);
+}
+static void backup_queue_locked(const char *host, const char *meta, int32_t user) {
+    if (!worker_started) {
+        pthread_t t;
+        if (pthread_create(&t,NULL,backup_worker,NULL)) { /* no thread: back up here, as before */
+            BackupJob j; snprintf(j.host,sizeof(j.host),"%s",host); snprintf(j.meta,sizeof(j.meta),"%s",meta); j.user=user;
+            const int32_t r=backup_run(&j);
+            if (!r) ++backups_done;
+            queue_event(1,r,user,strrchr(host,'/') ? strrchr(host,'/')+1 : host);
+            return;
+        }
+        pthread_detach(t); worker_started=1;
+    }
+    if (have_pending && strcmp(job_pending.host,host)) backup_wait_locked(job_pending.host); /* one waiting slot */
+    snprintf(job_pending.host,sizeof(job_pending.host),"%s",host);
+    snprintf(job_pending.meta,sizeof(job_pending.meta),"%s",meta);
+    job_pending.user=user; have_pending=1;
+    pthread_cond_broadcast(&backup_cv);
+}
+/* sceSaveDataUmountWithBackup(mount point): sceSaveDataUmount, then the backup in the background;
+ * its result is event 1. Everybody's Golf calls it at 0xba01c4. */
 static ABI int32_t save_umount_backup(const MountPoint *point) {
     if (!initialized) return ERR_NOT_INITIALIZED;
     pthread_mutex_lock(&lock);
@@ -362,9 +476,8 @@ static ABI int32_t save_umount_backup(const MountPoint *point) {
         runtime_file_unmount(point->data); slots[slot].used=0;
         const char *dir=strrchr(slots[slot].host,'/');
         dir=dir ? dir+1 : slots[slot].host;
-        const int32_t r=backup_locked(slots[slot].host,slots[slot].meta);
-        queue_event(1,r,slots[slot].user,dir);
-        printf("Runtime: save data '%s' unmounted and backed up (0x%x)\n",dir,(unsigned)r);
+        backup_queue_locked(slots[slot].host,slots[slot].meta,slots[slot].user);
+        printf("Runtime: save data '%s' unmounted, backup queued\n",dir);
     }
     pthread_mutex_unlock(&lock);
     return slot>=0 ? 0 : ERR_NOT_FOUND;
@@ -399,6 +512,7 @@ static ABI int32_t save_check_backup(const CheckBackup *c) {
     char host[640], meta[680], path[900]; struct stat st;
     if (!c || backup_paths(c->user,c->title,c->dir,host,sizeof(host),meta,sizeof(meta))) return ERR_PARAMETER;
     pthread_mutex_lock(&lock);
+    backup_wait_locked(host); backup_recover(host);
     int32_t r=0;
     snprintf(path,sizeof(path),"%s.sce_backup/data",host);
     if (mounted_host(host)) r=ERR_BUSY;
@@ -416,6 +530,7 @@ static ABI int32_t save_restore_backup(const RestoreBackup *b) {
     char host[640], meta[680], from[900]; struct stat st;
     if (!b || backup_paths(b->user,b->title,b->dir,host,sizeof(host),meta,sizeof(meta))) return ERR_PARAMETER;
     pthread_mutex_lock(&lock);
+    backup_wait_locked(host); backup_recover(host);
     int32_t r=0;
     snprintf(from,sizeof(from),"%s.sce_backup/data",host);
     if (mounted_host(host)) r=ERR_BUSY;
