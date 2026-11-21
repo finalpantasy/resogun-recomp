@@ -58,6 +58,9 @@ static long long resogun_mono_ns() {
     return std::chrono::steady_clock::now().time_since_epoch().count();
 }
 
+// resogun: the guest's longest sceGnmSubmitDone wait for the GPU since the last flip.
+std::atomic<s64> g_resogun_submit_wait_ns{0};
+
 namespace Libraries::VideoOut {
 
 // resogun: RESOGUN_FRAME_STATS output goes through a printer thread. Printed from the present
@@ -400,7 +403,24 @@ void VideoOutDriver::Flip(const Request& req) {
         }
         {
             const double period_ms = EmulatorSettings.GetVblankPeriod().count() / 1e6;
-            ++by_vblanks[std::min<u32>(5, u32(std::lround(frame_ms / period_ms)))];
+            const u32 vblanks = u32(std::lround(frame_ms / period_ms));
+            ++by_vblanks[std::min<u32>(5, vblanks)];
+            // resogun: RESOGUN_LATE_FLIPS=1 names each flip that came a vblank or more late: the
+            // gap between the game's two flip submits says whether the game was late (gap near
+            // the interval) or the flip waited here (gap near one vblank).
+            static const bool late_flips = EmulatorSettingsImpl::Flag("RESOGUN_LATE_FLIPS", false);
+            static s64 last_submit_ns;
+            if (late_flips && vblanks >= 2 && req.submit_ns && last_submit_ns) {
+                StatsPrintf(stdout, "Late flip: %.1f ms after the last; game submits %.1f ms apart, "
+                            "queued %.1f ms, waited %.1f ms for the vblank; SubmitDone waited %.1f ms "
+                            "for the GPU\n",
+                            frame_ms, (req.submit_ns - last_submit_ns) / 1e6,
+                            (req.queued_ns - req.submit_ns) / 1e6,
+                            (now.time_since_epoch().count() - req.queued_ns) / 1e6,
+                            g_resogun_submit_wait_ns.load() / 1e6);
+            }
+            if (req.submit_ns) last_submit_ns = req.submit_ns;
+            g_resogun_submit_wait_ns.store(0);
         }
         // Where each flip lands in the display's refresh (Windows): a thread stamps every refresh.
         static std::atomic<s64> refresh_ns{0};

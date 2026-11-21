@@ -35,6 +35,9 @@ std::unique_ptr<AmdGpu::Liverpool> liverpool;
 // resogun: settings.ini frame_rate onto the engine's frame clock, at each flip (src/runtime_game.c).
 extern "C" void runtime_game_frame_rate(void);
 
+// resogun: the guest's longest sceGnmSubmitDone wait since the last flip (videoout driver.cpp).
+extern std::atomic<s64> g_resogun_submit_wait_ns;
+
 namespace Libraries::GnmDriver {
 
 using namespace AmdGpu;
@@ -2431,6 +2434,13 @@ s32 PS4_SYSV_ABI sceGnmSubmitDone() {
     std::scoped_lock lk{m_submit_lock};
     const auto wait_start = std::chrono::steady_clock::now();
     WaitGpuIdle();
+    {
+        // resogun: the longest wait here since the last flip, for RESOGUN_LATE_FLIPS.
+        const s64 waited = (std::chrono::steady_clock::now() - wait_start).count();
+        s64 seen = g_resogun_submit_wait_ns.load(std::memory_order_relaxed);
+        while (waited > seen && !g_resogun_submit_wait_ns.compare_exchange_weak(seen, waited)) {
+        }
+    }
     // resogun: the guest may run one submission ahead of the GPU, as on PS4. Everybody's Golf
     // reads a UI constant buffer from the half of its per-frame ring that the CPU fills for the
     // next frame; when the GPU thread is a frame behind (cold course loads, long host-copy
