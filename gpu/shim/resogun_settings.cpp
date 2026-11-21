@@ -87,6 +87,8 @@ void Set(Values& v, const std::string& key, const std::string& value) {
         v.smaa = Truthy(value);
     } else if (key == "hdr") {
         v.startup_hdr = v.hdr = Truthy(value);
+    } else if (key == "frame_generation") {
+        v.startup_frame_generation = v.frame_generation = Truthy(value);
     } else if (key == "frame_rate") {
         const bool listed = ResogunGraphics::IndexOf(ResogunGraphics::FrameRates, i, -1) >= 0;
         v.frame_rate = listed ? i : 60;
@@ -126,6 +128,7 @@ std::vector<std::pair<std::string, std::string>> DisplayKeys() {
         {"sharpening", v.sharpening ? "1" : "0"},
         {"smaa", v.smaa ? "1" : "0"},
         {"hdr", v.hdr ? "1" : "0"},
+        {"frame_generation", v.frame_generation ? "1" : "0"},
         {"render_height", std::to_string(v.render_height.load())},
         {"frame_rate_priority", v.frame_rate_priority ? "1" : "0"},
         {"hd_textures", v.hd_textures ? "1" : "0"},
@@ -249,6 +252,7 @@ void Load() {
         {"RESOGUN_TEXTURE_PACK", "texture_pack"}, {"RESOGUN_TEXTURE_DUMP", "texture_dump"},
         {"RESOGUN_RENDER_RESOLUTION", "render_resolution"},
         {"RESOGUN_HDR", "hdr"},
+        {"RESOGUN_FRAME_GENERATION", "frame_generation"},
         {"RESOGUN_SHARPENING", "sharpening"},
         {"RESOGUN_SMAA", "smaa"},
     };

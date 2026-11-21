@@ -15,6 +15,7 @@
 #include "resogun_overlay.h"
 #include "resogun_graphics.h"
 #include "resogun_settings.h"
+#include "resogun_streamline.h"
 #include "video_core/renderer_vulkan/vk_presenter.h"
 #include "video_core/renderer_vulkan/vk_warmup_inbox.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
@@ -887,13 +888,18 @@ void Presenter::PresentLoadingFrame() {
     ResogunOverlay::Render(cmdbuf, swapchain.ImageView(), extent);
     barrier(vk::ImageLayout::eColorAttachmentOptimal, vk::ImageLayout::ePresentSrcKHR,
             vk::AccessFlagBits::eColorAttachmentWrite, {});
+    ResogunStreamline::BeginFrame(instance.GetDevice(), instance.GetPhysicalDevice(), cmdbuf, {},
+                                  vk::Format::eUndefined, swapchain.GetExtent(), false);
     SubmitInfo info{};
     info.AddWait(swapchain.GetImageAcquiredSemaphore());
     info.AddSignal(swapchain.GetPresentReadySemaphore());
     present_scheduler.Flush(info);
     {
         std::scoped_lock submit_lock{Scheduler::submit_mutex};
-        if (!swapchain.Present() && !window.IsMinimized() && window.GetWidth() > 0 &&
+        ResogunStreamline::PresentStart();
+        const bool presented = swapchain.Present();
+        ResogunStreamline::PresentEnd();
+        if (!presented && !window.IsMinimized() && window.GetWidth() > 0 &&
             window.GetHeight() > 0) {
             swapchain.Recreate(window.GetWidth(), window.GetHeight());
         }
@@ -1077,6 +1083,10 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
                                    vk::DependencyFlagBits::eByRegion, {}, {}, to_present);
         }
     }
+    // resogun: DLSS Frame Generation (resogun_streamline.h) for game frames without the overlay.
+    ResogunStreamline::BeginFrame(instance.GetDevice(), instance.GetPhysicalDevice(), cmdbuf, frame->image,
+                                  vk::Format::eUndefined, swapchain.GetExtent(),
+                                  is_game_frame && !ResogunOverlay::Visible());
     if (EmulatorSettings.IsVkHostMarkersEnabled()) {
         cmdbuf.endDebugUtilsLabelEXT();
     }
@@ -1093,11 +1103,14 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
     // Present to swapchain.
     {
         std::scoped_lock submit_lock{Scheduler::submit_mutex};
-        if (!swapchain.Present() && !window.IsMinimized() && window.GetWidth() > 0 &&
-            window.GetHeight() > 0) {
+        ResogunStreamline::PresentStart();
+        const bool presented = swapchain.Present();
+        ResogunStreamline::PresentEnd();
+        if (!presented && !window.IsMinimized() && window.GetWidth() > 0 && window.GetHeight() > 0) {
             swapchain.Recreate(window.GetWidth(), window.GetHeight());
         }
     }
+    ResogunStreamline::LogStats();
 
     free_frame();
     if (!is_reusing_frame && is_game_frame) {

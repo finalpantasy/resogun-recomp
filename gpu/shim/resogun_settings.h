@@ -198,6 +198,11 @@ struct Values {
     /// BT.2020 PQ and switches its own output to HDR. Read once, before the game starts.
     bool startup_hdr = false;
     std::atomic<bool> hdr{false};
+    /// NVIDIA DLSS Frame Generation (key frame_generation, RESOGUN_FRAME_GENERATION; off by
+    /// default): a generated frame before each game frame (resogun_streamline.cpp). Vulkan has to
+    /// come from Streamline's interposer, so turning it on takes a restart; off is at once.
+    bool startup_frame_generation = false;
+    std::atomic<bool> frame_generation{false};
     /// Whether the window's display offers an HDR10 surface: -1 not known yet, set by the
     /// swapchain (vk_swapchain.cpp).
     std::atomic<int> hdr_display{-1};

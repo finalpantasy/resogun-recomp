@@ -23,6 +23,7 @@
 #include "imgui.h"
 #include "imgui_internal.h" // RegisterUserTexture (save pictures)
 #include "imgui_impl_vulkan.h"
+#include "resogun_streamline.h"
 #include "../resogun_gpu.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
@@ -150,7 +151,7 @@ std::atomic<bool> cheats_open{false};
 int cheat_row = 0;
 bool cheats_dirty = false;
 // Everybody's Golf has no aspect ratio or frame rate patch (Resogun's rows), so those are not listed.
-enum DisplayRow : int { RowMode, RowResolution, RowMonitor, RowVsync, RowRender, RowSixty, RowSharpen, RowSmaa, RowHd, RowHdr, RowCount };
+enum DisplayRow : int { RowMode, RowResolution, RowMonitor, RowVsync, RowRender, RowSixty, RowFrameGen, RowSharpen, RowSmaa, RowHd, RowHdr, RowCount };
 // The render heights the panel steps through (settings.ini render_height; 0 is the game's own).
 constexpr std::array<int, 6> kRenderHeights = {0, 1080, 1440, 1800, 2160, 2880};
 extern "C" int runtime_game_golf_set_render_height(int height);
@@ -399,6 +400,7 @@ void ChangeDisplayRow(int row, int delta) {
     }
     case RowSixty: s.frame_rate_priority = !s.frame_rate_priority; break;
     case RowHd: s.hd_textures = !s.hd_textures; break;
+    case RowFrameGen: s.frame_generation = !s.frame_generation; break;
     case RowSharpen: s.sharpening = !s.sharpening; break;
     case RowSmaa: s.smaa = !s.smaa; break;
     case RowHdr: s.hdr = !s.hdr; break;
@@ -483,6 +485,18 @@ DisplayRowText DisplayRowAt(int row) {
                        "game's own textures. Switches at once."
                      : "No texture pack is set up: build one in the launcher's HD textures tab.",
                 pack, pack};
+    }
+    case RowFrameGen: {
+        std::string text = s.frame_generation ? "DLSS 2x" : "Off";
+        if (s.frame_generation && !ResogunStreamline::Loaded()) {
+            text += "  (after restart)";
+        } else if (s.frame_generation && std::string_view(ResogunStreamline::StatusText()) == "Not supported") {
+            text += "  (not supported here)";
+        }
+        return {"Frame generation", text,
+                "NVIDIA DLSS Frame Generation (GeForce RTX 40 and 50 series): a generated frame between each two "
+                "of the game's, for up to twice the frames on a high refresh rate display. Fast-moving objects can "
+                "smear. Turning it on applies after a restart; off applies at once. Paused while a menu is open."};
     }
     case RowSharpen:
         return {"Sharpening", s.sharpening ? "On" : "Off",

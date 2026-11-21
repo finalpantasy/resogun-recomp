@@ -242,6 +242,10 @@ def prepare_python(cache):
     return runtime
 
 
+STREAMLINE_DLLS = ('sl.interposer.dll', 'sl.common.dll', 'sl.dlss_g.dll', 'sl.reflex.dll', 'sl.pcl.dll',
+                   'nvngx_dlssg.dll', 'NvLowLatencyVk.dll')
+
+
 def add_windows_tools(out, ship):
     """tools/ of the release: Python, Real-ESRGAN, texture_pack.py and the online service."""
     runtime = prepare_python(ROOT / 'tools' / 'python-embed')
@@ -436,6 +440,19 @@ def main():
         'MPLUSRounded1c-OFL.txt': PORT / 'gpu/third_party/fonts/mplusrounded1c/OFL.txt',
         'recomplauncher.json': PORT / 'recomplauncher.json',
     }
+    # NVIDIA Streamline (DLSS Frame Generation), loaded beside the program only when frame generation
+    # is on: production DLLs from the SDK (RESOGUN_STREAMLINE_DIR, else tools/streamline-*/sdk/bin/x64).
+    if not LINUX:
+        sl_dir = os.environ.get('RESOGUN_STREAMLINE_DIR')
+        sl_bin = Path(sl_dir) if sl_dir else next(iter(sorted((ROOT / 'tools').glob('streamline-*/sdk/bin/x64'))), None)
+        if sl_bin and (sl_bin / 'sl.interposer.dll').is_file():
+            for name in STREAMLINE_DLLS:
+                assets[name] = sl_bin / name
+            assets['Streamline-LICENSE.txt'] = PORT / 'gpu/third_party/streamline/LICENSE.txt'
+            assets['NVIDIA-DLSS-LICENSE.txt'] = sl_bin / 'nvngx_dlss.license.txt'
+            assets['NVIDIA-Reflex-LICENSE.txt'] = sl_bin / 'reflex.license.txt'
+        else:
+            print('note: Streamline SDK not found; packaging without DLSS Frame Generation')
     outputs = [*programs, *assets, 'release.txt', 'README.txt']
     if LINUX:
         libs = so_closure(list(programs.values()))

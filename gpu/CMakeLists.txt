@@ -152,6 +152,8 @@ target_compile_options(resogun_gpu PRIVATE -Wno-deprecated-declarations -Wno-mis
 target_link_libraries(resogun_gpu PUBLIC Vulkan::Headers fmt::fmt Boost::headers magic_enum::magic_enum
     tsl::robin_map GPUOpen::VulkanMemoryAllocator PkgConfig::XXHASH PkgConfig::SDL3 Resogun::FFmpeg miniz::miniz Zydis::Zydis sirit)
 target_include_directories(resogun_gpu PRIVATE third_party/xbyak)
+# NVIDIA Streamline headers (MIT) for DLSS Frame Generation; its DLLs are loaded at run time.
+target_include_directories(resogun_gpu SYSTEM PRIVATE third_party/streamline/include)
 if (WIN32)
     # Guest code is entered with the System V ABI; NOMINMAX/WIN32_LEAN_AND_MEAN keep
     # <windows.h> out of the way of std::min/max and the Vulkan/SDL headers.
