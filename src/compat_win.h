@@ -16,6 +16,9 @@
 #include <unistd.h>
 #include <sys/types.h>
 #include <sys/stat.h>
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 #ifndef O_NONBLOCK
 #define O_NONBLOCK 0
@@ -81,5 +84,8 @@ int compat_cpu_times(int who, int64_t *user_us, int64_t *kernel_us);
 typedef unsigned long long resogun_jmp_buf[32];
 __attribute__((returns_twice)) int resogun_setjmp(resogun_jmp_buf buffer);
 __attribute__((noreturn)) void resogun_longjmp(resogun_jmp_buf buffer, int value);
+#ifdef __cplusplus
+}
+#endif
 #endif
 #endif
