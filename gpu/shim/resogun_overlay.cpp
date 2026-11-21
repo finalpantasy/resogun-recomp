@@ -151,7 +151,7 @@ std::atomic<bool> cheats_open{false};
 int cheat_row = 0;
 bool cheats_dirty = false;
 // Everybody's Golf has no aspect ratio or frame rate patch (Resogun's rows), so those are not listed.
-enum DisplayRow : int { RowMode, RowResolution, RowMonitor, RowVsync, RowRender, RowSixty, RowFrameGen, RowSharpen, RowSharpness, RowAniso, RowLod, RowSmaa, RowHd, RowHdr, RowCount };
+enum DisplayRow : int { RowMode, RowResolution, RowMonitor, RowVsync, RowRender, RowSixty, RowFrameGen, RowSharpen, RowSharpness, RowAniso, RowLod, RowSmaa, RowHd, RowHdr, RowVolume, RowCount };
 // The render heights the panel steps through (settings.ini render_height; 0 is the game's own).
 constexpr std::array<int, 6> kRenderHeights = {0, 1080, 1440, 1800, 2160, 2880};
 extern "C" int runtime_game_golf_set_render_height(int height);
@@ -413,6 +413,12 @@ void ChangeDisplayRow(int row, int delta) {
     case RowLod: s.texture_lod_auto = !s.texture_lod_auto; break;
     case RowSmaa: s.smaa = !s.smaa; break;
     case RowHdr: s.hdr = !s.hdr; break;
+    case RowVolume: { // 10% steps, no wrap: Right at 100 stays loud
+        const int next = std::clamp((s.audio_volume.load() + 5) / 10 * 10 + delta * 10, 0, 100);
+        if (next == s.audio_volume.load()) return;
+        s.audio_volume = next;
+        break;
+    }
     default: return;
     }
     display_dirty = true;
@@ -544,6 +550,12 @@ DisplayRowText DisplayRowAt(int row) {
         return {"HDR", text,
                 "The game's own HDR output, for an HDR display (in Windows, turn on Use HDR in Display "
                 "settings first). Applies after a restart."};
+    }
+    case RowVolume: {
+        const int v = s.audio_volume.load();
+        return {"Master volume", v ? std::to_string(v) + "%" : std::string("Muted"),
+                "Volume of all the game's sound: music, effects and voices. 50% is 12 dB quieter than "
+                "100%, the game's own level. Applies at once."};
     }
     default: return {"", "", ""};
     }
@@ -688,11 +700,13 @@ void PageBox(const char* id, const char* title, const std::vector<PageRow>& rows
 
     // The panel, centred between the bands.
     const int count = int(rows.size());
-    const float row_h = 62.0f * px, pad = 18.0f * px;
+    const float pad = 18.0f * px;
+    const float room = size.y - (header - o.y) - 110.0f * px;
+    // Rows shrink from 62 px (at 1080 lines) when a long page would run under the help band.
+    const float row_h = std::min(62.0f * px, (room - 24.0f * px - pad * 2.0f) / float(std::max(count, 1)));
     const float panel_w = std::min(size.x - 80.0f * px, 1120.0f * px);
     const float panel_h = pad * 2.0f + float(count) * row_h;
     const float x0 = o.x + (size.x - panel_w) * 0.5f, x1 = x0 + panel_w;
-    const float room = size.y - (header - o.y) - 110.0f * px;
     const float top = header + std::max(24.0f * px, (room - panel_h) * 0.45f);
     GolfPanel(dl, ImVec2(x0, top), ImVec2(x1, top + panel_h), px);
 

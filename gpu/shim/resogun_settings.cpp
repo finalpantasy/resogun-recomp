@@ -153,6 +153,7 @@ std::vector<std::pair<std::string, std::string>> DisplayKeys() {
         {"render_height", std::to_string(v.render_height.load())},
         {"frame_rate_priority", v.frame_rate_priority ? "1" : "0"},
         {"hd_textures", v.hd_textures ? "1" : "0"},
+        {"audio_volume", std::to_string(v.audio_volume.load())},
     };
     const int cheats = v.cheats;
     for (int c = 0; c < CheatCount; ++c) keys.emplace_back(CheatKeys[c], (cheats >> c) & 1 ? "1" : "0");
