@@ -143,9 +143,9 @@ target_sources(resogun_gpu PRIVATE third_party/imgui/imgui.cpp third_party/imgui
 target_include_directories(resogun_gpu PRIVATE third_party/imgui third_party/imgui/backends)
 target_compile_definitions(resogun_gpu PRIVATE IMGUI_IMPL_VULKAN_NO_PROTOTYPES
     RESOGUN_FONT_PATH="${CMAKE_CURRENT_SOURCE_DIR}/third_party/fonts/DejaVuSans.ttf"
-    RESOGUN_EXIT_FONT_PATH="${CMAKE_CURRENT_SOURCE_DIR}/third_party/fonts/orbitron/Orbitron[wght].ttf")
+    RESOGUN_EXIT_FONT_PATH="${CMAKE_CURRENT_SOURCE_DIR}/third_party/fonts/mplusrounded1c/MPLUSRounded1c-Bold.ttf")
 set_source_files_properties(shim/resogun_overlay.cpp PROPERTIES
-    OBJECT_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/fonts/DejaVuSans.ttf;${CMAKE_CURRENT_SOURCE_DIR}/third_party/fonts/orbitron/Orbitron[wght].ttf")
+    OBJECT_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/fonts/DejaVuSans.ttf;${CMAKE_CURRENT_SOURCE_DIR}/third_party/fonts/mplusrounded1c/MPLUSRounded1c-Bold.ttf")
 target_include_directories(resogun_gpu PRIVATE shim shadps4 ${SHADER_INCLUDE} third_party/half/include)
 target_compile_definitions(resogun_gpu PRIVATE BOOST_ASIO_STANDALONE NDEBUG)
 target_compile_options(resogun_gpu PRIVATE -Wno-deprecated-declarations -Wno-missing-field-initializers)

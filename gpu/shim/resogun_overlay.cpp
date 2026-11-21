@@ -156,22 +156,6 @@ constexpr std::array<int, 6> kRenderHeights = {0, 1080, 1440, 1800, 2160, 2880};
 extern "C" int runtime_game_golf_set_render_height(int height);
 extern "C" int runtime_game_golf_render_height_limit(void);
 
-// The colours of the game's own menus (Main Menu, Options): teal bars on a dark, see-through
-// backdrop inside a thin cyan frame.
-namespace PageInk {
-constexpr ImU32 Rgb(int r, int g, int b, int a = 255) { return IM_COL32(r, g, b, a); }
-// Shade dims the game behind Display Settings and the exit prompt, 30% see-through.
-constexpr ImU32 Shade = Rgb(0x02, 0x08, 0x0e, 0xb3), Panel = Rgb(0x04, 0x16, 0x1e, 0xd8);
-constexpr ImU32 Frame = Rgb(0x8c, 0xec, 0xf4, 0xe6), FrameDim = Rgb(0x3a, 0x9c, 0xb0, 0xa0);
-constexpr ImU32 Row = Rgb(0x0c, 0x4c, 0x5c, 0xe0), RowLow = Rgb(0x06, 0x2c, 0x38, 0xe0);
-// The overlay draws to an sRGB image: these are linear, Focus shows as #2ac0d6 to #0a6e86.
-constexpr ImU32 Focus = Rgb(0x06, 0x86, 0xab), FocusLow = Rgb(0x01, 0x28, 0x3c);
-constexpr ImU32 Text = Rgb(0xff, 0xff, 0xff), TextDim = Rgb(0xc4, 0xe8, 0xee), Shadow = Rgb(0x00, 0x18, 0x22, 0xc0);
-constexpr ImU32 Help = Rgb(0xb0, 0xe4, 0xec);
-// A setting that does not apply in the current mode: greyed out and passed over by Up/Down.
-constexpr ImU32 RowOff = Rgb(0x0a, 0x26, 0x2e, 0xb0), RowOffLow = Rgb(0x05, 0x16, 0x1c, 0xb0), TextOff = Rgb(0x5c, 0x7c, 0x84);
-} // namespace PageInk
-
 s64 NowMs() {
     return std::chrono::duration_cast<std::chrono::milliseconds>(
                std::chrono::steady_clock::now().time_since_epoch())
@@ -523,41 +507,104 @@ DisplayRowText DisplayRowAt(int row) {
     }
 }
 
-// Text as the game's menus draw it: white, with a soft dark shadow below and to the right.
-void PageText(ImDrawList* dl, ImFont* font, float size, ImVec2 at, const char* text, ImU32 color = PageInk::Text) {
-    const float d = std::max(1.0f, size * 0.05f);
-    dl->AddText(font, size, ImVec2(at.x + d, at.y + d), PageInk::Shadow, text);
+// Everybody's Golf's own menu look (its Menu screen): a dark band across the top with the title
+// on a light tab and the button hints, a dark see-through panel with a light rounded frame, the
+// focused row on a blue bar with a pointer, and the focused item's help on a dark band at the
+// bottom. The overlay draws to an sRGB image, so colours go through Lin().
+namespace GolfInk {
+inline u8 LinByte(int c) {
+    const float v = float(c) / 255.0f;
+    const float l = v <= 0.04045f ? v / 12.92f : std::pow((v + 0.055f) / 1.055f, 2.4f);
+    return u8(std::clamp(l * 255.0f + 0.5f, 0.0f, 255.0f));
+}
+inline ImU32 Lin(int r, int g, int b, int a = 255) { return IM_COL32(LinByte(r), LinByte(g), LinByte(b), a); }
+inline ImU32 Shade() { return Lin(0, 0, 0, 0x70); }
+inline ImU32 Band() { return Lin(0, 0, 0, 0xc0); }
+inline ImU32 Panel() { return Lin(0x08, 0x0c, 0x14, 0xb4); }
+inline ImU32 Frame() { return Lin(0xe4, 0xe4, 0xe4); }
+inline ImU32 Rule() { return Lin(0xff, 0xff, 0xff, 0x3c); }
+inline ImU32 TabTop() { return Lin(0xf0, 0xf0, 0xf0); }
+inline ImU32 TabLow() { return Lin(0xa8, 0xaa, 0xae); }
+inline ImU32 BarEdge(int a = 0xf0) { return Lin(0x14, 0x34, 0x7a, a); }
+inline ImU32 BarMid() { return Lin(0x4a, 0x86, 0xd8, 0xf0); }
+inline ImU32 Text() { return Lin(0xff, 0xff, 0xff); }
+inline ImU32 TextOff() { return Lin(0x86, 0x88, 0x8c); }
+inline ImU32 Outline() { return Lin(0x10, 0x12, 0x18, 0xe0); }
+inline ImU32 Green() { return Lin(0x8c, 0xe0, 0x3c); }
+} // namespace GolfInk
+
+// Text with a dark outline all round, as the game draws its titles; `thick` in pixels.
+void OutlinedText(ImDrawList* dl, ImFont* font, float size, ImVec2 at, const char* text, ImU32 color, float thick) {
+    static const float dirs[8][2] = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}, {0.7f, 0.7f}, {-0.7f, 0.7f}, {0.7f, -0.7f}, {-0.7f, -0.7f}};
+    for (const auto& d : dirs) {
+        dl->AddText(font, size, ImVec2(at.x + d[0] * thick, at.y + d[1] * thick), GolfInk::Outline(), text);
+    }
     dl->AddText(font, size, at, color, text);
 }
 
-// An arrow ("<" for dir -1, ">" for 1) as one stroke, centred on `at`.
-void Chevron(ImDrawList* dl, ImVec2 at, float size, int dir, ImU32 color, float thickness) {
-    const float w = size * 0.28f * float(dir), h = size * 0.5f;
-    const ImVec2 points[3] = {ImVec2(at.x - w, at.y - h), ImVec2(at.x + w, at.y), ImVec2(at.x - w, at.y + h)};
-    dl->AddPolyline(points, 3, color, ImDrawFlags_None, thickness);
+// A filled triangle pointing left (dir -1) or right (1), centred on `at`.
+void Pointer(ImDrawList* dl, ImVec2 at, float size, int dir, ImU32 color) {
+    const float w = size * 0.42f * float(dir), h = size * 0.5f;
+    dl->AddTriangleFilled(ImVec2(at.x - w, at.y - h), ImVec2(at.x + w, at.y), ImVec2(at.x - w, at.y + h), color);
 }
 
-// The game's bar: a band whose ends slant inward by `slant` at the bottom (its menu items, the
-// header tab and the button hints), filled top to bottom from `top` to `low`.
-void SlantedBar(ImDrawList* dl, ImVec2 a, ImVec2 b, float slant, ImU32 top, ImU32 low) {
+// The top band: the title on a light tab at the left, "Everybody's Golf" in green and the
+// button hints on the right. Returns the band's bottom edge.
+float GolfHeader(ImDrawList* dl, ImFont* font, ImVec2 o, ImVec2 size, float px, const char* title,
+                 const char* const (&hints)[3]) {
+    const float band_h = 92.0f * px, tab_h = 64.0f * px, title_size = 44.0f * px;
+    dl->AddRectFilled(o, ImVec2(o.x + size.x, o.y + band_h), GolfInk::Band());
+    const float title_w = font->CalcTextSizeA(title_size, FLT_MAX, 0.0f, title).x;
+    const float tab_w = title_w + 96.0f * px, slant = 26.0f * px;
+    const ImVec2 points[4] = {o, ImVec2(o.x + tab_w + slant, o.y), ImVec2(o.x + tab_w, o.y + tab_h), ImVec2(o.x, o.y + tab_h)};
     const int first = dl->VtxBuffer.Size;
-    const ImVec2 points[4] = {a, ImVec2(b.x, a.y), ImVec2(b.x - slant, b.y), ImVec2(a.x + slant, b.y)};
-    dl->AddConvexPolyFilled(points, 4, top);
-    ImGui::ShadeVertsLinearColorGradientKeepAlpha(dl, first, dl->VtxBuffer.Size, a, ImVec2(a.x, b.y), top, low);
-}
-void SlantedOutline(ImDrawList* dl, ImVec2 a, ImVec2 b, float slant, ImU32 color, float thickness) {
-    const ImVec2 points[4] = {a, ImVec2(b.x, a.y), ImVec2(b.x - slant, b.y), ImVec2(a.x + slant, b.y)};
-    dl->AddPolyline(points, 4, color, ImDrawFlags_Closed, thickness);
+    dl->AddConvexPolyFilled(points, 4, GolfInk::TabTop());
+    ImGui::ShadeVertsLinearColorGradientKeepAlpha(dl, first, dl->VtxBuffer.Size, o, ImVec2(o.x, o.y + tab_h),
+                                                  GolfInk::TabTop(), GolfInk::TabLow());
+    OutlinedText(dl, font, title_size, ImVec2(o.x + 34.0f * px, o.y + (tab_h - title_size) * 0.5f - 2.0f * px), title,
+                 GolfInk::Text(), std::max(1.5f, 3.0f * px));
+
+    const float right = o.x + size.x - 40.0f * px;
+    const float brand_size = 28.0f * px;
+    const char* brand = "Everybody's Golf";
+    const float brand_w = font->CalcTextSizeA(brand_size, FLT_MAX, 0.0f, brand).x;
+    OutlinedText(dl, font, brand_size, ImVec2(right - brand_w, o.y + 8.0f * px), brand, GolfInk::Green(),
+                 std::max(1.0f, 2.0f * px));
+    const float hint_size = 25.0f * px, hint_gap = 44.0f * px, hint_y = o.y + band_h - hint_size - 14.0f * px;
+    float x = right;
+    for (int i = 2; i >= 0; --i) {
+        const float w = font->CalcTextSizeA(hint_size, FLT_MAX, 0.0f, hints[i]).x;
+        x -= w;
+        dl->AddText(font, hint_size, ImVec2(x, hint_y), GolfInk::Text(), hints[i]);
+        x -= hint_gap;
+    }
+    return o.y + band_h;
 }
 
-// A tick box at the right end of a bar: a frame, filled with a check mark when `on`.
-void CheckBox(ImDrawList* dl, ImVec2 centre, float size, bool on, ImU32 color, float thickness) {
-    const float h = size * 0.5f;
-    dl->AddRect(ImVec2(centre.x - h, centre.y - h), ImVec2(centre.x + h, centre.y + h), color, 0.0f, 0, thickness);
-    if (!on) return;
-    const ImVec2 points[3] = {ImVec2(centre.x - h * 0.55f, centre.y + h * 0.02f), ImVec2(centre.x - h * 0.12f, centre.y + h * 0.48f),
-                              ImVec2(centre.x + h * 0.6f, centre.y - h * 0.5f)};
-    dl->AddPolyline(points, 3, color, ImDrawFlags_None, thickness * 1.6f);
+// The bottom band with the focused item's help, wrapped; it grows to fit two or three lines.
+void GolfHelpBand(ImDrawList* dl, ImFont* font, ImVec2 o, ImVec2 size, float px, const std::string& help) {
+    const float text_size = 26.0f * px, margin = 40.0f * px, wrap = size.x - margin * 2.0f;
+    const ImVec2 text = font->CalcTextSizeA(text_size, FLT_MAX, wrap, help.c_str());
+    const float band_h = std::max(60.0f * px, text.y + 28.0f * px), top = o.y + size.y - band_h;
+    dl->AddRectFilled(ImVec2(o.x, top), ImVec2(o.x + size.x, o.y + size.y), GolfInk::Band());
+    dl->AddText(font, text_size, ImVec2(o.x + margin, top + (band_h - text.y) * 0.5f), GolfInk::Text(), help.c_str(),
+                nullptr, wrap);
+}
+
+// The panel: dark, see-through, with a light rounded frame.
+void GolfPanel(ImDrawList* dl, ImVec2 a, ImVec2 b, float px) {
+    const float round = 10.0f * px;
+    dl->AddRectFilled(a, b, GolfInk::Panel(), round);
+    dl->AddRect(a, b, GolfInk::Frame(), round, 0, std::max(1.5f, 2.5f * px));
+}
+
+// The focused row's bar: blue, brightest a third of the way across, fading toward both ends.
+void GolfFocusBar(ImDrawList* dl, ImVec2 a, ImVec2 b) {
+    const float mid = a.x + (b.x - a.x) * 0.35f;
+    dl->AddRectFilledMultiColor(a, ImVec2(mid, b.y), GolfInk::BarEdge(), GolfInk::BarMid(), GolfInk::BarMid(),
+                                GolfInk::BarEdge());
+    dl->AddRectFilledMultiColor(ImVec2(mid, a.y), b, GolfInk::BarMid(), GolfInk::BarEdge(0x50), GolfInk::BarEdge(0x50),
+                                GolfInk::BarMid());
 }
 
 // One bar of a page: a setting's name, and its value (with arrows around it when focused) or a
@@ -570,9 +617,17 @@ struct PageRow {
     int check = -1;
 };
 
-// A page drawn like the game's own menus over the dimmed game: a framed panel with the title on a
-// tab above it, one teal bar per row (the focused one bright), the focused row's help below, and
-// the buttons on tabs at the bottom. Display Settings and Cheats.
+// A tick box at the right end of a row: a frame, filled with a check mark when `on`.
+void CheckBox(ImDrawList* dl, ImVec2 centre, float size, bool on, ImU32 color, float thickness) {
+    const float h = size * 0.5f;
+    dl->AddRect(ImVec2(centre.x - h, centre.y - h), ImVec2(centre.x + h, centre.y + h), color, 3.0f, 0, thickness);
+    if (!on) return;
+    const ImVec2 points[3] = {ImVec2(centre.x - h * 0.55f, centre.y + h * 0.02f), ImVec2(centre.x - h * 0.12f, centre.y + h * 0.48f),
+                              ImVec2(centre.x + h * 0.6f, centre.y - h * 0.5f)};
+    dl->AddPolyline(points, 3, color, ImDrawFlags_None, thickness * 1.6f);
+}
+
+// A page in the game's menu look over the dimmed game. Display Settings and Cheats.
 void PageBox(const char* id, const char* title, const std::vector<PageRow>& rows, int focused,
              const std::string& help, const char* const (&hints)[3]) {
     const ImGuiViewport* viewport = ImGui::GetMainViewport();
@@ -586,80 +641,46 @@ void PageBox(const char* id, const char* title, const std::vector<PageRow>& rows
     ImDrawList* dl = ImGui::GetWindowDrawList();
     ImFont* font = exit_font;
     const ImVec2 o = viewport->Pos, size = viewport->Size;
-    const float right = o.x + size.x, bottom = o.y + size.y, line = std::max(1.0f, 2.0f * px);
-    dl->AddRectFilled(o, ImVec2(right, bottom), PageInk::Shade);
+    dl->AddRectFilled(o, ImVec2(o.x + size.x, o.y + size.y), GolfInk::Shade());
+    const float header = GolfHeader(dl, font, o, size, px, title, hints);
 
-    // The panel, centred, and the title tab on its top edge.
+    // The panel, centred between the bands.
     const int count = int(rows.size());
-    const float row_h = 64.0f * px, gap = 12.0f * px, pad = 30.0f * px;
-    const float panel_w = std::min(size.x - 80.0f * px, 1180.0f * px);
-    const float panel_h = pad * 2.0f + float(count) * row_h + float(count - 1) * gap;
+    const float row_h = 62.0f * px, pad = 18.0f * px;
+    const float panel_w = std::min(size.x - 80.0f * px, 1120.0f * px);
+    const float panel_h = pad * 2.0f + float(count) * row_h;
     const float x0 = o.x + (size.x - panel_w) * 0.5f, x1 = x0 + panel_w;
-    const float top = o.y + std::max(110.0f * px, (size.y - panel_h) * 0.42f);
-    dl->AddRectFilled(ImVec2(x0, top), ImVec2(x1, top + panel_h), PageInk::Panel);
-    dl->AddRect(ImVec2(x0, top), ImVec2(x1, top + panel_h), PageInk::Frame, 0.0f, 0, line);
+    const float room = size.y - (header - o.y) - 110.0f * px;
+    const float top = header + std::max(24.0f * px, (room - panel_h) * 0.45f);
+    GolfPanel(dl, ImVec2(x0, top), ImVec2(x1, top + panel_h), px);
 
-    const float title_size = 46.0f * px, title_w = font->CalcTextSizeA(title_size, FLT_MAX, 0.0f, title).x;
-    const float tab_w = title_w + 120.0f * px, tab_h = 62.0f * px, tab_x = o.x + (size.x - tab_w) * 0.5f;
-    const ImVec2 tab_a(tab_x, top - tab_h + 8.0f * px), tab_b(tab_x + tab_w, top + 8.0f * px);
-    SlantedBar(dl, tab_a, tab_b, 18.0f * px, PageInk::RowLow, PageInk::Panel);
-    SlantedOutline(dl, tab_a, tab_b, 18.0f * px, PageInk::Frame, line);
-    PageText(dl, font, title_size, ImVec2(tab_x + (tab_w - title_w) * 0.5f, tab_a.y + (tab_h - title_size) * 0.5f),
-             title);
-
-    // One bar per row: its name on the left, its value or tick box on the right.
-    const float label = 32.0f * px, value = 30.0f * px, slant = 14.0f * px;
-    const float bx0 = x0 + pad, bx1 = x1 - pad;
+    const float text_size = 32.0f * px, inset = 14.0f * px, label_x = x0 + 74.0f * px, value_r = x1 - 64.0f * px;
     float y = top + pad;
     for (int row = 0; row < count; ++row) {
         const PageRow& text = rows[size_t(row)];
         const bool focus = row == focused;
-        const ImVec2 a(bx0, y), b(bx1, y + row_h);
-        const float mid = y + row_h * 0.5f;
-        const bool off = !text.enabled;
-        SlantedBar(dl, a, b, slant, focus ? PageInk::Focus : off ? PageInk::RowOff : PageInk::Row,
-                   focus ? PageInk::FocusLow : off ? PageInk::RowOffLow : PageInk::RowLow);
-        SlantedOutline(dl, a, b, slant, focus ? PageInk::Frame : PageInk::FrameDim, focus ? line * 1.5f : line);
-        const ImU32 ink = focus ? PageInk::Text : off ? PageInk::TextOff : PageInk::TextDim;
-        PageText(dl, font, label, ImVec2(bx0 + slant + 28.0f * px, mid - label * 0.56f), text.label, ink);
+        const float mid = y + row_h * 0.5f, ty = mid - text_size * 0.55f;
+        if (row > 0) dl->AddLine(ImVec2(x0 + inset, y), ImVec2(x1 - inset, y), GolfInk::Rule(), std::max(1.0f, px));
+        if (focus) {
+            GolfFocusBar(dl, ImVec2(x0 + inset * 0.5f, y + 4.0f * px), ImVec2(x1 - inset * 0.5f, y + row_h - 4.0f * px));
+            Pointer(dl, ImVec2(x0 + 40.0f * px, mid), 26.0f * px, 1, GolfInk::Text());
+        }
+        const ImU32 ink = text.enabled ? GolfInk::Text() : GolfInk::TextOff();
+        dl->AddText(font, text_size, ImVec2(label_x, ty), ink, text.label);
         if (text.check >= 0) {
-            CheckBox(dl, ImVec2(bx1 - slant - 50.0f * px, mid), row_h * 0.46f, text.check != 0, ink,
-                     focus ? 3.0f * px : 2.0f * px);
-            y += row_h + gap;
-            continue;
+            CheckBox(dl, ImVec2(value_r - 14.0f * px, mid), row_h * 0.46f, text.check != 0, ink, 2.5f * px);
+        } else {
+            const float vw = font->CalcTextSizeA(text_size, FLT_MAX, 0.0f, text.value.c_str()).x;
+            const float value_x = value_r - vw;
+            dl->AddText(font, text_size, ImVec2(value_x, ty), ink, text.value.c_str());
+            if (focus && text.changes) {
+                Pointer(dl, ImVec2(value_x - 26.0f * px, mid), 22.0f * px, -1, GolfInk::Text());
+                Pointer(dl, ImVec2(value_r + 26.0f * px, mid), 22.0f * px, 1, GolfInk::Text());
+            }
         }
-        const float vw = font->CalcTextSizeA(value, FLT_MAX, 0.0f, text.value.c_str()).x;
-        const float value_x = bx1 - slant - 70.0f * px - vw;
-        PageText(dl, font, value, ImVec2(value_x, mid - value * 0.56f), text.value.c_str(), ink);
-        if (focus && text.changes) {
-            const float chevron = row_h * 0.36f, stroke = 3.0f * px;
-            Chevron(dl, ImVec2(value_x - 26.0f * px, mid), chevron, -1, PageInk::Text, stroke);
-            Chevron(dl, ImVec2(bx1 - slant - 40.0f * px, mid), chevron, 1, PageInk::Text, stroke);
-        }
-        y += row_h + gap;
+        y += row_h;
     }
-
-    // The focused setting's help under the panel, wrapped to its width.
-    const float help_size = 26.0f * px;
-    dl->AddText(font, help_size, ImVec2(x0 + 8.0f * px, top + panel_h + 22.0f * px), PageInk::Help, help.c_str(), nullptr,
-                panel_w - 16.0f * px);
-
-    // The buttons, each on a tab, along the bottom.
-    const float hint_size = 24.0f * px, hint_h = 46.0f * px, hint_gap = 24.0f * px;
-    float hint_w[3], total = 0.0f;
-    for (int i = 0; i < 3; ++i) {
-        hint_w[i] = font->CalcTextSizeA(hint_size, FLT_MAX, 0.0f, hints[i]).x + 70.0f * px;
-        total += hint_w[i] + (i ? hint_gap : 0.0f);
-    }
-    float hx = o.x + (size.x - total) * 0.5f;
-    const float hy = bottom - hint_h - 30.0f * px;
-    for (int i = 0; i < 3; ++i) {
-        const ImVec2 a(hx, hy), b(hx + hint_w[i], hy + hint_h);
-        SlantedBar(dl, a, b, 12.0f * px, PageInk::Row, PageInk::RowLow);
-        SlantedOutline(dl, a, b, 12.0f * px, PageInk::FrameDim, line);
-        PageText(dl, font, hint_size, ImVec2(hx + 35.0f * px, hy + (hint_h - hint_size) * 0.5f), hints[i]);
-        hx += hint_w[i] + hint_gap;
-    }
+    GolfHelpBand(dl, font, o, size, px, help);
     ImGui::End();
     ImGui::PopStyleVar();
 }
@@ -675,7 +696,7 @@ void DisplaySettingsBox() {
     }
     static const char* const hints[3] = {"Up/Down  Choose", "Left/Right, Cross (A)  Change",
                                          "Circle (B), Select, Esc  Back"};
-    PageBox("##display_settings", "DISPLAY SETTINGS", rows, display_row, help, hints);
+    PageBox("##display_settings", "Display Settings", rows, display_row, help, hints);
 }
 
 // The Cheats page: one tick box per cheat (ResogunSettings::Cheat order).
@@ -702,11 +723,11 @@ void CheatsBox() {
     const std::string help = kCheats[cheat_row].help;
     static const char* const hints[3] = {"Up/Down  Choose", "Cross (A), Left/Right  Switch",
                                          "Circle (B), L3+R3, Esc  Back"};
-    PageBox("##cheats", "CHEATS", rows, cheat_row, help, hints);
+    PageBox("##cheats", "Cheats", rows, cheat_row, help, hints);
 }
 
-// The exit prompt, drawn like the Display Settings panel: the question on a tab over a small
-// framed panel holding No and Yes, the focused one bright, and the buttons on tabs at the bottom.
+// The exit prompt in the same look: a small panel holding the question, No and Yes, the
+// focused answer on the blue bar.
 void ExitPromptBox() {
     const ImGuiViewport* viewport = ImGui::GetMainViewport();
     const float px = viewport->Size.y / 1080.0f;
@@ -719,56 +740,36 @@ void ExitPromptBox() {
     ImDrawList* dl = ImGui::GetWindowDrawList();
     ImFont* font = exit_font;
     const ImVec2 o = viewport->Pos, size = viewport->Size;
-    const float right = o.x + size.x, bottom = o.y + size.y, line = std::max(1.0f, 2.0f * px);
-    dl->AddRectFilled(o, ImVec2(right, bottom), PageInk::Shade);
+    dl->AddRectFilled(o, ImVec2(o.x + size.x, o.y + size.y), GolfInk::Shade());
+    static const char* const hints[3] = {"Up/Down  Choose", "Cross (A), Enter  Confirm", "Circle (B), Esc  Cancel"};
+    GolfHeader(dl, font, o, size, px, "Quit", hints);
 
-    const float row_h = 64.0f * px, gap = 12.0f * px, pad = 30.0f * px;
-    const float panel_w = std::min(size.x - 80.0f * px, 640.0f * px), panel_h = pad * 2.0f + row_h * 2.0f + gap;
+    const char* question = "Quit Everybody's Golf?";
+    const float q_size = 34.0f * px, text_size = 32.0f * px, row_h = 62.0f * px, pad = 18.0f * px;
+    const float panel_w = std::min(size.x - 80.0f * px, 620.0f * px);
+    const float panel_h = pad * 3.0f + q_size + row_h * 2.0f;
     const float x0 = o.x + (size.x - panel_w) * 0.5f, x1 = x0 + panel_w;
     const float top = o.y + (size.y - panel_h) * 0.5f;
-    dl->AddRectFilled(ImVec2(x0, top), ImVec2(x1, top + panel_h), PageInk::Panel);
-    dl->AddRect(ImVec2(x0, top), ImVec2(x1, top + panel_h), PageInk::Frame, 0.0f, 0, line);
-
-    const char* title = "EXIT RESOGUN?";
-    const float title_size = 46.0f * px, title_w = font->CalcTextSizeA(title_size, FLT_MAX, 0.0f, title).x;
-    const float tab_w = title_w + 120.0f * px, tab_h = 62.0f * px, tab_x = o.x + (size.x - tab_w) * 0.5f;
-    const ImVec2 tab_a(tab_x, top - tab_h + 8.0f * px), tab_b(tab_x + tab_w, top + 8.0f * px);
-    SlantedBar(dl, tab_a, tab_b, 18.0f * px, PageInk::RowLow, PageInk::Panel);
-    SlantedOutline(dl, tab_a, tab_b, 18.0f * px, PageInk::Frame, line);
-    PageText(dl, font, title_size, ImVec2(tab_x + (tab_w - title_w) * 0.5f, tab_a.y + (tab_h - title_size) * 0.5f),
-             title);
+    GolfPanel(dl, ImVec2(x0, top), ImVec2(x1, top + panel_h), px);
+    const float qw = font->CalcTextSizeA(q_size, FLT_MAX, 0.0f, question).x;
+    dl->AddText(font, q_size, ImVec2(x0 + (panel_w - qw) * 0.5f, top + pad), GolfInk::Text(), question);
 
     const char* const answers[2] = {"No", "Yes"};
-    const float text_size = 34.0f * px, slant = 14.0f * px;
-    float y = top + pad;
+    float y = top + pad * 2.0f + q_size;
     for (int i = 0; i < 2; ++i) {
         const bool focus = i == exit_focus;
-        const ImVec2 a(x0 + pad, y), b(x1 - pad, y + row_h);
-        SlantedBar(dl, a, b, slant, focus ? PageInk::Focus : PageInk::Row, focus ? PageInk::FocusLow : PageInk::RowLow);
-        SlantedOutline(dl, a, b, slant, focus ? PageInk::Frame : PageInk::FrameDim, focus ? line * 1.5f : line);
+        const float mid = y + row_h * 0.5f;
+        dl->AddLine(ImVec2(x0 + 14.0f * px, y), ImVec2(x1 - 14.0f * px, y), GolfInk::Rule(), std::max(1.0f, px));
+        if (focus) {
+            GolfFocusBar(dl, ImVec2(x0 + 7.0f * px, y + 4.0f * px), ImVec2(x1 - 7.0f * px, y + row_h - 4.0f * px));
+        }
         const float tw = font->CalcTextSizeA(text_size, FLT_MAX, 0.0f, answers[i]).x;
-        PageText(dl, font, text_size, ImVec2((a.x + b.x - tw) * 0.5f, y + (row_h - text_size) * 0.5f), answers[i],
-                 focus ? PageInk::Text : PageInk::TextDim);
-        y += row_h + gap;
+        const float tx = x0 + (panel_w - tw) * 0.5f;
+        if (focus) Pointer(dl, ImVec2(tx - 34.0f * px, mid), 26.0f * px, 1, GolfInk::Text());
+        dl->AddText(font, text_size, ImVec2(tx, mid - text_size * 0.55f), GolfInk::Text(), answers[i]);
+        y += row_h;
     }
-
-    const char* const hints[3] = {"Up/Down  Choose", "Cross (A), Enter  Confirm",
-                                  "Circle (B), Esc  Cancel"};
-    const float hint_size = 24.0f * px, hint_h = 46.0f * px, hint_gap = 24.0f * px;
-    float hint_w[3], total = 0.0f;
-    for (int i = 0; i < 3; ++i) {
-        hint_w[i] = font->CalcTextSizeA(hint_size, FLT_MAX, 0.0f, hints[i]).x + 70.0f * px;
-        total += hint_w[i] + (i ? hint_gap : 0.0f);
-    }
-    float hx = o.x + (size.x - total) * 0.5f;
-    const float hy = bottom - hint_h - 30.0f * px;
-    for (int i = 0; i < 3; ++i) {
-        const ImVec2 a(hx, hy), b(hx + hint_w[i], hy + hint_h);
-        SlantedBar(dl, a, b, 12.0f * px, PageInk::Row, PageInk::RowLow);
-        SlantedOutline(dl, a, b, 12.0f * px, PageInk::FrameDim, line);
-        PageText(dl, font, hint_size, ImVec2(hx + 35.0f * px, hy + (hint_h - hint_size) * 0.5f), hints[i]);
-        hx += hint_w[i] + hint_gap;
-    }
+    GolfHelpBand(dl, font, o, size, px, "Progress since the game's last auto save is lost.");
     ImGui::End();
     ImGui::PopStyleVar();
 }

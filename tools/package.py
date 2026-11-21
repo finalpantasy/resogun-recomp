@@ -433,7 +433,7 @@ def main():
     assets = {
         'settings.example.ini': PORT / 'settings.example.ini',
         'LICENSE.txt': PORT / 'LICENSE',
-        'Orbitron-OFL.txt': PORT / 'gpu/third_party/fonts/orbitron/OFL.txt',
+        'MPLUSRounded1c-OFL.txt': PORT / 'gpu/third_party/fonts/mplusrounded1c/OFL.txt',
         'recomplauncher.json': PORT / 'recomplauncher.json',
     }
     outputs = [*programs, *assets, 'release.txt', 'README.txt']

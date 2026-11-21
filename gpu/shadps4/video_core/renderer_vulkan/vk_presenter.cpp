@@ -587,6 +587,9 @@ static vk::Format GetFrameViewFormat(const Libraries::VideoOut::PixelFormat form
     return {};
 }
 
+// resogun: index of a frame dump whose presented image (with the overlay) is still to be written.
+static std::atomic<int> overlay_dump_pending{-1};
+
 // resogun: raw copy of an image for RESOGUN_FRAME_DUMP_TRIGGER, written once the GPU is done.
 static void DumpRaw(const Instance& instance, Scheduler& scheduler, vk::CommandBuffer cmdbuf,
                     vk::Image image, vk::ImageLayout layout, u32 w, u32 h, const char* name,
@@ -647,6 +650,13 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
     if (frame_dump) {
         std::printf("Frame dump %d: display buffer %#llx\n", frame_dump_index,
                     static_cast<unsigned long long>(cpu_address));
+        // resogun: RESOGUN_DUMP_OVERLAY=1 also writes the next presented image with the overlay
+        // drawn over it (overlay_NNN), for checking the menus.
+        static const bool dump_overlay = [] {
+            const char* v = std::getenv("RESOGUN_DUMP_OVERLAY");
+            return v && *v == '1';
+        }();
+        if (dump_overlay) overlay_dump_pending = frame_dump_index;
     }
     auto desc = VideoCore::TextureCache::ImageDesc{attribute, cpu_address};
     const VideoCore::ImageId image_id = texture_cache.FindImage(desc);
@@ -1031,17 +1041,38 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
                                vk::DependencyFlagBits::eByRegion, {}, {}, post_barriers);
         if (overlay) {
             ResogunOverlay::Render(cmdbuf, swapchain.ImageView(), extent);
+            const int overlay_dump = overlay_dump_pending.exchange(-1);
+            if (overlay_dump >= 0) {
+                const vk::ImageMemoryBarrier to_read{
+                    .srcAccessMask = vk::AccessFlagBits::eColorAttachmentWrite,
+                    .dstAccessMask = vk::AccessFlagBits::eTransferRead,
+                    .oldLayout = vk::ImageLayout::eColorAttachmentOptimal,
+                    .newLayout = vk::ImageLayout::eTransferSrcOptimal,
+                    .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                    .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                    .image = swapchain_image,
+                    .subresourceRange = color_range,
+                };
+                cmdbuf.pipelineBarrier(vk::PipelineStageFlagBits::eColorAttachmentOutput,
+                                       vk::PipelineStageFlagBits::eTransfer, vk::DependencyFlagBits::eByRegion,
+                                       {}, {}, to_read);
+                DumpRaw(instance, scheduler, cmdbuf, swapchain_image, vk::ImageLayout::eTransferSrcOptimal,
+                        extent.width, extent.height, "overlay", overlay_dump);
+            }
             const vk::ImageMemoryBarrier to_present{
-                .srcAccessMask = vk::AccessFlagBits::eColorAttachmentWrite,
+                .srcAccessMask = overlay_dump >= 0 ? vk::AccessFlagBits::eTransferRead
+                                                   : vk::AccessFlagBits::eColorAttachmentWrite,
                 .dstAccessMask = vk::AccessFlagBits::eNone,
-                .oldLayout = vk::ImageLayout::eColorAttachmentOptimal,
+                .oldLayout = overlay_dump >= 0 ? vk::ImageLayout::eTransferSrcOptimal
+                                               : vk::ImageLayout::eColorAttachmentOptimal,
                 .newLayout = vk::ImageLayout::ePresentSrcKHR,
                 .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
                 .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
                 .image = swapchain_image,
                 .subresourceRange = color_range,
             };
-            cmdbuf.pipelineBarrier(vk::PipelineStageFlagBits::eColorAttachmentOutput,
+            cmdbuf.pipelineBarrier(overlay_dump >= 0 ? vk::PipelineStageFlagBits::eTransfer
+                                                     : vk::PipelineStageFlagBits::eColorAttachmentOutput,
                                    vk::PipelineStageFlagBits::eBottomOfPipe,
                                    vk::DependencyFlagBits::eByRegion, {}, {}, to_present);
         }
