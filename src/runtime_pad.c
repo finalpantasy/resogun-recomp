@@ -698,8 +698,10 @@ static int cfg_int(const char *key, int def, int lo, int hi, FILE *f) {
     int x=atoi(v); return x<lo ? lo : x>hi ? hi : x;
 }
 static void pad_config_load(void) {
-    const char *path=getenv("RESOGUN_CONFIG");
+    /* The save folder's settings.ini, else the setup's default next to the exe (resogun_settings.cpp). */
+    const char *path=getenv("RESOGUN_CONFIG"), *fallback=getenv("RESOGUN_CONFIG_DEFAULT");
     FILE *f=fopen(path && *path ? path : "settings.ini","r");
+    if (!f && fallback && *fallback) f=fopen(fallback,"r");
     cfg_deadzone=cfg_int("pad_deadzone",cfg_deadzone,0,50,f);
     cfg_outer=cfg_int("pad_outer_zone",cfg_outer,0,40,f);
     cfg_trigger=cfg_int("pad_trigger_threshold",cfg_trigger,1,254,f);
