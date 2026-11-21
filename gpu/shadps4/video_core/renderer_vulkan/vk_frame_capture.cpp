@@ -197,7 +197,16 @@ void FrameCapture::OnFlip(VAddr presented_address) {
     bool arm = requested.exchange(false, std::memory_order_acq_rel);
     if (!arm && trigger && std::filesystem::exists(trigger)) {
         std::error_code ec;
+        // A number in the trigger file records that many consecutive frames (at most 1024).
+        u32 count = 1;
+        if (FILE* f = std::fopen(trigger, "r")) {
+            if (std::fscanf(f, "%u", &count) != 1 || count < 1) {
+                count = 1;
+            }
+            std::fclose(f);
+        }
         std::filesystem::remove(trigger, ec);
+        burst_left.store(std::min(count, 1024u) - 1, std::memory_order_relaxed);
         arm = true;
     }
     if (arm) {
@@ -291,10 +300,16 @@ void FrameCapture::BeginPass(const VideoCore::ImageInfo* const* colors, u32 num_
         if (state.load(std::memory_order_relaxed) == Recording) {
             Write(last_presented.load(std::memory_order_relaxed));
             entries.clear();
-            pending_sampled.clear();
-            pending_buffers.clear();
-            state.store(Idle, std::memory_order_release);
-            return;
+            if (burst_left.load(std::memory_order_relaxed) == 0) {
+                pending_sampled.clear();
+                pending_buffers.clear();
+                state.store(Idle, std::memory_order_release);
+                return;
+            }
+            // Burst: this display pass starts the next recorded frame.
+            burst_left.fetch_sub(1, std::memory_order_relaxed);
+            dropped_draws = 0;
+            pass_open = false;
         }
         // The pass that starts the recording bound its textures and buffers before it began
         // (BindResources runs before BeginRendering), while the capture was only armed: they
