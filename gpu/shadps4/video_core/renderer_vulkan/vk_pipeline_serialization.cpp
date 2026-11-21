@@ -836,13 +836,22 @@ void ReportPipelineBinaryCache() {
                 static_cast<unsigned long long>(binary_rejected_from[2].load()));
 }
 
+thread_local bool g_resogun_background_compile = false;
+
 vk::ResultValue<vk::UniquePipeline> CreateCachedGraphicsPipeline(
     vk::Device device, vk::PipelineCache cache, const vk::GraphicsPipelineCreateInfo& info,
     const GraphicsPipelineKey& key, const vk::PipelineBinaryKeyKHR& global_key,
-    const std::filesystem::path& directory) {
+    const std::filesystem::path& directory, bool restore_only) {
     using namespace PipelineBinaryCache;
     const auto& dispatch = VULKAN_HPP_DEFAULT_DISPATCHER;
     const bool enabled = global_key.keySize && EmulatorSettings.IsPipelineCacheEnabled();
+    const auto compile_required = [] {
+        return vk::ResultValue<vk::UniquePipeline>{vk::Result::ePipelineCompileRequired,
+                                                   vk::UniquePipeline{}};
+    };
+    if (restore_only && !enabled) {
+        return compile_required();
+    }
     const auto create = [&](vk::PipelineCache used_cache, const auto& used_info, bool restored) {
         const auto started = std::chrono::steady_clock::now();
         auto result = device.createGraphicsPipelineUnique(used_cache, used_info);
@@ -850,7 +859,9 @@ vk::ResultValue<vk::UniquePipeline> CreateCachedGraphicsPipeline(
                                 std::chrono::steady_clock::now() - started)
                                 .count());
         extern std::atomic<u64> g_resogun_pipeline_driver_ns;
-        g_resogun_pipeline_driver_ns += ns;
+        if (!g_resogun_background_compile) {
+            g_resogun_pipeline_driver_ns += ns;
+        }
         if (enabled) {
             (restored ? binary_restore_ns : binary_compile_ns) += ns;
             ++(restored ? binary_restore_calls : binary_compile_calls);
@@ -881,6 +892,9 @@ vk::ResultValue<vk::UniquePipeline> CreateCachedGraphicsPipeline(
     binary_key_ns += ElapsedNs(key_started);
     if (key_result != vk::Result::eSuccess ||
         !ValidKey(global) || !ValidKey(BinaryKey(pipeline_key))) {
+        if (restore_only) {
+            return compile_required();
+        }
         ++binary_errors;
         ++binary_misses;
         return create(cache, info, false);
@@ -1023,6 +1037,9 @@ vk::ResultValue<vk::UniquePipeline> CreateCachedGraphicsPipeline(
     } catch (const std::exception&) {
         ++binary_errors;
         destroy();
+    }
+    if (restore_only) {
+        return compile_required();
     }
     ++binary_misses;
     flags.flags = vk::PipelineCreateFlags2{static_cast<VkPipelineCreateFlags>(info.flags)} |

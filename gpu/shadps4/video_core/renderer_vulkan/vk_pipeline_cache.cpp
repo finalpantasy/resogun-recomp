@@ -436,9 +436,15 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
         LOG_INFO(Render_Vulkan, "resogun: async graphics compilation ready ({} capture, {} compile workers)",
                  capture_count, count);
     }
+    if (instance.IsGraphicsPipelineLibraryEnabled()) {
+        pipeline_libraries = std::make_unique<GraphicsPipelineLibraries>(instance);
+    }
 }
 
 PipelineCache::~PipelineCache() {
+    if (pipeline_libraries) {
+        pipeline_libraries->StopOptimizer();
+    }
     StopWarmUp();
     StopDiskPrefetch();
     StopBinaryConversion();
@@ -865,6 +871,7 @@ void PipelineCache::ReportCompilerStats() {
                         shaders ? emit_ns / 1e6 / shaders : 0.0,
                         shaders ? module_ns / 1e6 / shaders : 0.0);
         }
+        GraphicsPipelineLibraries::Report();
         std::printf("Compiler stats: capture queue %zu, compile queue %zu; queue waits: capture "
                     "%.1f ms, compile %.1f ms; pools retained %zu, reused %u; pipelines built "
                     "behind their draws %llu\n",

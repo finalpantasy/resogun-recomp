@@ -14,6 +14,8 @@
 #include "video_core/amdgpu/regs_primitive.h"
 #include <atomic>
 #include <functional>
+#include <memory>
+#include <vector>
 #include "video_core/renderer_vulkan/vk_async_compiler.h"
 #include "video_core/renderer_vulkan/vk_pipeline_common.h"
 #include "resogun_toggles.h"
@@ -72,6 +74,32 @@ struct GraphicsPipelineKey {
 
     void Serialize(Serialization::Archive& ar) const;
     bool Deserialize(Serialization::Archive& ar);
+};
+
+struct PipelineCreateState;
+struct OptimizedPipeline;
+
+/// resogun: VK_EXT_graphics_pipeline_library (RESOGUN_PIPELINE_LIBRARY=1). A first-visit graphics
+/// pipeline is fast-linked from four cached parts (vertex input, pre-rasterization, fragment
+/// shader, fragment output), each keyed by only the Vulkan state it takes; the optimized
+/// monolithic pipeline is then built on a low-priority thread and replaces the linked one
+/// (GraphicsPipeline::Handle). The PipelineCache owns it; null when libraries are off.
+class GraphicsPipelineLibraries {
+public:
+    explicit GraphicsPipelineLibraries(const Instance& instance);
+    ~GraphicsPipelineLibraries();
+
+    /// The active instance, or null when pipeline libraries are off.
+    static GraphicsPipelineLibraries* Get() noexcept;
+
+    /// Drops queued optimizations and joins the optimizer threads (before pipelines go).
+    void StopOptimizer();
+
+    /// Prints the part, link and optimization counts and times since the last call.
+    static void Report();
+
+    struct Impl;
+    std::unique_ptr<Impl> impl;
 };
 
 class GraphicsPipeline : public Pipeline {
@@ -147,6 +175,11 @@ public:
         return *square_pipeline;
     }
 
+    /// resogun: the optimized pipeline once it replaced a fast-linked one, else the pipeline.
+    /// Hides Pipeline::Handle for graphics pipelines; the linked pipeline stays alive, since
+    /// recorded command buffers may still use it.
+    vk::Pipeline Handle() const noexcept;
+
     /// Gets the attributes and bindings for vertex inputs.
     template <typename Attribute, typename Binding>
     void GetVertexInputs(VertexInputs<Attribute>& attributes, VertexInputs<Binding>& bindings,
@@ -156,9 +189,22 @@ public:
 
 private:
     void BuildDescSetLayout(bool preloading);
+    /// resogun: fills `state` with the monolithic create info CreateHandles used to build inline.
+    void FillCreateState(PipelineCreateState& state,
+                         std::span<const Shader::Info* const, MaxShaderStages> infos,
+                         std::span<const Shader::RuntimeInfo, MaxShaderStages> runtime_infos,
+                         std::span<const vk::ShaderModule> modules, SerializationSupport& sdata,
+                         bool preloading);
+    /// resogun: the pipeline-library path of CreateHandles; false to build it the usual way.
+    bool CreateFromLibraries(GraphicsPipelineLibraries& libraries, vk::PipelineCache pipeline_cache,
+                             std::shared_ptr<PipelineCreateState> state);
 
 private:
     GraphicsPipelineKey key;
+    /// resogun: the descriptor set layout's bindings and flags (pipeline library layouts).
+    std::vector<vk::DescriptorSetLayoutBinding> layout_bindings;
+    vk::DescriptorSetLayoutCreateFlags layout_flags;
+    std::shared_ptr<OptimizedPipeline> optimized;
     std::optional<const Shader::Gcn::FetchShaderData> fetch_shader{};
     vk::UniquePipeline square_pipeline;
     std::atomic<bool> handles_ready{true};

@@ -191,6 +191,12 @@ public:
         return dynamic_state_3 && dynamic_state_3_features.extendedDynamicState3ColorWriteMask;
     }
 
+    /// resogun: whether graphics pipelines are built from fast-linked pipeline libraries
+    /// (RESOGUN_PIPELINE_LIBRARY=1 and VK_EXT_graphics_pipeline_library with fast linking).
+    bool IsGraphicsPipelineLibraryEnabled() const {
+        return graphics_pipeline_library;
+    }
+
     /// Returns true when VK_EXT_vertex_input_dynamic_state is supported.
     bool IsVertexInputDynamicState() const {
         return vertex_input_dynamic_state;
@@ -576,6 +582,8 @@ private:
     bool workgroup_memory_explicit_layout{};
     bool maintenance_5{};
     bool pipeline_binaries{};
+    bool graphics_pipeline_library{};
+    bool pipeline_library_fast_linking{};
     vk::PipelineBinaryKeyKHR pipeline_binary_global_key{};
     bool maintenance_8{};
     bool attachment_feedback_loop{};
