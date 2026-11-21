@@ -28,8 +28,8 @@ namespace setup {
 namespace {
 // For a dump that is not the verified build (scripts/prepare.py VERIFIED_BUILDS and VERIFIED_TITLE).
 constexpr wchar_t kUntested[] =
-    L"These game files are untested: this release was tested with the unmodified Resogun CUSA00038 with "
-    L"update 1.10 (eboot.bin and sce_sys/param.sfo). Other versions and patched files, such as DLC "
+    L"These game files are untested: this release was tested with the unmodified Everybody's Golf CUSA04687 with "
+    L"update 1.17 (eboot.bin and sce_sys/param.sfo). Other versions and patched files, such as DLC "
     L"unlockers, might cause bugs or crashes.\n\nAll add-ons already show as owned without an unlocker.";
 
 // What run.py reads from the dump to prepare the image (IMAGE_INPUTS), and the title's param.sfo.
@@ -640,7 +640,7 @@ fs::path install(const Options& opt, const Log& log) {
     std::error_code ec;
     std::vector<std::wstring> missing = missing_game_files(game);
     if (!missing.empty())
-        fail(L"This folder isn't a decrypted Resogun dump:\n" + text(game) +
+        fail(L"This folder isn't a decrypted Everybody's Golf dump:\n" + text(game) +
              L"\n\nMissing: " + join(missing));
     for (const fs::path& f : {exe, prepare / L"run.py", root / L"release.txt"})
         if (!fs::is_regular_file(f, ec))
@@ -764,7 +764,7 @@ void create_shortcut(const fs::path& target, const fs::path& lnk) {
         link->SetPath(target.c_str());
         link->SetWorkingDirectory(target.parent_path().c_str());
         link->SetIconLocation(target.c_str(), 0);
-        link->SetDescription(L"Resogun");
+        link->SetDescription(L"Everybody's Golf");
         hr = link->QueryInterface(IID_PPV_ARGS(&file));
     }
     if (SUCCEEDED(hr))
@@ -800,7 +800,7 @@ void create_shortcut(const fs::path& target, const fs::path& lnk) {
     fs::path folder = target.parent_path();
     std::string entry = "[Desktop Entry]\n"
                         "Type=Application\n"
-                        "Name=Resogun\n"
+                        "Name=Everybody's Golf\n"
                         "Exec=" + desktop_quote(target.native()) + "\n"
                         "Path=" + folder.native() + "\n"
                         "Terminal=false\n"

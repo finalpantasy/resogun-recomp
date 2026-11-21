@@ -26,6 +26,8 @@
 #ifndef GOLF_LAUNCHER_VERSION
 #define GOLF_LAUNCHER_VERSION "development"
 #endif
+/* tools/package.py --version finds this to check the build is the release it names. */
+__attribute__((used)) const char golf_version_marker[] = "GOLF_VERSION=" GOLF_LAUNCHER_VERSION;
 
 static char exe_dir[PATH_CHARS], data_dir[PATH_CHARS], save[PATH_CHARS], log_path[PATH_CHARS];
 static char game[PATH_CHARS], dlc[PATH_CHARS], boot[PATH_CHARS], profile[PATH_CHARS], isa[PATH_CHARS];
@@ -328,11 +330,13 @@ static int quiet_exit(unsigned long code) {
 typedef struct { const char *flag, *suffix; int path; } Setting;
 static const Setting settings[] = {
     {"--amd-paths-off", "AMD_PATHS_OFF", 0},
+    {"--anisotropy", "ANISOTROPY", 0},
     {"--aspect-ratio", "ASPECT_RATIO", 0},
     {"--async-fences", "ASYNC_FENCES", 0},
     {"--audio-channels", "AUDIO_CHANNELS", 0},
     {"--audio-dump", "AUDIO_DUMP", 1},
     {"--audio-stats", "AUDIO_STATS", 0},
+    {"--audio-volume", "AUDIO_VOLUME", 0},
     {"--audio", "AUDIO", 0},
     {"--background-warmup", "BACKGROUND_WARMUP", 0},
     {"--binary-internal-cache", "BINARY_INTERNAL_CACHE", 0},
@@ -368,6 +372,7 @@ static const Setting settings[] = {
     {"--file-trace-match", "FILE_TRACE_MATCH", 0},
     {"--file-trace", "FILE_TRACE", 0},
     {"--frame-dump-trigger", "FRAME_DUMP_TRIGGER", 1},
+    {"--frame-generation", "FRAME_GENERATION", 0},
     {"--frame-rate-priority", "FRAME_RATE_PRIORITY", 0},
     {"--frame-rate", "FRAME_RATE", 0},
     {"--frame-stats", "FRAME_STATS", 0},
@@ -427,6 +432,7 @@ static const Setting settings[] = {
     {"--shader-prefetch", "SHADER_PREFETCH", 0},
     {"--shader-prefetch-mb", "SHADER_PREFETCH_MB", 0},
     {"--shader-store-mb", "SHADER_STORE_MB", 0},
+    {"--sharpening-strength", "SHARPENING_STRENGTH", 0},
     {"--sharpening", "SHARPENING", 0},
     {"--skip-intro", "SKIP_INTRO", 0},
     {"--skip-pipelines", "SKIP_PIPELINES", 0},
@@ -447,6 +453,7 @@ static const Setting settings[] = {
     {"--texture-dump", "TEXTURE_DUMP", 1},
     {"--texture-pack", "TEXTURE_PACK", 1},
     {"--texture-helper", "TEXTURE_HELPER", 0},
+    {"--texture-lod-bias", "TEXTURE_LOD_BIAS", 0},
     {"--thread-front", "THREAD_FRONT", 0},
     {"--throw-trace", "THROW_TRACE", 0},
     {"--title-back-exits", "TITLE_BACK_EXITS", 0},
@@ -512,12 +519,9 @@ static void usage(void) {
            "  --no-dlc             Ignore the extra add-on directory\n"
            "  --entitlements MODE  Built-in or installed-folder mode: builtin | original\n"
            "  --np-mode MODE      Synthetic local account or signed out: local | offline\n"
-           "  --online-id NAME    Local account ID (1-16 ASCII letters, digits, _ or -)
-"
-           "  --discovery-port N  Title server port (0 disables replay)
-"
-           "  --server-host HOST  Title server name or IPv4 address (default 127.0.0.1)
-"
+           "  --online-id NAME    Local account ID (1-16 ASCII letters, digits, _ or -)\n"
+           "  --discovery-port N  Title server port (0 disables replay)\n"
+           "  --server-host HOST  Title server name or IPv4 address (default 127.0.0.1)\n"
            "  --local-auth N      Synthetic login fixture, 0 or 1\n"
            "  --local-lobbies N   Local multiplayer replay, 0 or 1\n"
            "  --http-dump DIR     Save local replay request bodies (relative to DATA)\n"

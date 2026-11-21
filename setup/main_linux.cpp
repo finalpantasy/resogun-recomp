@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // resogun-setup (Linux): sets up the release folder it sits in (tools/package.py) from the player's
-// Resogun dump, so the game starts from resogun or its menu entry.
+// Everybody's Golf dump, so the game starts from resogun or its menu entry.
 //
 // With no arguments it asks for the game folder (the dump), the save folder, whether to skip the
 // intro logos (settings.ini skip_intro) and an optional extra DLC folder, installs, and offers
@@ -36,7 +36,7 @@ namespace fs = std::filesystem;
 
 namespace {
 
-constexpr char kTitle[] = "Resogun setup";
+constexpr char kTitle[] = "Everybody's Golf setup";
 
 // The old save folder to copy from when the save folder changes and only the old one has saves.
 std::optional<fs::path> saves_to_move(const fs::path& root, const fs::path& save) {
@@ -72,7 +72,7 @@ constexpr wchar_t kUsage[] =
     L"  --shortcut    also write the game's desktop entry into this folder, onto the Desktop or into\n"
     L"                the application menu\n"
     L"Sets up the folder this program is in. With no arguments, asks for the folders; with --update\n"
-    L"alone, prepares the game again from the folders already set (resogun does this).";
+    L"alone, prepares the game again from the folders already set (everybodys-golf does this).";
 
 fs::path shortcut_folder(const std::wstring& where) {
     if (where == L"desktop")
@@ -433,7 +433,7 @@ void draw_update(SDL_Renderer* r, UpdateState& state) {
     // SDL's 8x8 debug font, doubled for the title.
     SDL_SetRenderScale(r, 2, 2);
     SDL_SetRenderDrawColor(r, 0xff, 0xff, 0xff, 255);
-    SDL_RenderDebugText(r, 16, 16, "UPDATING RESOGUN");
+    SDL_RenderDebugText(r, 16, 16, "UPDATING EVERYBODY'S GOLF");
     SDL_SetRenderScale(r, 1, 1);
     SDL_SetRenderDrawColor(r, 0xb0, 0xe4, 0xec, 255);
     if (step.size() > 52)
@@ -558,7 +558,7 @@ int main(int argc, char** argv) {
         return run_cli(args);
     if (isatty(STDIN_FILENO) && isatty(STDOUT_FILENO)) {
         TerminalAsker ask;
-        out(L"Resogun setup (Ctrl+C or Ctrl+D cancels)\n");
+        out(L"Everybody's Golf setup (Ctrl+C or Ctrl+D cancels)\n");
         return run_asking(ask);
     }
     // SIGTERM and SIGINT end the setup as usual (SDL would turn them into a quit event nobody reads).

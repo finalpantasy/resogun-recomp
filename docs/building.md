@@ -134,6 +134,27 @@ python tools/package.py --zip
 The packager checks the runner against the build receipt in `out/`. Rebuild
 after switching revisions or replacing the executable.
 
+A release is built and packaged as its version, which the launcher's update
+check compares with the newest GitHub release:
+
+```bash
+GOLF_VERSION=v0.1.0 bash build.sh
+EG_ROOT="path to the project root" python tools/package.py --zip --version v0.1.0
+```
+
+`--version` refuses programs built as another version and names the files
+`everybodys-golf-pc-v0.1.0-windows-x64.zip` (top folder
+`everybodys-golf-pc-v0.1.0`) and `...zip.sha256` beside it. Publish both: the
+updater downloads the zip, refuses it unless its SHA-256 matches the
+`.sha256` file, unpacks it to `data\update\staging`, then renames each old
+program file to `<name>.old` and moves the new one in, journaling every step in
+`data\update\journal.txt` so a failure (or a crash, at the next start) puts the
+old files back. It never writes `data\` or the command line's `save\`, `game\`,
+`log\`, `settings.ini` and `paths.ini`. A new runtime whose preparation format
+changed prepares the game again on the next Play, since the image key includes
+that format. `GOLF_UPDATE_API_URL` points the check at another release API for
+tests; only then may it use plain http, and only to this PC.
+
 The script stages the runner, native shared libraries, settings template, and
 license. The Windows zip and Linux tar.gz contain one executable and no game
 files. Use `--debug --out dist-debug` to keep debug information and include the

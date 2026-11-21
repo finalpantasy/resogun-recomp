@@ -24,7 +24,9 @@ Linux)
 esac
 jobs=${GOLF_BUILD_JOBS:-8}
 revision=$(git rev-parse --verify HEAD 2>/dev/null || printf unknown)
-version=$(git describe --tags --always 2>/dev/null || printf development)
+# GOLF_VERSION names a release build (tools/package.py --version v0.1.0 checks it): the launcher's
+# update check compares it with the newest release.
+version=${GOLF_VERSION:-$(git describe --tags --always 2>/dev/null || printf development)}
 launcher_cmake=$PWD/packaging/launcher.cmake
 command -v cygpath >/dev/null && launcher_cmake=$(cygpath -m "$launcher_cmake")
 cc=${CC:-clang} cxx=${CXX:-clang++}

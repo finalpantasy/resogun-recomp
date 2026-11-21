@@ -3,7 +3,17 @@
 Each release's section becomes the text of its GitHub release (`tools/release_notes.py`, run by
 `.github/workflows/build.yml` when a `v*` tag is pushed). Add the section before tagging: a tag
 without one does not publish. Keep each entry on one line: GitHub shows a line break in release
-text as a break.
+text as a break. Sections from v0.15 down are from the Resogun runner this port is built on.
+
+## v0.1.0
+
+- First public Windows release of the Everybody's Golf (PS4) PC port. You need your own decrypted dump of CUSA04687 with update 1.17; nothing from the game is included
+- Unpack the zip and start EverybodysGolf.exe: the first run opens Game files, where you pick your dump and press Set up game files
+- A full 9-hole round plays: swing, ball flight, lies, putting, scorecard and the move to the next hole
+- 60 FPS mode in every scene, and render resolution up to 3840 x 2160, both in PS4 Pro mode (the default)
+- Launcher tabs for every option the game reads: Display, Graphics, Sound & controls, Saves, HD textures, Online and Game files
+- The launcher checks GitHub for a newer release at most once a day, checks the download's SHA-256 before it installs it, keeps your data folder, and puts the previous version back if an update fails. Turn the check off on the Play tab
+- Known limits: the first visit to each course compiles shaders for about a minute; some character faces show light graphical faults; online play needs a title server you or a friend run from the Online tab, and each round is still played alone
 
 ## v0.15
 

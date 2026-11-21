@@ -46,12 +46,12 @@ constexpr const wchar_t* kSaveFolders[] = {L"savedata"};
 using Log = std::function<void(const std::wstring&)>;
 
 #ifdef _WIN32
-constexpr wchar_t kGameExe[] = L"resogun.exe";
-constexpr wchar_t kShortcutName[] = L"Resogun.lnk";
+constexpr wchar_t kGameExe[] = L"everybodys-golf.exe";
+constexpr wchar_t kShortcutName[] = L"Everybody's Golf.lnk";
 #else
-constexpr wchar_t kGameExe[] = L"resogun";
+constexpr wchar_t kGameExe[] = L"everybodys-golf";
 // A desktop entry (freedesktop.org), in the application menu or on the Desktop.
-constexpr wchar_t kShortcutName[] = L"resogun.desktop";
+constexpr wchar_t kShortcutName[] = L"everybodys-golf.desktop";
 #endif
 
 // A path as text for the user and paths.ini, and text back as a path. Linux paths are UTF-8 bytes,
@@ -66,7 +66,7 @@ std::string narrow(std::wstring_view s);
 std::filesystem::path exe_folder();
 // The dump folder for a path to it or to its eboot.bin (absolute, normalized).
 std::filesystem::path game_folder(const std::filesystem::path& path);
-// The files a Resogun dump needs that `game` (a path game_folder() accepts) lacks; empty for a dump.
+// The files a Everybody's Golf dump needs that `game` (a path game_folder() accepts) lacks; empty for a dump.
 std::vector<std::wstring> missing_game_files(const std::filesystem::path& game);
 // What `root`/paths.ini names, if it names both folders.
 std::optional<Paths> read_paths(const std::filesystem::path& root);
@@ -97,7 +97,7 @@ bool skip_intro(const std::filesystem::path& root, const std::filesystem::path& 
 bool same_path(const std::filesystem::path& a, const std::filesystem::path& b);
 
 // Sets up opt.root, reporting each step through `log`. Throws Error, also when opt.confirm turns down a
-// dump that is not the unmodified CUSA00038 update 1.10. Returns the game exe's path.
+// dump that is not the unmodified CUSA04687 update 1.17. Returns the game exe's path.
 std::filesystem::path install(const Options& opt, const Log& log);
 
 // Writes a shortcut at `lnk` that starts `target` in its own folder. Throws Error.

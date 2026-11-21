@@ -58,19 +58,37 @@ You need your own decrypted dump of CUSA04687 (Everybody's Golf, PS4) and
 its 1.17 update. Nothing from the game ships with this release.
 
 Windows, with the launcher
-  1. Start EverybodysGolf.exe.
-  2. Game files: pick the base game folder (it holds eboot.bin, sce_module
-     and sce_sys), the update folder if it is separate, and any DLC folders,
-     then press Set up game files. This takes a few seconds.
-  3. Play.
-The Display tab sets window mode, output and render size, frame rate
-priority, SMAA, sharpening and HDR. The HD textures tab collects the game's
-textures while you play and builds an upscaled pack with Real-ESRGAN.
+  1. Unpack the whole zip into a folder of its own, for example
+     C:\\Games\\Everybodys Golf PC, and start EverybodysGolf.exe.
+  2. The launcher opens on Game files the first time. Pick the base game
+     folder (it holds eboot.bin, sce_module and sce_sys), the update folder
+     if it is separate, and any DLC folders, then press Set up game files.
+     This takes a few seconds and only reads your dump.
+  3. Press Play.
+The first visit to each course builds its shaders, which takes about a
+minute of stutter; later visits load from the shader cache.
+
+Options
+  Display: window mode and size, monitor, console mode (PS4 Pro or PS4),
+  render resolution, VSync and 60 FPS mode (needs PS4 Pro mode).
+  Graphics: anti-aliasing, sharpening and its strength, anisotropic
+  filtering, high-res texture detail, HDR and NVIDIA frame generation.
+  Sound & controls: master volume, speakers, stick dead zone and outer
+  zone, trigger press point, rumble, Cross/Circle swap, intro logos and
+  the title screen's Back button. Keyboard keys are set in settings.ini.
+  HD textures collects the game's textures while you play and builds an
+  upscaled pack with Real-ESRGAN. Saves keeps several save folders.
+  In the game, F10 (or Options held for 2 seconds) opens Display Settings.
+
+Updates
+  The launcher asks GitHub for a newer release at most once a day and
+  offers to install it. Turn this off on the Play tab. An update checks the
+  download's SHA-256, replaces only the program files, and keeps data\\
+  (saves, settings, logs and the prepared game) as it is.
+
 The launcher keeps all its files in data\\ next to it: settings and saves in
 data\\save, logs in data\\logs, the prepared game in data\\game. Nothing goes
-to AppData or the registry. The installer adds only a Start menu shortcut
-and an uninstall entry for your user, and needs no admin rights. Without
-the installer, deleting the folder removes everything.
+to AppData or the registry. Deleting the folder removes everything.
 
 Command line
   {exe} --game "path to dump" --prepare-only
@@ -288,8 +306,22 @@ def git(*args):
     return subprocess.run(['git', *args], cwd=PORT, capture_output=True, text=True).stdout.strip()
 
 
-def release_name(product='everybodys-golf-pc'):
-    """Name artifacts after the source revision."""
+VERSION = re.compile(r'v[0-9]+[.][0-9]+[.][0-9]+(-[0-9A-Za-z.]+)?')
+
+
+def check_version(version, programs):
+    """A release build carries its version (build.sh with GOLF_VERSION): the launcher compares it with
+    the newest GitHub release to offer updates, so a zip named v0.1.0 must hold programs that say so."""
+    marker = f'GOLF_VERSION={version}'.encode('ascii') + bytes(1)
+    for exe in programs:
+        if marker not in exe.read_bytes():
+            raise SystemExit(f'{exe.name} was not built as {version}. Run GOLF_VERSION={version} bash build.sh, then package.')
+
+
+def release_name(product='everybodys-golf-pc', version=None):
+    """Name artifacts after the release version, else the source revision."""
+    if version:
+        return f'{product}-{version}'
     described = git('describe', '--tags', '--always', '--dirty') or 'unknown'
     when = git('log', '-1', '--format=%cs') or time.strftime('%Y-%m-%d')
     return f'{product}-{described}-{when}'
@@ -391,7 +423,7 @@ def write_archive(path, entries):
 
 def archive_bundle(out, shipped, release, *, debug, include_appimage):
     destination = PORT / 'out'
-    name = f'{release}-linux' if LINUX else release
+    name = f'{release}-linux' if LINUX else f'{release}-windows-x64'
     extension = '.tar.gz' if LINUX else '.zip'
     # Finish every artifact before replacing any previous archive.
     with tempfile.TemporaryDirectory(prefix='golf-archives-', dir=destination) as temp:
@@ -406,6 +438,10 @@ def archive_bundle(out, shipped, release, *, debug, include_appimage):
         if include_appimage:
             artifacts.append((appimage(out, shipped, release, player), ''))
 
+        # The launcher's updater downloads <zip>.sha256 beside the zip and refuses a zip that differs.
+        checksum = stage / f'{player.name}.sha256'
+        checksum.write_bytes(f'{sha256(player)}  {player.name}\n'.encode('ascii'))
+        artifacts.insert(1, (checksum, ' (checksum)'))
         for item, _ in artifacts:
             check_output(destination / item.name)
         for item, note in artifacts:
@@ -420,7 +456,10 @@ def main():
     p.add_argument('--installer', action='store_true', help='also build the Windows installer (Inno Setup) in the release folder')
     p.add_argument('--zip', action='store_true', help='also write out/<release>.zip (and <release>-symbols.zip)')
     p.add_argument('--debug', action='store_true', help='keep debug info in the exes and ship the diagnose/ kit')
+    p.add_argument('--version', help='release version such as v0.1.0: names the archives and must match the build (GOLF_VERSION)')
     a = p.parse_args()
+    if a.version and not VERSION.fullmatch(a.version):
+        p.error('--version takes vMAJOR.MINOR.PATCH, such as v0.1.0')
     bin_dir = Path(os.environ.get('MSYS2_ROOT', r'C:\msys64')) / 'clang64' / 'bin'
     if a.installer and LINUX:
         p.error('--installer is for the Windows build')
@@ -472,6 +511,8 @@ def main():
         launcher = PORT / 'out' / 'EverybodysGolf.exe'
         if launcher.is_file():
             outputs.append(launcher.name)
+        elif a.version:
+            raise SystemExit('out/EverybodysGolf.exe not built: a release needs the launcher (bash build.sh).')
         else:
             print('note: out/EverybodysGolf.exe not built yet; packaging without the launcher')
         if a.debug:
@@ -482,7 +523,9 @@ def main():
                 outputs.append(name)
     for name in outputs:
         check_output(out / name)
-    release = release_name()
+    if a.version:
+        check_version(a.version, [*programs.values(), *([launcher] if not LINUX else [])])
+    release = release_name(version=a.version)
     shipped = []
 
     def ship(source, name):

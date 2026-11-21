@@ -6,149 +6,833 @@
   "game": {
     "kind": "folder",
     "label": "The merged, decrypted Everybody's Golf dump for PS4 (CUSA04687, update 1.17).",
-    "check": { "file": "eboot.bin" }
+    "check": {
+      "file": "eboot.bin"
+    }
   },
   "prepare": {
-    "program": ["everybodys-golf.exe", "everybodys-golf"],
-    "args": ["--game", "{game}", "--prepare-only"],
+    "program": [
+      "everybodys-golf.exe",
+      "everybodys-golf"
+    ],
+    "args": [
+      "--game",
+      "{game}",
+      "--prepare-only"
+    ],
     "label": "The game, prepared from your dump",
     "timeout": 600
   },
   "start": {
-    "program": ["everybodys-golf.exe", "everybodys-golf"]
+    "program": [
+      "everybodys-golf.exe",
+      "everybodys-golf"
+    ]
   },
   "config": [
     {
       "id": "main",
       "format": "ini",
       "file": [
-        { "path": "{install}/save/settings.ini", "if": "{install}/save/settings.ini" },
-        { "path": "{install}/settings.ini" }
+        {
+          "path": "{install}/save/settings.ini",
+          "if": "{install}/save/settings.ini"
+        },
+        {
+          "path": "{install}/settings.ini"
+        }
       ]
     }
   ],
-  "saves": ["{install}/save/savedata", "{install}/save/trophies.dat", "{install}/save/settings.ini"],
+  "saves": [
+    "{install}/save/savedata",
+    "{install}/save/trophies.dat",
+    "{install}/save/settings.ini"
+  ],
   "folders": {
-    "saves": [{ "path": "{install}/save" }],
-    "logs": [{ "path": "{install}/log" }]
+    "saves": [
+      {
+        "path": "{install}/save"
+      }
+    ],
+    "logs": [
+      {
+        "path": "{install}/log"
+      }
+    ]
   },
-  "looks": { "graphics": "vulkan" },
+  "looks": {
+    "graphics": "vulkan"
+  },
   "settings": [
     {
-      "id": "display_mode", "label": "Window",
-      "help": "Borderless covers the screen at the desktop's resolution. Fullscreen takes the screen over. Windowed uses Window size.",
+      "id": "display_mode",
+      "label": "Window mode",
+      "help": "Borderless covers the screen at the desktop resolution. Fullscreen takes the screen over. Windowed uses Window size.",
       "choices": [
-        { "label": "Borderless", "set": { "display_mode": "borderless" } },
-        { "label": "Fullscreen", "set": { "display_mode": "fullscreen" } },
-        { "label": "Windowed", "set": { "display_mode": "windowed" } }
+        {
+          "label": "Borderless",
+          "set": {
+            "display_mode": "borderless"
+          }
+        },
+        {
+          "label": "Fullscreen",
+          "set": {
+            "display_mode": "fullscreen"
+          }
+        },
+        {
+          "label": "Windowed",
+          "set": {
+            "display_mode": "windowed"
+          }
+        }
       ],
-      "defaults": { "display_mode": "borderless" }
+      "defaults": {
+        "display_mode": "borderless"
+      }
     },
     {
-      "id": "output_resolution", "label": "Window size",
-      "help": "The window's size in Windowed mode. With another aspect ratio it takes that ratio's size nearest in height.",
+      "id": "output_resolution",
+      "label": "Window size",
+      "help": "The window's size in Windowed mode.",
       "choices": [
-        { "label": "1280 x 720", "set": { "output_resolution": "1280x720" } },
-        { "label": "1600 x 900", "set": { "output_resolution": "1600x900" } },
-        { "label": "1920 x 1080", "set": { "output_resolution": "1920x1080" } },
-        { "label": "2560 x 1440", "set": { "output_resolution": "2560x1440" } },
-        { "label": "3840 x 2160", "set": { "output_resolution": "3840x2160" } }
+        {
+          "label": "1280 x 720",
+          "set": {
+            "output_resolution": "1280x720"
+          }
+        },
+        {
+          "label": "1600 x 900",
+          "set": {
+            "output_resolution": "1600x900"
+          }
+        },
+        {
+          "label": "1920 x 1080",
+          "set": {
+            "output_resolution": "1920x1080"
+          }
+        },
+        {
+          "label": "2560 x 1440",
+          "set": {
+            "output_resolution": "2560x1440"
+          }
+        },
+        {
+          "label": "3840 x 2160",
+          "set": {
+            "output_resolution": "3840x2160"
+          }
+        }
       ],
-      "defaults": { "output_resolution": "1920x1080", "display_mode": "borderless" },
-      "when": { "display_mode": "windowed" }
+      "defaults": {
+        "output_resolution": "1920x1080",
+        "display_mode": "borderless"
+      },
+      "when": {
+        "display_mode": "windowed"
+      }
     },
     {
-      "id": "aspect_ratio", "label": "Aspect ratio",
-      "help": "Select the requested output aspect ratio.",
+      "id": "monitor",
+      "label": "Monitor",
+      "help": "The display the game window opens on.",
       "choices": [
-        { "label": "16:9", "set": { "aspect_ratio": "16:9" } },
-        { "label": "16:10", "set": { "aspect_ratio": "16:10" } },
-        { "label": "21:9", "set": { "aspect_ratio": "21:9" } },
-        { "label": "32:9", "set": { "aspect_ratio": "32:9" } },
-        { "label": "4:3", "set": { "aspect_ratio": "4:3" } }
+        {
+          "label": "Primary display",
+          "set": {
+            "monitor": ""
+          }
+        },
+        {
+          "label": "Display 1",
+          "set": {
+            "monitor": "0"
+          }
+        },
+        {
+          "label": "Display 2",
+          "set": {
+            "monitor": "1"
+          }
+        },
+        {
+          "label": "Display 3",
+          "set": {
+            "monitor": "2"
+          }
+        },
+        {
+          "label": "Display 4",
+          "set": {
+            "monitor": "3"
+          }
+        }
       ],
-      "defaults": { "aspect_ratio": "16:9" }
+      "defaults": {
+        "monitor": ""
+      }
     },
     {
-      "id": "frame_rate", "label": "Frame rate",
-      "help": "Select the requested runtime frame rate.",
+      "id": "render_resolution",
+      "label": "Console mode",
+      "help": "PS4 Pro mode is needed for 60 FPS mode and Render resolution. PS4 runs the game as on a base PS4: 30 FPS at its own 1080p size. Applies at the next start.",
       "choices": [
-        { "label": "30", "set": { "frame_rate": "30" } },
-        { "label": "60", "set": { "frame_rate": "60" } },
-        { "label": "90", "set": { "frame_rate": "90" } },
-        { "label": "120", "set": { "frame_rate": "120" } },
-        { "label": "144", "set": { "frame_rate": "144" } },
-        { "label": "180", "set": { "frame_rate": "180" } }
+        {
+          "label": "PS4 Pro",
+          "set": {
+            "render_resolution": "4k"
+          }
+        },
+        {
+          "label": "PS4",
+          "set": {
+            "render_resolution": "1080p"
+          }
+        }
       ],
-      "defaults": { "frame_rate": "60" }
+      "defaults": {
+        "render_resolution": "4k"
+      }
     },
     {
-      "id": "render_resolution", "label": "Render resolution",
-      "help": "4K is the PS4 Pro mode (checkerboard rendered). 1080p is the PS4's own and lighter on the graphics card.",
+      "id": "render_height",
+      "label": "Render resolution",
+      "help": "The size the game draws its scenes at, scaled to the window. Higher is sharper and needs a faster GPU; at 3840 x 2160 some course flyovers drop below 60 FPS. Sizes above 3200 x 1800 apply at the next start.",
       "choices": [
-        { "label": "4K", "set": { "render_resolution": "4k" } },
-        { "label": "1080p", "set": { "render_resolution": "1080p" } }
+        {
+          "label": "Game's own",
+          "set": {
+            "render_height": "0"
+          }
+        },
+        {
+          "label": "1920 x 1080",
+          "set": {
+            "render_height": "1080"
+          }
+        },
+        {
+          "label": "2560 x 1440",
+          "set": {
+            "render_height": "1440"
+          }
+        },
+        {
+          "label": "3200 x 1800",
+          "set": {
+            "render_height": "1800"
+          }
+        },
+        {
+          "label": "3840 x 2160",
+          "set": {
+            "render_height": "2160"
+          }
+        },
+        {
+          "label": "5120 x 2880",
+          "set": {
+            "render_height": "2880"
+          }
+        }
       ],
-      "defaults": { "render_resolution": "4k" }
+      "defaults": {
+        "render_height": "0",
+        "render_resolution": "4k"
+      },
+      "when": {
+        "render_resolution": "4k"
+      }
     },
     {
-      "id": "vsync", "label": "V-Sync",
-      "help": "On waits for the screen's refresh. Off shows the newest frame at each refresh, still without tearing.",
+      "id": "frame_rate_priority",
+      "label": "60 FPS mode",
+      "help": "The game's frame rate priority mode held on in every scene: 60 FPS at the tee, in shots and flyovers. Off leaves it to the game's Options menu. Needs PS4 Pro mode. Applies at the next start.",
       "choices": [
-        { "label": "On", "set": { "vsync": "1" } },
-        { "label": "Off", "set": { "vsync": "0" } }
+        {
+          "label": "On",
+          "set": {
+            "frame_rate_priority": "1"
+          }
+        },
+        {
+          "label": "Off",
+          "set": {
+            "frame_rate_priority": "0"
+          }
+        }
       ],
-      "defaults": { "vsync": "1" }
+      "defaults": {
+        "frame_rate_priority": "1"
+      },
+      "when": {
+        "render_resolution": "4k"
+      }
     },
     {
-      "id": "tearing", "label": "Allow tearing",
-      "help": "With V-Sync off: shows each frame at once, for the least input delay, with tearing.",
+      "id": "vsync",
+      "label": "VSync",
+      "help": "On waits for the monitor: no tearing. Off shows the newest frame at each refresh, still without tearing.",
       "choices": [
-        { "label": "Off", "set": { "tearing": "0" } },
-        { "label": "On", "set": { "tearing": "1" } }
+        {
+          "label": "On",
+          "set": {
+            "vsync": "1"
+          }
+        },
+        {
+          "label": "Off",
+          "set": {
+            "vsync": "0"
+          }
+        }
       ],
-      "defaults": { "tearing": "0", "vsync": "1" },
-      "when": { "vsync": "0" }
+      "defaults": {
+        "vsync": "1"
+      }
     },
     {
-      "id": "sharpening", "label": "Sharpening",
-      "help": "AMD FSR 1 RCAS for crisper edges without halos. F9 in the game switches it to compare.",
+      "id": "tearing",
+      "label": "Allow tearing",
+      "help": "With VSync off: shows each frame at once, for the least input delay, with tearing.",
       "choices": [
-        { "label": "On", "set": { "sharpening": "1" } },
-        { "label": "Off", "set": { "sharpening": "0" } }
+        {
+          "label": "Off",
+          "set": {
+            "tearing": "0"
+          }
+        },
+        {
+          "label": "On",
+          "set": {
+            "tearing": "1"
+          }
+        }
       ],
-      "defaults": { "sharpening": "1" }
+      "defaults": {
+        "tearing": "0"
+      },
+      "when": {
+        "vsync": "0"
+      }
     },
     {
-      "id": "hdr", "label": "HDR",
-      "help": "The game's own HDR10 output. Needs a display with HDR turned on.",
+      "id": "smaa",
+      "label": "Anti-aliasing (SMAA)",
+      "help": "SMAA 1x smooths jagged edges of the game's picture at its render size. Off keeps the game's own look.",
       "choices": [
-        { "label": "Off", "set": { "hdr": "0" } },
-        { "label": "On", "set": { "hdr": "1" } }
+        {
+          "label": "Off",
+          "set": {
+            "smaa": "0"
+          }
+        },
+        {
+          "label": "On",
+          "set": {
+            "smaa": "1"
+          }
+        }
       ],
-      "defaults": { "hdr": "0" }
+      "defaults": {
+        "smaa": "0"
+      }
     },
     {
-      "id": "audio_channels", "label": "Speakers",
+      "id": "sharpening",
+      "label": "Sharpening",
+      "help": "AMD FSR 1 upscaling and RCAS sharpening at the window size, for crisper edges without halos. F9 in the game switches it to compare.",
       "choices": [
-        { "label": "Automatic", "set": { "audio_channels": "auto" } },
-        { "label": "Stereo", "set": { "audio_channels": "stereo" } },
-        { "label": "5.1", "set": { "audio_channels": "5.1" } },
-        { "label": "7.1", "set": { "audio_channels": "7.1" } }
+        {
+          "label": "On",
+          "set": {
+            "sharpening": "1"
+          }
+        },
+        {
+          "label": "Off",
+          "set": {
+            "sharpening": "0"
+          }
+        }
       ],
-      "defaults": { "audio_channels": "auto" }
+      "defaults": {
+        "sharpening": "1"
+      }
     },
     {
-      "id": "skip_intro", "label": "Intro logos",
-      "help": "Set the runtime intro option.",
+      "id": "sharpening_strength",
+      "label": "Sharpening strength",
+      "help": "How hard RCAS sharpens. Soft is half the default strength; Strong is the most the filter allows.",
       "choices": [
-        { "label": "Skip them", "set": { "skip_intro": "1" } },
-        { "label": "Show them", "set": { "skip_intro": "0" } }
+        {
+          "label": "Soft",
+          "set": {
+            "sharpening_strength": "soft"
+          }
+        },
+        {
+          "label": "Default",
+          "set": {
+            "sharpening_strength": "default"
+          }
+        },
+        {
+          "label": "Strong",
+          "set": {
+            "sharpening_strength": "strong"
+          }
+        }
       ],
-      "defaults": { "skip_intro": "1" }
+      "defaults": {
+        "sharpening_strength": "default"
+      },
+      "when": {
+        "sharpening": "1"
+      }
+    },
+    {
+      "id": "anisotropy",
+      "label": "Anisotropic filtering",
+      "help": "Keeps textures sharp at a slant, like fairways and greens far ahead. Game's own leaves the game's filtering.",
+      "choices": [
+        {
+          "label": "Game's own",
+          "set": {
+            "anisotropy": "off"
+          }
+        },
+        {
+          "label": "4x",
+          "set": {
+            "anisotropy": "4"
+          }
+        },
+        {
+          "label": "8x",
+          "set": {
+            "anisotropy": "8"
+          }
+        },
+        {
+          "label": "16x",
+          "set": {
+            "anisotropy": "16"
+          }
+        }
+      ],
+      "defaults": {
+        "anisotropy": "off"
+      }
+    },
+    {
+      "id": "texture_lod_bias",
+      "label": "High-res texture detail",
+      "help": "Auto picks sharper texture levels when the render resolution is above 1080 lines; it can add a little shimmer. Off keeps the game's own.",
+      "choices": [
+        {
+          "label": "Off",
+          "set": {
+            "texture_lod_bias": "off"
+          }
+        },
+        {
+          "label": "Auto",
+          "set": {
+            "texture_lod_bias": "auto"
+          }
+        }
+      ],
+      "defaults": {
+        "texture_lod_bias": "off"
+      }
+    },
+    {
+      "id": "hdr",
+      "label": "HDR",
+      "help": "The game's own HDR10 output. Turn on Use HDR in Windows display settings first. Applies at the next start.",
+      "choices": [
+        {
+          "label": "Off",
+          "set": {
+            "hdr": "0"
+          }
+        },
+        {
+          "label": "On",
+          "set": {
+            "hdr": "1"
+          }
+        }
+      ],
+      "defaults": {
+        "hdr": "0"
+      }
+    },
+    {
+      "id": "frame_generation",
+      "label": "Frame generation",
+      "help": "NVIDIA DLSS Frame Generation on GeForce RTX 40 and 50 series cards: a generated frame between each two of the game's. Fast-moving objects can smear. Turning it on applies at the next start.",
+      "choices": [
+        {
+          "label": "Off",
+          "set": {
+            "frame_generation": "0"
+          }
+        },
+        {
+          "label": "On",
+          "set": {
+            "frame_generation": "1"
+          }
+        }
+      ],
+      "defaults": {
+        "frame_generation": "0"
+      }
+    },
+    {
+      "id": "audio_volume",
+      "label": "Master volume",
+      "help": "Volume of all the game's sound. 100% is the game's own level; 50% is 12 dB quieter.",
+      "choices": [
+        {
+          "label": "100%",
+          "set": {
+            "audio_volume": "100"
+          }
+        },
+        {
+          "label": "90%",
+          "set": {
+            "audio_volume": "90"
+          }
+        },
+        {
+          "label": "80%",
+          "set": {
+            "audio_volume": "80"
+          }
+        },
+        {
+          "label": "70%",
+          "set": {
+            "audio_volume": "70"
+          }
+        },
+        {
+          "label": "60%",
+          "set": {
+            "audio_volume": "60"
+          }
+        },
+        {
+          "label": "50%",
+          "set": {
+            "audio_volume": "50"
+          }
+        },
+        {
+          "label": "40%",
+          "set": {
+            "audio_volume": "40"
+          }
+        },
+        {
+          "label": "30%",
+          "set": {
+            "audio_volume": "30"
+          }
+        },
+        {
+          "label": "20%",
+          "set": {
+            "audio_volume": "20"
+          }
+        },
+        {
+          "label": "10%",
+          "set": {
+            "audio_volume": "10"
+          }
+        },
+        {
+          "label": "Muted",
+          "set": {
+            "audio_volume": "0"
+          }
+        }
+      ],
+      "defaults": {
+        "audio_volume": "100"
+      }
+    },
+    {
+      "id": "audio_channels",
+      "label": "Speakers",
+      "help": "The speaker layout the game's 7.1 sound is mixed to. Automatic uses the Windows output device's.",
+      "choices": [
+        {
+          "label": "Automatic",
+          "set": {
+            "audio_channels": "auto"
+          }
+        },
+        {
+          "label": "Stereo",
+          "set": {
+            "audio_channels": "stereo"
+          }
+        },
+        {
+          "label": "5.1",
+          "set": {
+            "audio_channels": "5.1"
+          }
+        },
+        {
+          "label": "7.1",
+          "set": {
+            "audio_channels": "7.1"
+          }
+        }
+      ],
+      "defaults": {
+        "audio_channels": "auto"
+      }
+    },
+    {
+      "id": "pad_deadzone",
+      "label": "Stick dead zone",
+      "help": "Ignores small stick movement near the center. Try 6% for a worn stick. None reads the stick raw.",
+      "choices": [
+        {
+          "label": "None",
+          "set": {
+            "pad_deadzone": "0"
+          }
+        },
+        {
+          "label": "3%",
+          "set": {
+            "pad_deadzone": "3"
+          }
+        },
+        {
+          "label": "6%",
+          "set": {
+            "pad_deadzone": "6"
+          }
+        },
+        {
+          "label": "10%",
+          "set": {
+            "pad_deadzone": "10"
+          }
+        },
+        {
+          "label": "15%",
+          "set": {
+            "pad_deadzone": "15"
+          }
+        },
+        {
+          "label": "20%",
+          "set": {
+            "pad_deadzone": "20"
+          }
+        }
+      ],
+      "defaults": {
+        "pad_deadzone": "0"
+      }
+    },
+    {
+      "id": "pad_outer_zone",
+      "label": "Stick outer zone",
+      "help": "Reads the stick's rim as full travel.",
+      "choices": [
+        {
+          "label": "None",
+          "set": {
+            "pad_outer_zone": "0"
+          }
+        },
+        {
+          "label": "2%",
+          "set": {
+            "pad_outer_zone": "2"
+          }
+        },
+        {
+          "label": "5%",
+          "set": {
+            "pad_outer_zone": "5"
+          }
+        },
+        {
+          "label": "10%",
+          "set": {
+            "pad_outer_zone": "10"
+          }
+        }
+      ],
+      "defaults": {
+        "pad_outer_zone": "0"
+      }
+    },
+    {
+      "id": "pad_trigger_threshold",
+      "label": "L2 / R2 press point",
+      "help": "How far L2 and R2 travel before they count as pressed.",
+      "choices": [
+        {
+          "label": "Light (6%)",
+          "set": {
+            "pad_trigger_threshold": "15"
+          }
+        },
+        {
+          "label": "Default (12%)",
+          "set": {
+            "pad_trigger_threshold": "30"
+          }
+        },
+        {
+          "label": "Half (50%)",
+          "set": {
+            "pad_trigger_threshold": "128"
+          }
+        },
+        {
+          "label": "Deep (80%)",
+          "set": {
+            "pad_trigger_threshold": "204"
+          }
+        }
+      ],
+      "defaults": {
+        "pad_trigger_threshold": "30"
+      }
+    },
+    {
+      "id": "rumble_strength",
+      "label": "Rumble",
+      "help": "Controller vibration strength.",
+      "choices": [
+        {
+          "label": "100%",
+          "set": {
+            "rumble_strength": "100"
+          }
+        },
+        {
+          "label": "75%",
+          "set": {
+            "rumble_strength": "75"
+          }
+        },
+        {
+          "label": "50%",
+          "set": {
+            "rumble_strength": "50"
+          }
+        },
+        {
+          "label": "25%",
+          "set": {
+            "rumble_strength": "25"
+          }
+        },
+        {
+          "label": "Off",
+          "set": {
+            "rumble_strength": "0"
+          }
+        }
+      ],
+      "defaults": {
+        "rumble_strength": "100"
+      }
+    },
+    {
+      "id": "pad_swap_cross_circle",
+      "label": "Swap Cross and Circle",
+      "help": "Swaps the confirm and back buttons.",
+      "choices": [
+        {
+          "label": "Off",
+          "set": {
+            "pad_swap_cross_circle": "0"
+          }
+        },
+        {
+          "label": "On",
+          "set": {
+            "pad_swap_cross_circle": "1"
+          }
+        }
+      ],
+      "defaults": {
+        "pad_swap_cross_circle": "0"
+      }
+    },
+    {
+      "id": "skip_intro",
+      "label": "Intro logos",
+      "help": "Skip them goes straight to the main menu.",
+      "choices": [
+        {
+          "label": "Skip them",
+          "set": {
+            "skip_intro": "1"
+          }
+        },
+        {
+          "label": "Show them",
+          "set": {
+            "skip_intro": "0"
+          }
+        }
+      ],
+      "defaults": {
+        "skip_intro": "1"
+      }
+    },
+    {
+      "id": "title_back_exits",
+      "label": "Back on the title screen",
+      "help": "Back (Circle, B or Esc) on the title screen asks whether to close the game.",
+      "choices": [
+        {
+          "label": "Asks to close the game",
+          "set": {
+            "title_back_exits": "1"
+          }
+        },
+        {
+          "label": "Does nothing",
+          "set": {
+            "title_back_exits": "0"
+          }
+        }
+      ],
+      "defaults": {
+        "title_back_exits": "1"
+      }
     }
   ],
   "actions": [
-    { "id": "saves", "label": "Saves", "help": "Your saves, trophies and settings.", "open": "saves" }
+    {
+      "id": "saves",
+      "label": "Saves",
+      "help": "Your saves, trophies and settings.",
+      "open": "saves"
+    }
   ]
 }

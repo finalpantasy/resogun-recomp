@@ -9,6 +9,9 @@ function(golf_launcher_target)
     # Only the launcher prints the revision. Keep other runner objects reusable.
     set_property(SOURCE "${launcher_src}/launcher.c" APPEND PROPERTY
         COMPILE_DEFINITIONS "GOLF_LAUNCHER_VERSION=\"${GOLF_LAUNCHER_VERSION}\"")
+    if(TARGET golf-launcher)
+        target_compile_definitions(golf-launcher PRIVATE "GOLF_LAUNCHER_VERSION=\"${GOLF_LAUNCHER_VERSION}\"")
+    endif()
     if(WIN32)
         target_link_libraries(resogun PRIVATE ole32 uuid)
     endif()

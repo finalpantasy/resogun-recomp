@@ -48,7 +48,7 @@ class PackageOutputTests(unittest.TestCase):
 
     def test_failed_symbols_write_preserves_both_archives(self):
         fixtures = (
-            (False, "everybodys-golf.exe", "fixture", ".zip"),
+            (False, "everybodys-golf.exe", "fixture-windows-x64", ".zip"),
             (True, "everybodys-golf", "fixture-linux", ".tar.gz"),
         )
         for linux, executable, name, suffix in fixtures:
@@ -84,6 +84,42 @@ class PackageOutputTests(unittest.TestCase):
                 self.assertEqual(player.read_bytes(), b"prior player archive")
                 self.assertEqual(symbols.read_bytes(), b"prior symbols archive")
                 self.assertEqual({path.name for path in output.iterdir()}, {executable, player.name, symbols.name})
+
+    def test_windows_zip_has_a_checksum_file_beside_it(self):
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            output, dist = root / "out", root / "dist"
+            output.mkdir()
+            dist.mkdir()
+            executable = "everybodys-golf.exe"
+            (dist / executable).write_bytes(b"player executable")
+            (output / executable).write_bytes(b"executable with symbols")
+            with (
+                patch.object(package, "PORT", root),
+                patch.object(package, "LINUX", False),
+                patch.object(package, "EXES", (executable,)),
+            ):
+                package.archive_bundle(dist, [executable], "everybodys-golf-pc-v0.1.0", debug=False, include_appimage=False)
+            player = output / "everybodys-golf-pc-v0.1.0-windows-x64.zip"
+            checksum = output / "everybodys-golf-pc-v0.1.0-windows-x64.zip.sha256"
+            self.assertTrue((output / "everybodys-golf-pc-v0.1.0-windows-x64-symbols.zip").is_file())
+            digest = hashlib.sha256(player.read_bytes()).hexdigest()
+            self.assertEqual(checksum.read_text(encoding="ascii"), f"{digest}  {player.name}\n")
+
+    def test_release_version_must_match_the_build(self):
+        with TemporaryDirectory() as temp:
+            exe = Path(temp) / "EverybodysGolf.exe"
+            exe.write_bytes(b"MZ...GOLF_VERSION=v0.1.0\0...")
+            package.check_version("v0.1.0", [exe])
+            for other in ("v0.1.1", "v0.1"):
+                with self.assertRaisesRegex(SystemExit, "was not built as"):
+                    package.check_version(other, [exe])
+            exe.write_bytes(b"MZ...GOLF_VERSION=v0.1.0-rc1\0...")
+            with self.assertRaisesRegex(SystemExit, "was not built as"):
+                package.check_version("v0.1.0", [exe])
+        self.assertTrue(package.VERSION.fullmatch("v0.1.0"))
+        self.assertFalse(package.VERSION.fullmatch("0.1.0"))
+        self.assertEqual(package.release_name(version="v0.1.0"), "everybodys-golf-pc-v0.1.0")
 
     def test_failed_appimage_keeps_previous_tarballs_and_image(self):
         with TemporaryDirectory() as temp:

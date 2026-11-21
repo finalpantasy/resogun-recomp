@@ -74,8 +74,11 @@ jobs:
           Set-ItemProperty -Path $key -Name DontShowUI -Value 1 -Type DWord
 
       # A hung test still fails here instead of stalling the job.
+      # A v* tag builds as that version (GOLF_VERSION), which the launcher's update check compares.
       - name: Build and run the runtime tests
         timeout-minutes: 60
+        env:
+          GOLF_VERSION: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || '' }}
         run: bash build.sh --test
 
       # The GPU tests write to out/<test>.log: the end of each, so a hang shows where it stopped.
@@ -88,16 +91,20 @@ jobs:
 
       - name: Package
         id: package
+        env:
+          GOLF_VERSION: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || '' }}
         run: |
-          python tools/package.py --zip
-          python tools/package.py --zip --debug --out dist-debug
-          echo "RELEASE=$(cat dist/release.txt)" >> "$GITHUB_ENV"
-          echo "release=$(cat dist/release.txt)" >> "$GITHUB_OUTPUT"
+          python tools/package.py --zip ${GOLF_VERSION:+--version "$GOLF_VERSION"}
+          python tools/package.py --zip --debug --out dist-debug ${GOLF_VERSION:+--version "$GOLF_VERSION"}
+          echo "RELEASE=$(cat dist/release.txt)-windows-x64" >> "$GITHUB_ENV"
+          echo "release=$(cat dist/release.txt)-windows-x64" >> "$GITHUB_OUTPUT"
 
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ env.RELEASE }}
-          path: out/${{ env.RELEASE }}.zip
+          path: |
+            out/${{ env.RELEASE }}.zip
+            out/${{ env.RELEASE }}.zip.sha256
           compression-level: 0
       - uses: actions/upload-artifact@v4
         with:
@@ -254,9 +261,9 @@ jobs:
             echo
             echo "## Install"
             echo
-            echo "On Windows, unzip ${WINDOWS}.zip and run everybodys-golf.exe."
+            echo "On Windows, unzip ${WINDOWS}.zip and run EverybodysGolf.exe."
             echo "On Linux, extract ${LINUX}-linux.tar.gz and run everybodys-golf, or run ${LINUX}-linux-x86_64.AppImage with a data directory as its first argument."
             echo "Use a merged, decrypted dump of CUSA04687 update 1.17. See README.txt."
           } > notes.md
           gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" \
-            --notes-file notes.md "out/${WINDOWS}.zip" "out/${LINUX}-linux.tar.gz" "out/${LINUX}-linux-x86_64.AppImage"
+            --notes-file notes.md "out/${WINDOWS}.zip" "out/${WINDOWS}.zip.sha256" "out/${LINUX}-linux.tar.gz" "out/${LINUX}-linux-x86_64.AppImage"

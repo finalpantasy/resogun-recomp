@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // resogun-setup.exe: sets up the release folder it sits in (tools/package.py) from the player's
-// Resogun dump, so the game starts from resogun.exe or a desktop shortcut.
+// Everybody's Golf dump, so the game starts from resogun.exe or a desktop shortcut.
 //
 // With no arguments it opens a window: the game folder (the dump), the extra DLC folder, the save
 // folder, whether to skip the intro logos (settings.ini skip_intro), Install and Exit; after an
@@ -34,7 +34,7 @@ namespace fs = std::filesystem;
 
 namespace {
 
-constexpr wchar_t kTitle[] = L"Resogun setup";
+constexpr wchar_t kTitle[] = L"Everybody's Golf setup";
 
 // The old save folder to copy from when the save folder changes and only the old one has saves.
 std::optional<fs::path> saves_to_move(const fs::path& root, const fs::path& save) {
@@ -97,7 +97,7 @@ constexpr wchar_t kUsage[] =
     L"  --progress    also print \"progress <0 to 1> <step>\" lines (for RecompLauncher)\n"
     L"  --shortcut    also write the game's shortcut into this folder, or onto the Desktop\n"
     L"Sets up the folder this exe is in. With no arguments, opens the setup window; with --update alone,\n"
-    L"prepares the game again from the folders already set, in a small window (resogun.exe does this).";
+    L"prepares the game again from the folders already set, in a small window (everybodys-golf.exe does this).";
 
 int run_cli(const std::vector<std::wstring>& args) {
     Console con;
@@ -164,7 +164,7 @@ int run_cli(const std::vector<std::wstring>& args) {
 // Drawn in the colours of the game's Display Settings panel (F10; gpu/shim/resogun_overlay.cpp
 // PageInk, as they show on screen): a framed dark-teal panel on deep blue, teal rows, and the
 // highlighted cyan for the action that is ready. Install stays disabled until the game folder holds a
-// Resogun dump, the DLC folder (optional) exists when one is named, and a save folder is named.
+// Everybody's Golf dump, the DLC folder (optional) exists when one is named, and a save folder is named.
 
 enum : int {
     kGameEdit = 101,
@@ -309,7 +309,7 @@ void paint(HDC dc) {
     frame(dc, panel, color::Frame, px(2));
     RECT tab = rect(kWidth / 2 - 140, 12, 280, 42);
     shape(dc, tab, px(12), color::Tab, color::Panel, color::Frame, px(2));
-    text(dc, L"RESOGUN SETUP", tab, ui.title, color::Text, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    text(dc, L"EVERYBODY'S GOLF SETUP", tab, ui.title, color::Text, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     for (const Folder* f : {&ui.game, &ui.dlc, &ui.save})
         paint_folder(dc, *f);
     text(dc, ui.status, rect(24, kPanelBottom + 10, kWidth - 48, kButtonsTop - kPanelBottom - 16), ui.font,
@@ -377,10 +377,10 @@ void validate() {
     } else if (!fs::is_directory(setup::game_folder(game), ec)) {
         ui.game.note = L"Folder not found";
     } else if (auto missing = setup::missing_game_files(game); !missing.empty()) {
-        ui.game.note = L"Not a Resogun dump: no " + missing.front();
+        ui.game.note = L"Not a Everybody's Golf dump: no " + missing.front();
     } else {
         ui.game.ok = true;
-        ui.game.note = L"Resogun dump found";
+        ui.game.note = L"Everybody's Golf dump found";
     }
     ui.dlc.ok = dlc.empty() || fs::is_directory(fs::path(dlc), ec);
     ui.dlc.note = dlc.empty() ? L"Optional: none chosen" : ui.dlc.ok ? L"Folder found" : L"Folder not found";
@@ -404,7 +404,7 @@ void set_busy(bool busy) {
 
 // Starts the game as a double-click would (its own folder, no console), then closes the setup.
 void play() {
-    fs::path exe = ui.root / L"resogun.exe";
+    fs::path exe = ui.root / kGameExe;
     auto started = reinterpret_cast<INT_PTR>(
         ShellExecuteW(ui.wnd, L"open", exe.c_str(), nullptr, ui.root.c_str(), SW_SHOWNORMAL));
     if (started <= 32) {
@@ -708,8 +708,8 @@ int run_window(HINSTANCE inst) {
 // --- --update -----------------------------------------------------------------------------------
 // resogun.exe found game/ not prepared for this release or from the dump's eboot.bin as it is now:
 // prepare it again from paths.ini's folders, in a small window of the same look (the title, the
-// step, a cyan bar). install() checks the files first; when they aren't the unmodified CUSA00038
-// update 1.10 and the player has not gone on with this dump before, a warning asks whether to.
+// step, a cyan bar). install() checks the files first; when they aren't the unmodified CUSA04687
+// update 1.17 and the player has not gone on with this dump before, a warning asks whether to.
 
 enum : UINT {
     kMsgProgress = WM_APP + 3, // wParam: done in thousandths; lParam: std::wstring* step
@@ -730,7 +730,7 @@ void paint_update(HDC dc) {
     RECT panel = rect(10, 10, kUpdateWidth - 20, kUpdateHeight - 20);
     fill(dc, panel, color::Panel);
     frame(dc, panel, color::Frame, px(2));
-    text(dc, L"UPDATING RESOGUN", rect(28, 18, kUpdateWidth - 56, 32), ui.title, color::Text,
+    text(dc, L"UPDATING EVERYBODY'S GOLF", rect(28, 18, kUpdateWidth - 56, 32), ui.title, color::Text,
          DT_LEFT | DT_VCENTER | DT_SINGLELINE);
     text(dc, update.step, rect(28, 52, kUpdateWidth - 56, 22), ui.font, color::Help,
          DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
