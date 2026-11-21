@@ -13,6 +13,7 @@
 #include "common/logging/log.h"
 #include "core/emulator_settings.h"
 #include "resogun_settings.h"
+#include "resogun_streamline.h"
 #include "imgui/renderer/imgui_core.h"
 #include "sdl_window.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
@@ -262,6 +263,12 @@ void Swapchain::FindPresentFormat() {
     UNREACHABLE_MSG("Unable to find required swapchain format!");
 }
 
+// resogun: DLSS Frame Generation on Vulkan does not pace with VSync (Streamline: "VSync with FG:
+// not supported"), so while it is on the swapchain presents without it (Immediate, for G-Sync).
+static bool FrameGenerationPresents() {
+    return ResogunStreamline::Loaded() && ResogunSettings::Get().frame_generation;
+}
+
 void Swapchain::FindPresentMode() {
     const auto [modes_result, modes] =
         instance.GetPhysicalDevice().getSurfacePresentModesKHR(surface);
@@ -276,8 +283,9 @@ void Swapchain::FindPresentMode() {
     // driver has it, else Immediate (tearing allowed), else Fifo. Off with tearing prefers
     // Immediate: NVIDIA's Mailbox frees an image only as the display takes one, two frames per
     // refresh (119.9 FPS on a 59.95 Hz panel, borderless or fullscreen alike).
-    vsync = ResogunSettings::Get().vsync;
-    tearing = ResogunSettings::Get().tearing;
+    frame_generation = FrameGenerationPresents();
+    vsync = ResogunSettings::Get().vsync && !frame_generation;
+    tearing = ResogunSettings::Get().tearing || frame_generation;
     const auto has = [&](vk::PresentModeKHR mode) { return std::ranges::find(modes, mode) != modes.cend(); };
     const auto first = tearing ? vk::PresentModeKHR::eImmediate : vk::PresentModeKHR::eMailbox;
     const auto second = tearing ? vk::PresentModeKHR::eMailbox : vk::PresentModeKHR::eImmediate;
@@ -293,7 +301,9 @@ void Swapchain::UpdateVsync() {
     const auto& settings = ResogunSettings::Get();
     // resogun: a display mode change remakes the swapchain too (its full_screen_info, Create).
     const bool mode_changed = instance.IsFullScreenExclusiveSupported() && settings.display_mode != display_mode;
-    if (settings.vsync == vsync && settings.tearing == tearing && !mode_changed) {
+    const bool fg = FrameGenerationPresents();
+    if (fg == frame_generation && (fg || (settings.vsync == vsync && settings.tearing == tearing)) &&
+        !mode_changed) {
         return;
     }
     if (const auto result = instance.GetDevice().waitIdle(); result != vk::Result::eSuccess) {
