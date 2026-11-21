@@ -686,6 +686,9 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
 
     draw_scheduler.EndRendering();
     const auto cmdbuf = draw_scheduler.CommandBuffer();
+    // resogun: DLSS Frame Generation's depth and motion vectors for this frame, from the scene
+    // the frame's draws left (no-op unless frame generation is on).
+    rasterizer->RecordFrameGenerationInputs(frame->id);
     cmdbuf.pipelineBarrier2(vk::DependencyInfo{
         .imageMemoryBarrierCount = 1,
         .pImageMemoryBarriers = &pre_barrier,
@@ -1084,10 +1087,16 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
                                    vk::DependencyFlagBits::eByRegion, {}, {}, to_present);
         }
     }
-    // resogun: DLSS Frame Generation (resogun_streamline.h) for game frames without the overlay.
-    ResogunStreamline::BeginFrame(instance.GetDevice(), instance.GetPhysicalDevice(), cmdbuf, frame->image,
-                                  vk::Format::eUndefined, swapchain.GetExtent(),
-                                  is_game_frame && !ResogunOverlay::Visible());
+    // resogun: DLSS Frame Generation (resogun_streamline.h) for game frames without the overlay,
+    // with the inputs PrepareFrame recorded for this frame. A frame shown again has no motion of
+    // its own (its inputs describe the step to it), so it goes without them.
+    {
+        const vk::Extent2D extent = swapchain.GetExtent();
+        ResogunStreamline::BeginFrame(instance.GetDevice(), instance.GetPhysicalDevice(), cmdbuf, frame->image,
+                                      vk::Format::eUndefined, extent, is_game_frame && !ResogunOverlay::Visible(),
+                                      is_reusing_frame ? ~0u : u32(frame->id),
+                                      FitImage(frame->width, frame->height, extent.width, extent.height));
+    }
     if (EmulatorSettings.IsVkHostMarkersEnabled()) {
         cmdbuf.endDebugUtilsLabelEXT();
     }

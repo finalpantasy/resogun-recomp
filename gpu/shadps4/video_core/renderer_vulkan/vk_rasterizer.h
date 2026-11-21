@@ -14,6 +14,7 @@
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/texture_cache/texture_cache.h"
+#include "resogun_streamline.h"
 
 namespace AmdGpu {
 struct Liverpool;
@@ -47,6 +48,11 @@ public:
     }
 
     void Draw(bool is_indexed, u32 index_offset = 0, const PreparedDraw* prepared = nullptr);
+
+    /// resogun: at a flip (PrepareFrame, in the flip's command buffer, outside rendering): hands the
+    /// scene depth and camera of the frame's draws to DLSS Frame Generation for presenter frame
+    /// `slot` (ResogunStreamline::RecordInputs) and starts watching the next frame.
+    void RecordFrameGenerationInputs(u32 slot);
 
     /// resogun: draw preparation workers (vk_draw_prep.h), fed and consumed by Liverpool.
     DrawPreparation& GetDrawPreparation() {
@@ -298,6 +304,40 @@ private:
     void NoteFrameStart();
     /// The display buffer of the last NoteFrameStart (HUD draws go there too).
     VAddr last_display_buffer = 0;
+    /// resogun: DLSS Frame Generation camera (resogun_streamline.h). The vertex shaders of the
+    /// scene compute clip = vp * world with vp at dword 0 of one of their constant buffers (which
+    /// one varies by shader), so a draw's candidate is the first such matrix that looks like a
+    /// perspective camera (ResogunStreamline::LooksLikeCamera). The frame's camera is the most
+    /// common candidate among the draws into the largest D32 depth target (the scene; shadow maps
+    /// are orthographic, the hole map is smaller). Watched only while frame generation is on.
+    struct DrawCamera {
+        bool valid;
+        u32 binding;
+        u64 shader;
+        float vp[16];
+    };
+    struct FrameCamera {
+        static constexpr u32 MaxDistinct = 4;
+        VideoCore::ImageId depth_id{};
+        u64 depth_uid = 0;
+        u64 area = 0;
+        u32 draws = 0;      ///< with a candidate, into the scene depth
+        u32 others = 0;     ///< with a candidate, into another target
+        u32 num_distinct = 0;
+        u32 dropped = 0;    ///< candidates past MaxDistinct
+        struct Entry {
+            ResogunStreamline::SceneView view;
+            u32 binding;
+            u64 shader;
+            u32 count;
+        } distinct[MaxDistinct];
+    };
+    void NoteCameraCandidate(const Shader::Info& stage, u32 buffer_index, const void* data, u64 size);
+    void NoteCameraDraw();
+    DrawCamera draw_camera{};
+    FrameCamera frame_camera{};
+    bool camera_watch = false; ///< ResogunStreamline::WatchCamera(), taken at each flip
+    u64 camera_flips = 0;
     /// resogun: whether the draw renders into a target no draw used in the last few GPU frames,
     /// noting its targets as used. Such a draw (an offscreen texture rendered once, as for
     /// Texture2D.ReadPixels) waits for its pipeline instead of being skipped while it builds,

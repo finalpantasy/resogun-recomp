@@ -999,6 +999,9 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
         CaptureDropped("resources not bound");
         return;
     }
+    if (draw_camera.valid) {
+        NoteCameraDraw();
+    }
     const auto state = BeginRendering(pipeline);
 
     if (!inputs_resolved) {
@@ -1136,6 +1139,9 @@ void Rasterizer::DrawIndirectRecord(const GraphicsPipeline* pipeline, bool is_in
     PrepareRenderState(pipeline);
     if (!BindResources(pipeline)) {
         return;
+    }
+    if (draw_camera.valid) {
+        NoteCameraDraw();
     }
     const auto state = BeginRendering(pipeline);
 
@@ -1620,6 +1626,7 @@ bool Rasterizer::BindResources(const Pipeline* pipeline) {
     set_write_index = 0;
     set_writes.clear();
     buffer_infos.clear();
+    draw_camera.valid = false;
     image_infos.clear();
     sampler_lod_bias = 0.0f;
 
@@ -2152,6 +2159,9 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, const PreparedStage* pre
                 push_data.AddOffset(binding.buffer, 0);
             }
             buffer_infos.emplace_back(constant_ring->Handle(), ring->offset, ring->size);
+            if (camera_watch && !draw_camera.valid && stage.sw_stage == Shader::SwStage::Vertex) {
+                NoteCameraCandidate(stage, buffer_index, constant_ring->Data(ring->offset), ring->size);
+            }
         } else if (desc.IsSpecial()) {
             if (desc.buffer_type == Shader::BufferType::GdsBuffer) {
                 const auto* gds_buf = buffer_cache.GetGdsBuffer();
@@ -2231,6 +2241,12 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, const PreparedStage* pre
                 }
                 push_data.AddOffset(binding.buffer, adjust);
                 buffer_infos.emplace_back(buffer->Handle(), offset_aligned, size + adjust);
+                if (camera_watch && !draw_camera.valid && !desc.is_written &&
+                    stage.sw_stage == Shader::SwStage::Vertex &&
+                    memory->IsValidGpuMapping(vsharp.base_address, 0)) {
+                    NoteCameraCandidate(stage, buffer_index,
+                                        reinterpret_cast<const void*>(vsharp.base_address), size);
+                }
                 bound_buffers.emplace_back(buffer, offset, size, desc.is_written);
                 if (desc.is_written) {
                     // Raw storage-buffer writes can also make an aliased cached image stale.
@@ -3571,6 +3587,148 @@ void Rasterizer::NoteFrameStart() {
         }
         std::printf("\n");
         lag_histogram = {};
+    }
+}
+
+// resogun: DLSS Frame Generation camera; see DrawCamera in vk_rasterizer.h.
+void Rasterizer::NoteCameraCandidate(const Shader::Info& stage, u32 buffer_index, const void* data,
+                                     u64 size) {
+    if (size < 64 || !data) {
+        return;
+    }
+    float vp[16];
+    std::memcpy(vp, data, sizeof(vp));
+    if (!ResogunStreamline::LooksLikeCamera(vp)) {
+        return;
+    }
+    draw_camera.valid = true;
+    draw_camera.binding = buffer_index;
+    draw_camera.shader = stage.pgm_hash;
+    std::memcpy(draw_camera.vp, vp, sizeof(vp));
+}
+
+void Rasterizer::NoteCameraDraw() {
+    draw_camera.valid = false;
+    const auto image_id = db_desc.first;
+    const auto* image = image_id ? texture_cache.TryGetImage(image_id, 0) : nullptr;
+    const bool d32 = image && (image->info.pixel_format == vk::Format::eD32Sfloat ||
+                               image->info.pixel_format == vk::Format::eD32SfloatS8Uint);
+    const u64 area = d32 ? u64(image->info.size.width) * image->info.size.height : 0;
+    if (ResogunStreamline::VpTrace() > 1) {
+        std::printf("VP trace: draw shader %#llx buffer %u depth %ux%u%s vp row0 %g %g %g %g row3 %g %g %g %g\n",
+                    static_cast<unsigned long long>(draw_camera.shader), draw_camera.binding,
+                    image ? image->info.size.width : 0u, image ? image->info.size.height : 0u,
+                    d32 ? "" : " (not D32)", draw_camera.vp[0], draw_camera.vp[1], draw_camera.vp[2],
+                    draw_camera.vp[3], draw_camera.vp[12], draw_camera.vp[13], draw_camera.vp[14],
+                    draw_camera.vp[15]);
+    }
+    // A draw whose viewport covers a corner of the depth target (a picture-in-picture view) does
+    // not describe the frame's pixels: its matrix would give wrong motion everywhere else.
+    bool covers = false;
+    if (d32) {
+        const auto& r = Regs();
+        const auto& c = r.viewport_control;
+        const float vw = c.xscale_enable ? 2.0f * std::fabs(r.viewports[0].xscale) : 0.0f;
+        const float vh = c.yscale_enable ? 2.0f * std::fabs(r.viewports[0].yscale) : 0.0f;
+        covers = vw >= 0.9f * image->info.size.width && vh >= 0.9f * image->info.size.height;
+    }
+    auto& f = frame_camera;
+    if (!covers || area == 0 || area < f.area || (area == f.area && image->image_uid != f.depth_uid)) {
+        ++f.others;
+        return;
+    }
+    if (area > f.area) {
+        f.others += f.draws;
+        f.area = area;
+        f.depth_id = image_id;
+        f.depth_uid = image->image_uid;
+        f.draws = 0;
+        f.num_distinct = 0;
+        f.dropped = 0;
+    }
+    ++f.draws;
+    for (u32 i = 0; i < f.num_distinct; ++i) {
+        if (std::memcmp(f.distinct[i].view.vp, draw_camera.vp, sizeof(draw_camera.vp)) == 0) {
+            ++f.distinct[i].count;
+            return;
+        }
+    }
+    if (f.num_distinct == FrameCamera::MaxDistinct) {
+        ++f.dropped;
+        return;
+    }
+    const auto& regs = Regs();
+    const auto& vp = regs.viewports[0];
+    const auto& ctl = regs.viewport_control;
+    auto& e = f.distinct[f.num_distinct++];
+    std::memcpy(e.view.vp, draw_camera.vp, sizeof(draw_camera.vp));
+    e.view.xscale = ctl.xscale_enable ? vp.xscale : 1.0f;
+    e.view.xoffset = ctl.xoffset_enable ? vp.xoffset : 0.0f;
+    e.view.yscale = ctl.yscale_enable ? vp.yscale : 1.0f;
+    e.view.yoffset = ctl.yoffset_enable ? vp.yoffset : 0.0f;
+    e.view.zscale = ctl.zscale_enable ? vp.zscale : 1.0f;
+    e.view.zoffset = ctl.zoffset_enable ? vp.zoffset : 0.0f;
+    e.view.clip_minus_w_to_w = regs.clipper_control.clip_space == AmdGpu::ClipSpace::MinusWToW;
+    e.binding = draw_camera.binding;
+    e.shader = draw_camera.shader;
+    e.count = 1;
+}
+
+void Rasterizer::RecordFrameGenerationInputs(u32 slot) {
+    const bool watching = camera_watch;
+    camera_watch = ResogunStreamline::WatchCamera();
+    FrameCamera f = frame_camera;
+    frame_camera = {};
+    if (!watching) {
+        ResogunStreamline::ClearSlot(slot);
+        return;
+    }
+    ++camera_flips;
+    const FrameCamera::Entry* best = nullptr;
+    for (u32 i = 0; i < f.num_distinct; ++i) {
+        if (!best || f.distinct[i].count > best->count) {
+            best = &f.distinct[i];
+        }
+    }
+    VideoCore::Image* depth = best ? texture_cache.TryGetImage(f.depth_id, f.depth_uid) : nullptr;
+    // The depth image is copied out as it stands at the flip: single-sampled level 0.
+    if (depth && depth->backing->num_samples != 1) {
+        depth = nullptr;
+    }
+    if (ResogunStreamline::VpTrace() > 0) {
+        if (best) {
+            const float* m = best->view.vp;
+            std::printf("VP trace: flip %llu shader %#llx buffer %u: %u of %u scene draws (%u distinct%s, "
+                        "%u draws elsewhere), depth %ux%u%s, viewport scale %g,%g,%g offset %g,%g,%g%s; "
+                        "vp %g %g %g %g / %g %g %g %g / %g %g %g %g / %g %g %g %g\n",
+                        static_cast<unsigned long long>(camera_flips), static_cast<unsigned long long>(best->shader),
+                        best->binding, best->count, f.draws, f.num_distinct, f.dropped ? "+" : "", f.others,
+                        depth ? depth->info.size.width : 0u, depth ? depth->info.size.height : 0u,
+                        depth ? "" : " (gone or multisampled)", best->view.xscale, best->view.yscale,
+                        best->view.zscale, best->view.xoffset, best->view.yoffset, best->view.zoffset,
+                        best->view.clip_minus_w_to_w ? " [-1,1] z" : "", m[0], m[1], m[2], m[3], m[4],
+                        m[5], m[6], m[7], m[8], m[9], m[10], m[11], m[12], m[13], m[14], m[15]);
+        } else {
+            std::printf("VP trace: flip %llu no camera candidate (%u draws elsewhere)\n",
+                        static_cast<unsigned long long>(camera_flips), f.others);
+        }
+    }
+    const vk::CommandBuffer cmdbuf = scheduler.CommandBuffer();
+    // Without a camera the inputs keep the last scene size (a 16:9 default before any).
+    static vk::Extent2D last{1920, 1080};
+    if (depth) {
+        last = {depth->info.size.width, depth->info.size.height};
+    }
+    if (best && depth) {
+        runtime.Transit(depth, vk::ImageLayout::eTransferSrcOptimal, vk::PipelineStageFlagBits2::eTransfer,
+                        vk::AccessFlagBits2::eTransferRead);
+        runtime.FlushBarriers();
+        ResogunStreamline::RecordInputs(instance.GetDevice(), instance.GetPhysicalDevice(), cmdbuf, slot,
+                                        &best->view, depth->GetImage(),
+                                        {depth->info.size.width, depth->info.size.height}, camera_flips);
+    } else {
+        ResogunStreamline::RecordInputs(instance.GetDevice(), instance.GetPhysicalDevice(), cmdbuf, slot,
+                                        nullptr, {}, last, camera_flips);
     }
 }
 
