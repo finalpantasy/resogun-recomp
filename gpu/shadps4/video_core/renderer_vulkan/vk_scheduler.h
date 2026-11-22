@@ -795,7 +795,7 @@ public:
         // With RESOGUN_LOAD_SYNCS (default) the block is kept until the next submission, which
         // hands it to the recording thread to free after the commands before it.
         if (bytes + alignof(T) + 1024 > RecordChunk::Capacity &&
-            ResogunSync::Enabled() && large_pending.size() < 64) {
+            ResogunSync::On(ResogunSync::DeferredFrees) && large_pending.size() < 64) {
             auto& block = large_pending.emplace_back(
                 std::make_unique<std::max_align_t[]>(bytes / sizeof(std::max_align_t) + 1));
             std::memcpy(block.get(), data.data(), bytes);

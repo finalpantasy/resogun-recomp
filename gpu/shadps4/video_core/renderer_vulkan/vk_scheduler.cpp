@@ -232,7 +232,7 @@ void Scheduler::SignalAfterHostCopies(std::function<void()> signal) {
             done->fetch_add(1, std::memory_order_release);
         });
     };
-    if (!ResogunSync::Enabled()) {
+    if (!ResogunSync::On(ResogunSync::HostQueue)) {
         Record([deferred = std::move(deferred)](vk::CommandBuffer) mutable { deferred(); });
     } else {
         // In the host work queue: after the copies issued before it, and runnable by a thread
@@ -245,7 +245,7 @@ void Scheduler::SignalAfterHostCopies(std::function<void()> signal) {
         Record([this, seq](vk::CommandBuffer) { RunHostWork(seq); });
         // The guest waits for these fences. A recording thread stuck on a pipeline build
         // would hold them back with it, though nothing in them needs it: they run here.
-        if (RecorderBehind()) {
+        if (ResogunSync::On(ResogunSync::EagerSignals) && RecorderBehind()) {
             RunHostWork(seq);
         }
     }
@@ -262,7 +262,7 @@ bool Scheduler::RecorderBehind() const noexcept {
 
 void Scheduler::RecordHostCopy(const ResogunCopy::Item& item) {
     const u64 seq = ++host_copies_issued;
-    if (!ResogunSync::Enabled()) {
+    if (!ResogunSync::On(ResogunSync::HostQueue)) {
         Record([item, this, seq](vk::CommandBuffer) {
             item.run(item);
             host_copies_done.store(seq, std::memory_order_release);
@@ -307,7 +307,7 @@ void Scheduler::WaitDeferredSignals(std::source_location caller) {
     {
         ResogunStats::WaitTimer timer{ResogunStats::host_copies_wait_ns};
         KickRecording(true);
-        if (ResogunSync::Enabled()) {
+        if (ResogunSync::On(ResogunSync::HostQueue)) {
             // Hands the signals still queued to the copy threads here.
             RunHostWork(host_copies_issued);
         }
@@ -328,7 +328,7 @@ void Scheduler::WaitHostCopies(std::source_location caller) {
         ResogunStats::host_copy_waits.fetch_add(1, std::memory_order_relaxed);
         KickRecording(true);
         blocked = true;
-        if (ResogunSync::Enabled()) {
+        if (ResogunSync::On(ResogunSync::HostQueue)) {
             RunHostWork(host_copies_issued);
         }
         while (host_copies_done.load(std::memory_order_acquire) < host_copies_issued) {
@@ -676,7 +676,7 @@ void Scheduler::QueueSubmit(vk::CommandBuffer cmdbuf, SubmitInfo& info, u64 sign
 
 bool Scheduler::AsyncSubmitEnabled() const {
     // resogun: RESOGUN_LOAD_SYNCS=0: submissions drain the recorder and submit here.
-    return ResogunSync::Enabled() && !TRACY_GPU_ENABLED && recording_threaded &&
+    return ResogunSync::On(ResogunSync::AsyncSubmit) && !TRACY_GPU_ENABLED && recording_threaded &&
            !ResogunToggle::Disabled(ResogunToggle::ThreadedRecording);
 }
 

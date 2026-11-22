@@ -28,6 +28,33 @@ inline bool Enabled() {
     return enabled;
 }
 
+/// The parts of RESOGUN_LOAD_SYNCS, each off with its own variable set to 0 (all off with
+/// RESOGUN_LOAD_SYNCS=0). Eager signals need the host work queue.
+enum Part : unsigned {
+    AsyncSubmit,   ///< RESOGUN_LS_ASYNC: plain submissions made by the recording thread
+    HostQueue,     ///< RESOGUN_LS_HOSTQ: host copies and deferred signals a waiter runs itself
+    EagerSignals,  ///< RESOGUN_LS_EAGER: deferred signals run at once while the recorder is behind
+    DeferredFrees, ///< RESOGUN_LS_FREES: large RecordData blocks freed after the submission
+    ReadbackSkip,  ///< RESOGUN_LS_READBACK: readback processing without downloads skips the wait
+    NumParts,
+};
+
+inline bool On(Part part) {
+    static const auto parts = [] {
+        constexpr std::array<const char*, NumParts> names = {
+            "RESOGUN_LS_ASYNC", "RESOGUN_LS_HOSTQ", "RESOGUN_LS_EAGER", "RESOGUN_LS_FREES",
+            "RESOGUN_LS_READBACK"};
+        std::array<bool, NumParts> on{};
+        for (unsigned i = 0; i < NumParts; ++i) {
+            const char* value = std::getenv(names[i]);
+            on[i] = Enabled() && (!value || value[0] != '0');
+        }
+        on[EagerSignals] = on[EagerSignals] && on[HostQueue];
+        return on;
+    }();
+    return parts[part];
+}
+
 enum Kind : unsigned {
     Other,           ///< SyncRecording() from elsewhere (descriptor pushes too large for a chunk)
     Submit,          ///< recorder drained before a submission (Flush, Finish, Wait)
