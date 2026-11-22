@@ -1,261 +1,228 @@
 // SPDX-FileCopyrightText: Copyright 2025 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-#include <atomic>
+#include <bit>
 #include <unordered_map>
-#include <queue>
-#include "common/logging/log.h"
+#include <unordered_set>
+#include <utility>
+#include <vector>
+#include "shader_recompiler/ir/ir_emitter.h"
 #include "shader_recompiler/ir/program.h"
 
+// resogun: SGPR spills. The GCN compiler parks an SGPR in one lane of a VGPR (v_writelane_b32)
+// and reloads it later (v_readlane_b32 with a constant lane). Per the GCN3 ISA both ignore EXEC:
+// v_writelane writes only lane S1[5:0] of the destination VGPR and every other lane keeps its
+// value; v_readlane returns lane S1[5:0] of the source VGPR as a scalar. A Vulkan subgroup may be
+// 32 wide and the lane may be inactive, so a reload cannot simply be a broadcast from lane N. This
+// pass rewrites each reload with a constant lane into the scalar value parked there, following
+// the VGPR's SSA history:
+//  - a v_writelane to the same lane gives the written value;
+//  - a v_writelane to another constant lane is looked through;
+//  - a phi becomes a new phi of the lane's value on each incoming edge (one per phi and lane);
+//  - an immediate, an undefined value or a lane read result is the same in every lane;
+//  - anything else (the VGPR carries some other vector value on that path, or a v_writelane whose
+//    lane is not a constant) keeps a real lane read of that value, placed where the value is
+//    live: before the original read, or at the end of the phi's incoming block.
+// Every v_writelane left afterwards is lowered to its ISA meaning on the invocation's own copy of
+// the VGPR: lane_id == lane ? written : old.
+
 namespace Shader::Optimization {
+namespace {
 
-// golf-fix: SGPR spills to VGPR lanes (v_writelane / v_readlane) whose VGPR also carries an
-// unrelated value on some control flow path could not be eliminated. The fallback emitted
-// WriteLane as 0, so every reload of a spilled SGPR read 0 (black eyes/mouth in
-// Everybody's Golf). Values reaching the readlane from a non-WriteLane producer are treated
-// as undefined, matching what the original compiler assumed for spill slots.
-static thread_local IR::Inst* g_golf_undef{};
-static thread_local IR::Block* g_golf_entry{};
+constexpr u32 LaneMask = 63; // the lane select is bits 5:0
 
-static IR::Value GolfUndef() {
-    if (!g_golf_undef) {
-        g_golf_undef = &*g_golf_entry->PrependNewInst(g_golf_entry->begin(), IR::Opcode::UndefU32);
-    }
-    return IR::Value{g_golf_undef};
-}
+struct Site {
+    IR::Block* block;
+    IR::Block::iterator pos;
+};
 
-static IR::Inst* SearchChain(IR::Inst* inst, u32 lane) {
-    while (inst->GetOpcode() == IR::Opcode::WriteLane) {
-        if (inst->Arg(2).U32() == lane) {
-            // We found a possible write lane source, return it.
-            return inst;
+class LaneValues {
+public:
+    // The value lane `lane` of `value` holds at `site`.
+    IR::Value Resolve(const IR::Value& value, u32 lane, Site site) {
+        if (value.IsImmediate()) {
+            return AsU32(value);
         }
-        inst = inst->Arg(0).Inst();
-    }
-    return inst;
-}
-
-static bool IsPossibleToEliminate(IR::Inst* inst, u32 lane) {
-    // Breadth-first search visiting the right most arguments first
-    boost::container::small_vector<IR::Inst*, 16> visited;
-    std::queue<IR::Inst*> queue;
-    queue.push(inst);
-    bool found_write = false;
-    bool found_foreign = false;
-    IR::Opcode foreign_op{};
-
-    while (!queue.empty()) {
-        // Pop one instruction from the queue
-        IR::Inst* inst{queue.front()};
-        queue.pop();
-
-        // If it's a WriteLane search for possible candidates
-        if (inst = SearchChain(inst, lane); inst->GetOpcode() == IR::Opcode::WriteLane) {
-            // We found a possible write lane source, stop looking here.
-            found_write = true;
-            continue;
+        IR::Inst* inst = value.Inst();
+        while (inst->GetOpcode() == IR::Opcode::WriteLane) {
+            const IR::Value target = inst->Arg(2);
+            if (!target.IsImmediate()) {
+                return LaneRead(IR::Value{inst}, lane, site);
+            }
+            if ((target.U32() & LaneMask) == lane) {
+                return inst->Arg(1);
+            }
+            const IR::Value older = inst->Arg(0);
+            if (older.IsImmediate()) {
+                return AsU32(older);
+            }
+            inst = older.Inst();
         }
-        // A select between two VGPR values (EXEC-masked write): follow both sides.
-        if (inst->GetOpcode() == IR::Opcode::SelectU32) {
-            for (size_t arg = 1; arg <= 2; ++arg) {
-                const auto arg_value{inst->Arg(arg)};
-                if (arg_value.IsImmediate()) {
+        switch (inst->GetOpcode()) {
+        case IR::Opcode::Phi:
+            return LanePhi(inst, lane);
+        case IR::Opcode::UndefU32:
+        case IR::Opcode::ReadLane:
+        case IR::Opcode::ReadFirstLane:
+            return IR::Value{inst};
+        default:
+            return LaneRead(IR::Value{inst}, lane, site);
+        }
+    }
+
+    // True when every value `value` can come from is 32 bits wide (what Resolve handles).
+    static bool Resolvable(const IR::Value& value) {
+        std::vector<IR::Value> stack{value};
+        std::unordered_set<IR::Inst*> seen;
+        while (!stack.empty()) {
+            const IR::Value v = stack.back();
+            stack.pop_back();
+            if (!v.IsImmediate()) {
+                IR::Inst* const inst = v.Inst();
+                if (!seen.insert(inst).second) {
                     continue;
                 }
-                IR::Inst* arg_inst{arg_value.Inst()};
-                if (std::ranges::find(visited, arg_inst) == visited.end()) {
-                    visited.push_back(arg_inst);
-                    queue.push(arg_inst);
+                if (inst->GetOpcode() == IR::Opcode::WriteLane) {
+                    stack.push_back(inst->Arg(0));
+                    continue;
+                }
+                if (inst->GetOpcode() == IR::Opcode::Phi) {
+                    for (size_t i = 0; i < inst->NumArgs(); ++i) {
+                        stack.push_back(inst->Arg(i));
+                    }
+                    continue;
                 }
             }
-            continue;
-        }
-        // Other producers: the spill slot holds an unrelated value on that path.
-        if (inst->GetOpcode() != IR::Opcode::Phi && inst->GetOpcode() != IR::Opcode::UndefU32) {
-            if (!found_foreign) {
-                foreign_op = inst->GetOpcode();
+            if (v.Type() != IR::Type::U32 && v.Type() != IR::Type::F32) {
+                return false;
             }
-            found_foreign = true;
-            continue;
         }
-        for (size_t arg = inst->NumArgs(); arg--;) {
-            auto arg_value{inst->Arg(arg)};
-            if (arg_value.IsImmediate()) {
+        return true;
+    }
+
+    std::vector<IR::Inst*> created_phis;
+
+private:
+    static IR::Value AsU32(const IR::Value& imm) {
+        return imm.Type() == IR::Type::F32 ? IR::Value{std::bit_cast<u32>(imm.F32())} : imm;
+    }
+
+    static IR::Value LaneRead(const IR::Value& value, u32 lane, Site site) {
+        IR::IREmitter ir{*site.block, site.pos};
+        const IR::U32 bits = value.Type() == IR::Type::F32
+                                 ? ir.BitCast<IR::U32, IR::F32>(IR::F32{value})
+                                 : IR::U32{value};
+        return ir.ReadLane(bits, ir.Imm32(lane));
+    }
+
+    IR::Value LanePhi(IR::Inst* phi, u32 lane) {
+        const auto key = std::make_pair(phi, lane);
+        if (const auto it = lane_phis.find(key); it != lane_phis.end()) {
+            return IR::Value{it->second};
+        }
+        IR::Block* const block = phi->GetParent();
+        IR::Inst* const lane_phi = &*block->PrependNewInst(
+            IR::Block::InstructionList::s_iterator_to(*phi), IR::Opcode::Phi);
+        lane_phi->SetFlags(IR::Type::U32);
+        lane_phis.emplace(key, lane_phi);
+        created_phis.push_back(lane_phi);
+        // Resolve every edge before adding operands: an edge may come back to this phi.
+        std::vector<std::pair<IR::Block*, IR::Value>> edges;
+        for (size_t i = 0; i < phi->NumArgs(); ++i) {
+            IR::Block* const from = phi->PhiBlock(i);
+            edges.emplace_back(from, Resolve(phi->Arg(i), lane, Site{from, from->end()}));
+        }
+        for (const auto& [from, value] : edges) {
+            lane_phi->AddPhiOperand(from, value);
+        }
+        return IR::Value{lane_phi};
+    }
+
+    struct KeyHash {
+        size_t operator()(const std::pair<IR::Inst*, u32>& k) const {
+            return std::hash<IR::Inst*>{}(k.first) ^ (size_t{k.second} << 1);
+        }
+    };
+    std::unordered_map<std::pair<IR::Inst*, u32>, IR::Inst*, KeyHash> lane_phis;
+};
+
+// Lane phis that merge one value (besides themselves) become that value.
+void FoldLanePhis(std::vector<IR::Inst*>& phis) {
+    for (bool changed = true; changed;) {
+        changed = false;
+        for (IR::Inst*& phi : phis) {
+            if (phi == nullptr) {
                 continue;
             }
-            // Queue instruction if it hasn't been visited
-            IR::Inst* arg_inst{arg_value.Inst()};
-            if (std::ranges::find(visited, arg_inst) == visited.end()) {
-                visited.push_back(arg_inst);
-                queue.push(arg_inst);
+            IR::Value only;
+            bool merges = false;
+            for (size_t i = 0; i < phi->NumArgs() && !merges; ++i) {
+                const IR::Value arg = phi->Arg(i);
+                if (arg == IR::Value{phi} || arg == only) {
+                    continue;
+                }
+                merges = !only.IsEmpty();
+                only = arg;
             }
+            if (merges || only.IsEmpty()) {
+                continue;
+            }
+            IR::Block* const block = phi->GetParent();
+            phi->ReplaceUsesWithAndRemove(only);
+            block->Instructions().erase(IR::Block::InstructionList::s_iterator_to(*phi));
+            phi = nullptr;
+            changed = true;
         }
     }
-    if (found_foreign) {
-        static std::atomic<int> golf_logged{0};
-        if (golf_logged < 32) {
-            ++golf_logged;
-            LOG_ERROR(Render_Recompiler,
-                      "golf-fix: readlane lane {} chain has foreign producer {} (writelane found: {})",
-                      lane, IR::NameOf(foreign_op), found_write);
-        }
-    }
-    return found_write;
 }
 
-using PhiMap = std::unordered_map<IR::Inst*, IR::Value>;
-
-static IR::Value GetRealValue(PhiMap& phi_map, IR::Inst* inst, u32 lane) {
-    // If this is a WriteLane op search the chain for a possible candidate.
-    if (inst = SearchChain(inst, lane); inst->GetOpcode() == IR::Opcode::WriteLane) {
-        return inst->Arg(1);
-    }
-
-    // If this is a phi, duplicate it and populate its arguments with real values.
-    if (inst->GetOpcode() == IR::Opcode::Phi) {
-        // We are in a phi cycle, use the already duplicated phi.
-        const auto [it, is_new_phi] = phi_map.try_emplace(inst);
-        if (!is_new_phi) {
-            return it->second;
-        }
-
-        // Create new phi and insert it right before the old one.
-        const auto insert_point = IR::Block::InstructionList::s_iterator_to(*inst);
-        IR::Block* block = inst->GetParent();
-        IR::Inst* const new_phi{&*block->PrependNewInst(insert_point, IR::Opcode::Phi)};
-        new_phi->SetFlags(IR::Type::U32);
-        it->second = IR::Value{new_phi};
-
-        // Gather all arguments.
-        boost::container::small_vector<IR::Value, 5> phi_args;
-        for (size_t arg_index = 0; arg_index < inst->NumArgs(); arg_index++) {
-            IR::Value arg = inst->Arg(arg_index);
-            if (!arg.IsImmediate()) {
-                arg = GetRealValue(phi_map, arg.Inst(), lane);
-            }
-            phi_args.push_back(arg);
-        }
-        for (size_t arg_index = 0; arg_index < inst->NumArgs(); arg_index++) {
-            new_phi->AddPhiOperand(inst->PhiBlock(arg_index), phi_args[arg_index]);
-        }
-        return IR::Value{new_phi};
-    }
-    if (inst->GetOpcode() == IR::Opcode::UndefU32) {
-        return IR::Value{inst};
-    }
-    if (inst->GetOpcode() == IR::Opcode::SelectU32) {
-        const auto [it, is_new] = phi_map.try_emplace(inst);
-        if (!is_new) {
-            return it->second;
-        }
-        IR::Value sides[2];
-        for (size_t i = 0; i < 2; ++i) {
-            const IR::Value arg = inst->Arg(i + 1);
-            sides[i] = arg.IsImmediate() ? arg : GetRealValue(phi_map, arg.Inst(), lane);
-        }
-        const auto insert_point = IR::Block::InstructionList::s_iterator_to(*inst);
-        IR::Block* block = inst->GetParent();
-        IR::Inst* const sel{&*block->PrependNewInst(insert_point, IR::Opcode::SelectU32,
-                                                    {inst->Arg(0), sides[0], sides[1]})};
-        phi_map[inst] = IR::Value{sel};
-        return IR::Value{sel};
-    }
-    return GolfUndef();
-}
-
-void ReadLaneEliminationPass(IR::Program& program) {
-    g_golf_undef = nullptr;
-    g_golf_entry = program.post_order_blocks.back();
-    PhiMap phi_map;
-    std::vector<IR::Inst*> worklist;
+void LowerWriteLanes(IR::Program& program) {
     for (IR::Block* const block : program.blocks) {
         for (IR::Inst& inst : block->Instructions()) {
-            if (inst.GetOpcode() != IR::Opcode::ReadLane) {
+            if (inst.GetOpcode() != IR::Opcode::WriteLane) {
                 continue;
             }
-            if (!inst.Arg(1).IsImmediate()) {
-                continue;
-            }
-
-            const u32 lane = inst.Arg(1).U32();
-            IR::Inst* prod = inst.Arg(0).Inst();
-            IR::Value replacement{};
-
-            // Check simple case of no control flow and phis
-            if (prod = SearchChain(prod, lane); prod->GetOpcode() == IR::Opcode::WriteLane) {
-                replacement = prod->Arg(1);
-            } else if ((prod->GetOpcode() == IR::Opcode::Phi ||
-                        prod->GetOpcode() == IR::Opcode::SelectU32) &&
-                       IsPossibleToEliminate(prod, lane)) {
-                replacement = GetRealValue(phi_map, prod, lane);
-                for (const auto& [_, phi_value] : phi_map) {
-                    if (!phi_value.IsImmediate() &&
-                        phi_value.Inst()->GetOpcode() == IR::Opcode::Phi) {
-                        worklist.push_back(phi_value.Inst());
-                    }
-                }
-                phi_map.clear();
-            }
-            if (replacement.IsEmpty()) {
-                static std::atomic<int> golf_failed{0};
-                if (golf_failed < 32) {
-                    ++golf_failed;
-                    LOG_ERROR(Render_Recompiler,
-                              "golf-fix: readlane lane {} not eliminated, source {}", lane,
-                              IR::NameOf(prod->GetOpcode()));
-                }
-                continue;
-            }
-
-            for (auto& [user, operand] : inst.Uses()) {
-                if (user->GetOpcode() == IR::Opcode::Phi) {
-                    worklist.push_back(user);
-                }
-            }
-            inst.ReplaceUsesWith(replacement);
+            IR::IREmitter ir{*block, IR::Block::InstructionList::s_iterator_to(inst)};
+            const IR::Value target = inst.Arg(2);
+            const IR::U32 lane =
+                target.IsImmediate()
+                    ? ir.Imm32(target.U32() & LaneMask)
+                    : IR::U32{ir.BitwiseAnd(IR::U32{target}, ir.Imm32(LaneMask))};
+            const IR::U1 mine = ir.IEqual(ir.LaneId(), lane);
+            const IR::U32 merged{ir.Select(mine, IR::U32{inst.Arg(1)}, IR::U32{inst.Arg(0)})};
+            inst.ReplaceUsesWithAndRemove(merged);
         }
     }
-    // Attempt to resolve phis that have become trivial
-    while (!worklist.empty()) {
-        IR::Inst* phi = worklist.back();
-        worklist.pop_back();
+}
 
-        if (phi->GetOpcode() == IR::Opcode::Void) {
-            continue;
-        }
+} // namespace
 
-        IR::Value same;
-        bool non_trivial = false;
-        for (size_t i = 0; i < phi->NumArgs(); ++i) {
-            const IR::Value op{phi->Arg(i)};
-            if (op == same || op == IR::Value{phi}) {
-                // Unique value or self-reference
-                continue;
-            }
-            if (!same.IsEmpty()) {
-                // The phi merges at least two values: not trivial
-                non_trivial = true;
-                break;
-            }
-            same = op;
-        }
-        if (non_trivial) {
-            continue;
-        }
-
-        IR::Block* block = phi->GetParent();
-        ASSERT(!same.IsEmpty());
-
-        // Add phi users to worklist since they may have become trivial
-        for (const auto& [user, operand] : phi->Uses()) {
-            if (user->GetOpcode() == IR::Opcode::Phi && user != phi) {
-                worklist.push_back(user);
+void ReadLaneEliminationPass(IR::Program& program) {
+    std::vector<IR::Inst*> reads;
+    for (IR::Block* const block : program.blocks) {
+        for (IR::Inst& inst : block->Instructions()) {
+            if (inst.GetOpcode() == IR::Opcode::ReadLane && inst.Arg(1).IsImmediate() &&
+                !inst.Arg(0).IsImmediate()) {
+                reads.push_back(&inst);
             }
         }
-        phi->ReplaceUsesWithAndRemove(same);
-        auto it = IR::Block::InstructionList::s_iterator_to(*phi);
-        block->Instructions().erase(it);
     }
+    LaneValues lanes;
+    for (IR::Inst* const read : reads) {
+        const IR::Value source = read->Arg(0);
+        const IR::Opcode producer = source.Inst()->GetOpcode();
+        if (producer != IR::Opcode::WriteLane && producer != IR::Opcode::Phi) {
+            continue; // a plain vector value: the read stays a lane read
+        }
+        if (!LaneValues::Resolvable(source)) {
+            continue;
+        }
+        const u32 lane = read->Arg(1).U32() & LaneMask;
+        const Site site{read->GetParent(), IR::Block::InstructionList::s_iterator_to(*read)};
+        read->ReplaceUsesWith(lanes.Resolve(source, lane, site));
+    }
+    FoldLanePhis(lanes.created_phis);
+    LowerWriteLanes(program);
 }
 
 } // namespace Shader::Optimization
