@@ -518,73 +518,94 @@ static void read_inject(void) {
             printf("Runtime: pad file: user %d buttons 0x%x sticks %d %d %d %d\n",u+1,next[u].buttons,k[0],k[1],k[2],k[3]);
     }
 }
-/* RESOGUN_PAD_RECORD=<file>: F9 starts and stops recording the pad state (gamepad or keyboard) with
- * the time since F9; RESOGUN_PAD_REPLAY=<file> plays such a recording back, started by the token
- * "replay" in RESOGUN_PAD_FILE (scripted tests repeat a route the player ran once). Lines: ms buttons
- * lx ly rx ry l2 r2, written when the state changes. */
-typedef struct { uint32_t ms, buttons; uint8_t axes[4], l2, r2; } PadSample;
+/* RESOGUN_PAD_RECORD=<file>: records the pad state the guest receives (after the keyboard, gamepad,
+ * RESOGUN_PAD_FILE and the title-screen presses), starting at user 1's first read; F9 stops it and
+ * starts a new one. RESOGUN_PAD_REPLAY=<file> plays such a recording back from user 1's first read
+ * and ignores every real input while it plays; "Runtime: pad replay finished" marks the hand-back.
+ * The token "replay" in RESOGUN_PAD_FILE restarts it. Both are keyed to the presenter's flip count
+ * (resogun_gpu_flips) relative to that first read, not to time, so a slow frame moves a press with
+ * the game. Lines: flip buttons lx ly rx ry l2 r2, written when the state changes; '#' lines are
+ * comments. A state holds until the next line; the replay ends REPLAY_TAIL flips after the last. */
+#define REPLAY_TAIL 30
+typedef struct { uint64_t flip; uint32_t buttons; uint8_t axes[4], l2, r2; } PadSample;
 static FILE *record_file;
-static uint64_t record_start;
+static uint64_t record_base;
 static PadSample record_last;
 static void record_sample(const PadData *d) {
-    static const char *path; static int checked, f9_was_down;
+    static const char *path; static int checked, f9_was_down, started;
     if (!checked) { path=getenv("RESOGUN_PAD_RECORD"); checked=1; }
-    if (!path || !*path || !sdl_ready) return;
-    const bool *k=SDL_GetKeyboardState(NULL);
+    if (!path || !*path) return;
+    const bool *k=sdl_ready ? SDL_GetKeyboardState(NULL) : NULL;
     const int f9=k && k[SDL_SCANCODE_F9];
-    if (f9 && !f9_was_down) {
-        if (record_file) {
-            fclose(record_file); record_file=NULL;
-            printf("Runtime: pad recording stopped (%s)\n",path);
-        } else if ((record_file=fopen(path,"w"))) {
-            record_start=now_us();
-            memset(&record_last,0xff,sizeof(record_last));
-            printf("Runtime: pad recording started (%s, F9 stops)\n",path);
-        }
-    }
+    const int toggle=f9 && !f9_was_down;
     f9_was_down=f9;
+    if (record_file && toggle) {
+        fclose(record_file); record_file=NULL;
+        printf("Runtime: pad recording stopped (%s)\n",path);
+        return;
+    }
+    if (!record_file && (toggle || !started)) {
+        started=1;
+        if (!(record_file=fopen(path,"w"))) return;
+        record_base=resogun_gpu_flips();
+        memset(&record_last,0xff,sizeof(record_last));
+        fputs("# pad record v1: flip buttons lx ly rx ry l2 r2\n",record_file);
+        printf("Runtime: pad recording started (%s)\n",path);
+    }
     if (!record_file) return;
-    PadSample s={(uint32_t)((now_us()-record_start)/1000),d->buttons,
+    PadSample s={resogun_gpu_flips()-record_base,d->buttons,
                  {d->left_x,d->left_y,d->right_x,d->right_y},d->l2,d->r2};
     if (s.buttons==record_last.buttons && !memcmp(s.axes,record_last.axes,4) &&
         s.l2==record_last.l2 && s.r2==record_last.r2) return;
     record_last=s;
-    fprintf(record_file,"%u %u %u %u %u %u %u %u\n",s.ms,s.buttons,s.axes[0],s.axes[1],s.axes[2],
-            s.axes[3],s.l2,s.r2);
+    fprintf(record_file,"%llu %u %u %u %u %u %u %u\n",(unsigned long long)s.flip,s.buttons,s.axes[0],
+            s.axes[1],s.axes[2],s.axes[3],s.l2,s.r2);
     fflush(record_file);
 }
 static PadSample *replay; static size_t replay_count, replay_next;
-static void replay_sample(PadData *d) {
-    if (!replay_armed) return;
+static size_t replay_parse(FILE *f, PadSample **out) {
+    PadSample *v=NULL; size_t n=0, cap=0;
+    char line[256];
+    while (fgets(line,sizeof(line),f)) {
+        unsigned long long fl; unsigned a[7];
+        if (line[0]=='#' || sscanf(line,"%llu %u %u %u %u %u %u %u",&fl,&a[0],&a[1],&a[2],&a[3],&a[4],&a[5],&a[6])!=8) continue;
+        if (n==cap && !(v=realloc(v,(cap=cap ? cap*2 : 1024)*sizeof(*v)))) { n=0; break; }
+        v[n++]=(PadSample){fl,a[0],{(uint8_t)a[1],(uint8_t)a[2],(uint8_t)a[3],(uint8_t)a[4]},(uint8_t)a[5],(uint8_t)a[6]};
+    }
+    *out=v;
+    return n;
+}
+/* Overwrites d with the recorded state; false once the recording is over (real input is back). */
+static bool replay_sample(PadData *d) {
+    if (!replay_armed) return false;
+    static uint64_t base;
     if (!replay_start) {
         static int loaded;
         if (!loaded) {
             loaded=1;
             const char *path=getenv("RESOGUN_PAD_REPLAY");
             FILE *f=path ? fopen(path,"r") : NULL;
-            PadSample s; unsigned v[8]; size_t cap=0;
-            while (f && fscanf(f,"%u %u %u %u %u %u %u %u",&v[0],&v[1],&v[2],&v[3],&v[4],&v[5],&v[6],&v[7])==8) {
-                s=(PadSample){v[0],v[1],{(uint8_t)v[2],(uint8_t)v[3],(uint8_t)v[4],(uint8_t)v[5]},(uint8_t)v[6],(uint8_t)v[7]};
-                if (replay_count==cap && !(replay=realloc(replay,(cap=cap ? cap*2 : 1024)*sizeof(*replay)))) break;
-                replay[replay_count++]=s;
-            }
-            if (f) fclose(f);
+            if (f) { replay_count=replay_parse(f,&replay); fclose(f); }
             printf("Runtime: pad replay of %zu samples from %s\n",replay_count,path ? path : "(unset)");
         }
-        replay_start=now_us();
+        replay_start=1;
+        base=resogun_gpu_flips();
         replay_next=0;
     }
-    const uint32_t ms=(uint32_t)((now_us()-replay_start)/1000);
-    while (replay_next<replay_count && replay[replay_next].ms<=ms) ++replay_next;
-    if (!replay_next) return;
-    if (replay_next==replay_count && ms>replay[replay_count-1].ms+500) {
-        if (replay_armed==1) { puts("Runtime: pad replay finished"); replay_armed=2; }
-        return;
+    if (replay_armed==2) return false;
+    const uint64_t flip=resogun_gpu_flips()-base;
+    while (replay_next<replay_count && replay[replay_next].flip<=flip) ++replay_next;
+    if (!replay_count || (replay_next==replay_count && flip>replay[replay_count-1].flip+REPLAY_TAIL)) {
+        printf("Runtime: pad replay finished at flip %llu; real input is back\n",(unsigned long long)flip);
+        replay_armed=2;
+        return false;
     }
-    const PadSample *s=&replay[replay_next-1];
-    d->buttons=s->buttons;
-    d->left_x=s->axes[0]; d->left_y=s->axes[1]; d->right_x=s->axes[2]; d->right_y=s->axes[3];
-    d->l2=s->l2; d->r2=s->r2;
+    const PadSample *s=replay_next ? &replay[replay_next-1] : NULL;
+    d->buttons=s ? s->buttons : 0;
+    d->left_x=s ? s->axes[0] : 128; d->left_y=s ? s->axes[1] : 128;
+    d->right_x=s ? s->axes[2] : 128; d->right_y=s ? s->axes[3] : 128;
+    d->l2=s ? s->l2 : 0; d->r2=s ? s->r2 : 0;
+    return true;
 }
 
 /* settings.ini skip_intro: the game starts with -nosplash (loader.c), which leaves its title screen
@@ -618,7 +639,7 @@ static void title_press(PadData *d) {
  * released: the game would take them as a new press. A replay and the title screen's presses are
  * user 1's; the pad file presses for either user. */
 static int hold_after_capture[PADS];
-static void sample(PadData *d, int slot) {
+static void sample_live(PadData *d, int slot) {
     pthread_mutex_lock(&host_lock);
     *d=host_sample[slot];
     const PadInjection injection=injected[slot];
@@ -635,13 +656,20 @@ static void sample(PadData *d, int slot) {
         if (!slot) title_back(d);
         return;
     }
-    if (!slot) record_sample(d); /* the click sources as they are: a replay plays them again */
     static uint32_t consumed_revision;
     if (consumed_revision!=revision) {
         consumed_revision=revision;
-        if (replay_armed!=1) { replay_armed=1; replay_start=0; }
+        replay_armed=1; replay_start=0;
     }
-    if (!slot) replay_sample(d);
+    if (!slot) {
+        static int env_checked;
+        if (!env_checked) {
+            env_checked=1;
+            const char *r=getenv("RESOGUN_PAD_REPLAY");
+            if (r && *r) { replay_armed=1; replay_start=0; }
+        }
+    }
+    if (!slot && replay_sample(d)) return; /* the recording is the whole input */
     const uint32_t inj=injection.buttons;
     d->buttons|=inj & ~STICK_DIRECTIONS;
     if (inj & (LSTICK_LEFT|LSTICK_RIGHT)) key_axis(&d->left_x,inj & LSTICK_LEFT,inj & LSTICK_RIGHT);
@@ -661,6 +689,10 @@ static void sample(PadData *d, int slot) {
     }
 }
 
+static void sample(PadData *d, int slot) {
+    sample_live(d,slot);
+    if (!slot) record_sample(d); /* what the guest receives, whatever its source */
+}
 
 /* settings.ini (RESOGUN_CONFIG names the file) and environment overrides, read once at pad open:
  *   key_<button>=Key[,Key...]  replaces that button's keyboard keys (SDL key names: "Space",

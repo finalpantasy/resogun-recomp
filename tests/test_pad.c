@@ -15,6 +15,8 @@ void resogun_display_settings_open(void) {}
 int resogun_title_back_exits(void) { return 1; }
 void resogun_exit_prompt_open(void) {}
 void resogun_cheats_open(void) {}
+static unsigned long long fake_flips;
+unsigned long long resogun_gpu_flips(void) { return fake_flips; }
 uintptr_t runtime_lookup(const RuntimeExport *table, size_t count, const char *name) {
     (void)table; (void)count; (void)name;
     return 0;
@@ -90,7 +92,37 @@ static void test_two_users(void) {
     assert(pad_close(2)==0 && pad_read_state(2,&d)==ERR_INVALID_HANDLE && pad_close(2)==ERR_INVALID_HANDLE);
 }
 
+/* RESOGUN_PAD_REPLAY: states keyed to flips since the first read; real input is ignored until the
+ * tail after the last line passes, then comes back. */
+static void test_replay(void) {
+    const char *path="test_pad_replay.tmp";
+    FILE *f=fopen(path,"w");
+    assert(f);
+    fprintf(f,"# pad record v1%c10 16384 128 128 128 128 0 0%c20 0 255 128 128 128 0 0%c",10,10,10);
+    fclose(f);
+    #ifdef _WIN32
+    _putenv_s("RESOGUN_PAD_REPLAY",path);
+#else
+    setenv("RESOGUN_PAD_REPLAY",path,1);
+#endif
+    fake_flips=1000;
+    PadData d;
+    memset(&d,0,sizeof(d));
+    d.buttons=BTN_SQUARE; d.left_x=d.left_y=d.right_x=d.right_y=128;
+    replay_armed=1; replay_start=0;
+    assert(replay_sample(&d) && replay_count==2 && d.buttons==0); /* before the first line: neutral */
+    d.buttons=BTN_SQUARE;
+    fake_flips=1010; assert(replay_sample(&d) && d.buttons==16384 && d.left_x==128);
+    fake_flips=1019; assert(replay_sample(&d) && d.buttons==16384);
+    fake_flips=1020; assert(replay_sample(&d) && d.buttons==0 && d.left_x==255);
+    fake_flips=1020+REPLAY_TAIL; assert(replay_sample(&d) && d.left_x==255);
+    d.buttons=BTN_SQUARE;
+    fake_flips=1021+REPLAY_TAIL; assert(!replay_sample(&d) && d.buttons==BTN_SQUARE && replay_armed==2);
+    remove(path);
+}
+
 int main(void) {
+    test_replay();
     test_default_keyboard();
     test_pad_buttons();
     test_two_users();
