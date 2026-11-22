@@ -1,0 +1,35 @@
+# Everybody's Golf (PS4, 2017) trophy names, grades and short descriptions: "ID=Name | Description | Grade".
+# The ID is the number in the game's TROPnnn.PNG icons (0-30). The game's own list is encrypted, so
+# these come from the public trophy lists (Exophase, PlayStation LifeStyle) and were checked against the icons.
+# A copy of this file in a save's folder replaces the lines it contains.
+0=Push it to the Limit! | Earn every other trophy | Platinum
+1=VS Master | Beat every opponent in VS mode | Gold
+2=Secret Master | Beat every hidden opponent in VS mode | Gold
+3=The End...? | Sit through the ending movie | Gold
+4=Absolute Finesse | Make a condor (4 under par) in a recorded official round | Gold
+5=Walking Encyclopedia | Fill in the whole fish encyclopedia | Gold
+6=Rank 5 Cleared! | Win rank 5 of the Challenge Tournaments | Silver
+7=Rank 4 Cleared! | Win rank 4 of the Challenge Tournaments | Silver
+8=Rank 3 Cleared! | Win rank 3 of the Challenge Tournaments | Silver
+9=It's a Miracle! | Make an albatross in a recorded official round | Silver
+10=My First Hole-in-One! | Make a hole-in-one in a recorded official round | Silver
+11=Inspiring Spiral | Hole out with a Spiral Shot in a recorded official round | Silver
+12=Bolt from the Blue | Hole out with a Rising Shot in a recorded official round | Silver
+13=Never Misses the Mark | Hole out with a Homing Shot in a recorded official round | Silver
+14=Full House | Get every CPU opponent from the Challenge Tournaments into your gallery | Silver
+15=Top Marks | Answer every question right in the Professor's quizzes | Silver
+16=Rank 2 Cleared! | Win rank 2 of the Challenge Tournaments | Bronze
+17=Rank 1 Cleared! | Win rank 1 of the Challenge Tournaments | Bronze
+18=Hop, Skip, and a Jump | Skip a shot across water in a recorded official round | Bronze
+19=Perfect Putting | Sink a putt of over 30 ft that keeps you at par or better, in a recorded official round | Bronze
+20=Crack Shot | Reach the green in regulation within 3 ft of the hole, in a recorded official round | Bronze
+21=Backspin Virtuoso | Pull off a Super Backspin in a recorded official round | Bronze
+22=Rocket Launch | Drive the ball 300 yards or more in a recorded official round | Bronze
+23=My First Chip-In! | Chip in at par or better in a recorded official round | Bronze
+24=My First Eagle! | Make an eagle in a recorded official round | Bronze
+25=My First Birdie! | Make a birdie in a recorded official round | Bronze
+26=My First... Fish? | Catch a fish at a fishing spot | Bronze
+27=My First Cart Ride! | Ride in a golf cart | Bronze
+28=Online Debut | Arrive at an online open course | Bronze
+29=How do I look? | Customize your character | Bronze
+30=Welcome to Golf Island | Create a character and reach the Home Area | Bronze

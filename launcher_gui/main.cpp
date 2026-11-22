@@ -23,6 +23,8 @@
 #include <algorithm>
 #include <atomic>
 #include <cstdio>
+#include <cctype>
+#include <ctime>
 #include <cwctype>
 #include <cstring>
 #include <filesystem>
@@ -46,6 +48,7 @@
 #ifndef GOLF_LAUNCHER_VERSION
 #define GOLF_LAUNCHER_VERSION "development"
 #endif
+#include "../src/trophy_record.h"
 
 namespace fs = std::filesystem;
 
@@ -70,12 +73,13 @@ enum Id : int {
     ID_COLLECT, ID_TEX_COUNT, ID_SCALE, ID_BUILD, ID_TEX_PROGRESS, ID_TEX_STATUS, ID_USE_PACK,
     ID_PROFILES, ID_PROFILE_NAME, ID_PROFILE_USE, ID_PROFILE_NEW, ID_PROFILE_COPY, ID_PROFILE_RENAME,
     ID_PROFILE_DELETE, ID_PROFILE_BACKUP, ID_PROFILE_OPEN, ID_PROFILE_STATUS,
+    ID_TROPHY_LIST, ID_TROPHY_STATUS,
     ID_ONLINE_NAME, ID_ONLINE_PORT, ID_ONLINE_HOST, ID_SERVER, ID_UPNP, ID_INVITE, ID_INVITE_CODE, ID_FIND, ID_FOUND,
     ID_ONLINE_STATUS,
     ID_NOTES, ID_UPDATE_NOW, ID_UPDATE_LATER, ID_UPDATE_SKIP, ID_UPDATE_BAR, ID_UPDATE_TEXT,
 };
 // The pages, in tab order.
-enum Page : int { PagePlay, PageDisplay, PageGraphics, PageControls, PageSaves, PageTextures, PageOnline, PageFiles, PageCount };
+enum Page : int { PagePlay, PageDisplay, PageGraphics, PageControls, PageSaves, PageTrophies, PageTextures, PageOnline, PageFiles, PageCount };
 
 // --- paths ------------------------------------------------------------------------------------------
 
@@ -241,6 +245,7 @@ bool recycle(const fs::path& folder) {
 
 std::atomic<bool> game_running{false};
 void refresh_saves();
+void refresh_trophies();
 void refresh_online();
 
 // --- jobs: one at a time on a worker thread; their output goes to the page and to launcher.log -------
@@ -540,6 +545,7 @@ void show_page(int page) {
     for (size_t i = 0; i < pages.size(); ++i)
         for (HWND c : pages[i]) ShowWindow(c, (int)i == page ? SW_SHOW : SW_HIDE);
     if (page == PageSaves) refresh_saves();
+    if (page == PageTrophies) refresh_trophies();
     if (page == PageOnline) refresh_online();
     refresh_status();
 }
@@ -1596,6 +1602,114 @@ void show_update_window() {
 
 std::vector<std::wstring> shown_saves;
 
+// The trophies of the save in use: each trophy in the game's list with its grade and the day it was
+// earned. Ids come from the game's trophy00.trp (TROPnnn.PNG entries); 31 when it cannot be read.
+std::vector<int> trophy_ids() {
+    std::vector<int> ids;
+    Paths p = saved_paths();
+    if (!p.image.empty()) {
+        std::ifstream f(data / L"game" / p.image / L"sce_sys" / L"trophy" / L"trophy00.trp", std::ios::binary);
+        unsigned char head[0x60];
+        if (f.read((char*)head, sizeof head) && head[0] == 0xDC && head[1] == 0xA2 && head[2] == 0x4D) {
+            unsigned count = head[0x10] << 24 | head[0x11] << 16 | head[0x12] << 8 | head[0x13];
+            unsigned elem = head[0x14] << 24 | head[0x15] << 16 | head[0x16] << 8 | head[0x17];
+            if (elem >= 0x30 && elem <= 0x100 && count < 4096) {
+                std::vector<unsigned char> entry(elem);
+                for (unsigned i = 0; i < count && f.read((char*)entry.data(), elem); ++i) {
+                    const char* n = (const char*)entry.data();
+                    if (!strncmp(n, "TROP", 4) && isdigit((unsigned char)n[4]) && isdigit((unsigned char)n[5]) &&
+                        isdigit((unsigned char)n[6]) && !strncmp(n + 7, ".PNG", 4))
+                        ids.push_back((n[4] - '0') * 100 + (n[5] - '0') * 10 + (n[6] - '0'));
+                }
+            }
+        }
+    }
+    if (ids.empty()) for (int i = 0; i < 31; ++i) ids.push_back(i);
+    std::sort(ids.begin(), ids.end());
+    return ids;
+}
+
+// A trophy's name and grade from trophy_names.txt ("ID=Name | Description | Grade"): the list beside the
+// program first, then the save's own, whose lines replace it.
+struct TrophyText { std::wstring name; wchar_t grade = 0; };
+std::wstring utf8_wide(const std::string& s) {
+    if (s.empty()) return L"";
+    int n = MultiByteToWideChar(CP_UTF8, 0, s.data(), (int)s.size(), nullptr, 0);
+    std::wstring w(n, L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, s.data(), (int)s.size(), w.data(), n);
+    return w;
+}
+void read_trophy_texts(const fs::path& path, std::map<int, TrophyText>& out) {
+    std::ifstream f(path, std::ios::binary);
+    std::string line;
+    while (std::getline(f, line)) {
+        if (line.compare(0, 3, "\xEF\xBB\xBF") == 0) line.erase(0, 3);
+        size_t eq = line.find('=');
+        if (line.empty() || line[0] == '#' || eq == std::string::npos) continue;
+        char* end = nullptr;
+        long id = strtol(line.c_str(), &end, 10);
+        if (end == line.c_str() || id < 0 || id >= 256) continue;
+        auto trim = [](std::string v) {
+            while (!v.empty() && (v.back() == ' ' || v.back() == '\r' || v.back() == '\n')) v.pop_back();
+            size_t b = v.find_first_not_of(' ');
+            return b == std::string::npos ? std::string() : v.substr(b);
+        };
+        std::string rest = line.substr(eq + 1);
+        size_t bar = rest.find('|');
+        std::string name = trim(rest.substr(0, bar));
+        if (name.empty()) continue;
+        TrophyText t;
+        t.name = utf8_wide(name);
+        if (bar != std::string::npos) {
+            size_t bar2 = rest.find('|', bar + 1);
+            if (bar2 != std::string::npos) {
+                std::string g = trim(rest.substr(bar2 + 1));
+                if (!g.empty()) t.grade = (wchar_t)toupper((unsigned char)g[0]);
+            }
+        }
+        out[(int)id] = t;
+    }
+}
+
+void refresh_trophies() {
+    HWND list = controls[ID_TROPHY_LIST];
+    if (!list) return;
+    SendMessageW(list, LB_RESETCONTENT, 0, 0);
+    TrophyLog log;
+    log.n = 0;
+    if (FILE* f = _wfopen((save_dir(current_save()) / L"trophies.txt").c_str(), L"rb")) { trophy_log_read(&log, f); fclose(f); }
+    std::map<int, TrophyText> texts;
+    read_trophy_texts(root / L"trophy_names.txt", texts);
+    read_trophy_texts(save_dir(current_save()) / L"trophy_names.txt", texts);
+    auto grade_name = [](wchar_t g) { return g == L'P' ? L"Platinum" : g == L'G' ? L"Gold" : g == L'S' ? L"Silver" : g == L'B' ? L"Bronze" : L"?"; };
+    std::vector<int> ids = trophy_ids();
+    for (int i = 0; i < log.n; ++i) // a recorded id the list lacks still shows
+        if (!std::count(ids.begin(), ids.end(), log.e[i].id)) ids.push_back(log.e[i].id);
+    std::sort(ids.begin(), ids.end());
+    int earned = 0;
+    for (int id : ids) {
+        const TrophyRec* rec = nullptr;
+        for (int i = 0; i < log.n; ++i) if (log.e[i].id == id) rec = &log.e[i];
+        auto text = texts.find(id);
+        const wchar_t listed = text == texts.end() ? 0 : text->second.grade; // the shipped list knows every grade
+        std::wstring line = (text == texts.end() ? L"Trophy " + std::to_wstring(id) : text->second.name) + L"\t";
+        if (rec) {
+            ++earned;
+            const wchar_t* grade = grade_name(listed ? listed : (wchar_t)rec->grade);
+            __time64_t when = rec->when;
+            tm local{};
+            wchar_t date[48] = L"";
+            if (!_localtime64_s(&local, &when)) wcsftime(date, 48, L"%Y-%m-%d %H:%M", &local);
+            line += std::wstring(grade) + L"\t" + date;
+        } else {
+            line += std::wstring(grade_name(listed)) + L"\tnot earned yet";
+        }
+        SendMessageW(list, LB_ADDSTRING, 0, (LPARAM)line.c_str());
+    }
+    std::wstring status = std::to_wstring(earned) + L" of " + std::to_wstring(ids.size()) + L" trophies earned on the save \"" + current_save() + L"\".";
+    SetWindowTextW(controls[ID_TROPHY_STATUS], status.c_str());
+}
+
 void refresh_saves() {
     HWND list = controls[ID_PROFILES];
     if (!list) return;
@@ -1832,8 +1946,8 @@ void create_controls() {
     pages.assign(PageCount, {});
     // Only the tab strip: the pages draw on the window's own background, under it.
     tabs = add(-1, WC_TABCONTROLW, L"", WS_VISIBLE | WS_CLIPSIBLINGS, 10, kPageTop + 8, 680, 30, ID_TABS);
-    const wchar_t* names[PageCount] = {L"Play", L"Display", L"Graphics", L"Sound && controls", L"Saves", L"HD textures",
-                                       L"Online", L"Game files"};
+    const wchar_t* names[PageCount] = {L"Play", L"Display", L"Graphics", L"Sound && controls", L"Saves", L"Trophies",
+                                       L"HD textures", L"Online", L"Game files"};
     for (int i = 0; i < PageCount; ++i) {
         TCITEMW item{TCIF_TEXT};
         item.pszText = (LPWSTR)names[i];
@@ -1866,6 +1980,15 @@ void create_controls() {
     add(PageSaves, L"STATIC", L"", SS_LEFT, 30, 300, 580, 40, ID_PROFILE_STATUS);
     add(PageSaves, L"STATIC", L"Back up copies a save to data\\backups. Saves stay in data\\save (Main) and data\\saves.",
         SS_LEFT, 30, 350, 580, 40);
+    // Trophies
+    add(PageTrophies, L"STATIC", L"", SS_LEFT, 30, 50, 580, 22, ID_TROPHY_STATUS);
+    add(PageTrophies, L"LISTBOX", L"", WS_BORDER | WS_VSCROLL | LBS_NOSEL | LBS_USETABSTOPS | LBS_NOINTEGRALHEIGHT, 30, 78, 580, 270, ID_TROPHY_LIST);
+    {
+        int stops[2] = {120, 190}; // dialog units: Trophy | Grade | Earned
+        SendMessageW(controls[ID_TROPHY_LIST], LB_SETTABSTOPS, 2, (LPARAM)stops);
+    }
+    add(PageTrophies, L"STATIC", L"Trophies are recorded per save, in its trophies.txt, when the game unlocks them. This list is read-only. "
+        L"Names and grades come from trophy_names.txt; they show as Trophy n and ? where that file is missing.", SS_LEFT, 30, 358, 580, 50);
     // Game files
     add(PageFiles, L"STATIC", L"1. Your decrypted dump of Everybody's Golf (CUSA04687): the folder with eboot.bin and sce_sys.",
         SS_LEFT, 30, 50, 580, 20);
@@ -2293,6 +2416,7 @@ LRESULT CALLBACK proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         load_settings(); // what the game's Display Settings saved
         load_option_controls();
         refresh_saves();
+        refresh_trophies();
         ShowWindow(hwnd, SW_RESTORE);
         SetForegroundWindow(hwnd);
         refresh_status();

@@ -28,8 +28,8 @@ int runtime_golf_local_account(void) { return 0; } /* the test console has no lo
 static char mock_user_dir[512]=MOCK_USER;
 const char *runtime_file_user_dir(void) { return mock_user_dir; }
 static char last_toast_title[128], last_toast_detail[256];
-void resogun_gpu_toast_trophy(int id, const char *title, const char *detail, const unsigned char *png, uint64_t png_size) {
-    (void)id; (void)png; (void)png_size;
+void resogun_gpu_toast_trophy(int id, const char *title, const char *detail, const char *grade, const unsigned char *png, uint64_t png_size) {
+    (void)id; (void)grade; (void)png; (void)png_size;
     if (title) snprintf(last_toast_title, sizeof(last_toast_title), "%s", title);
     else last_toast_title[0] = 0;
     if (detail) snprintf(last_toast_detail, sizeof(last_toast_detail), "%s", detail);
@@ -528,21 +528,54 @@ int main(void) {
     snprintf(mock_user_dir,sizeof(mock_user_dir),MOCK_USER);
     /* Trophy names: a UTF-8 BOM and comments are skipped, "ID=Name | Description" is split. */
     {
-        FILE *texts=fopen("trophy_names.txt","wb");
+        FILE *texts=fopen("out/trophy_names.txt","wb");
         assert(texts);
         fputs("\xEF\xBB\xBF# comment\n3=Sr. M\xC3\xA3o | Ache a sala\n",texts);
         fclose(texts);
 #ifdef _WIN32
-        _putenv("RESOGUN_USER_DIR=.");
+        _putenv("RESOGUN_USER_DIR=out");
 #else
-        setenv("RESOGUN_USER_DIR",".",1);
+        setenv("RESOGUN_USER_DIR","out",1);
 #endif
         trophy_load_names();
         assert(!strcmp(trophy_names[3],"Sr. M\xC3\xA3o") && !strcmp(trophy_details[3],"Ache a sala"));
-        remove("trophy_names.txt");
+        remove("out/trophy_names.txt");
 #ifdef _WIN32
         _putenv("RESOGUN_USER_DIR=");
 #else
+        unsetenv("RESOGUN_USER_DIR");
+#endif
+    }
+    /* The shipped trophy_names.txt (repo root, run from there): 31 names, one platinum, grades 1/5/10/15,
+     * through the RESOGUN_TROPHY_NAMES path the launcher sets; a user-dir line replaces a shipped one. */
+    {
+        memset(trophy_names,0,sizeof(trophy_names)); memset(trophy_details,0,sizeof(trophy_details));
+        memset(trophy_grades,0,sizeof(trophy_grades));
+#ifdef _WIN32
+        _putenv("RESOGUN_TROPHY_NAMES=trophy_names.txt");
+        _putenv("RESOGUN_USER_DIR=out/no_such_user_dir");
+#else
+        setenv("RESOGUN_TROPHY_NAMES","trophy_names.txt",1);
+        setenv("RESOGUN_USER_DIR","out/no_such_user_dir",1);
+#endif
+        trophy_load_names();
+        int count[256]={0}, named=0;
+        for (int i=0;i<TROPHY_GAME_COUNT;i++) {
+            assert(trophy_names[i][0] && trophy_details[i][0]);
+            assert(trophy_grade(i)!='?');
+            count[(unsigned char)trophy_grade(i)]++; named++;
+        }
+        assert(named==31 && count['P']==1 && count['G']==5 && count['S']==10 && count['B']==15);
+        assert(trophy_grade(0)=='P' && !strcmp(trophy_names[0],"Push it to the Limit!"));
+        assert(!strcmp(trophy_names[27],"My First Cart Ride!") && trophy_grade(27)=='B');
+        assert(!strcmp(trophy_grade_name(trophy_grade(5)),"Gold"));
+        memset(trophy_names,0,sizeof(trophy_names)); memset(trophy_details,0,sizeof(trophy_details));
+        memset(trophy_grades,0,sizeof(trophy_grades));
+#ifdef _WIN32
+        _putenv("RESOGUN_TROPHY_NAMES=");
+        _putenv("RESOGUN_USER_DIR=");
+#else
+        unsetenv("RESOGUN_TROPHY_NAMES");
         unsetenv("RESOGUN_USER_DIR");
 #endif
     }

@@ -516,6 +516,7 @@ def main():
         'LICENSE.txt': PORT / 'LICENSE',
         'MPLUSRounded1c-OFL.txt': PORT / 'gpu/third_party/fonts/mplusrounded1c/OFL.txt',
         'recomplauncher.json': PORT / 'recomplauncher.json',
+        'trophy_names.txt': PORT / 'trophy_names.txt',
     }
     # NVIDIA Streamline (DLSS Frame Generation), loaded beside the program only when frame generation
     # is on: production DLLs from the SDK (RESOGUN_STREAMLINE_DIR, else tools/streamline-*/sdk/bin/x64).

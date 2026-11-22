@@ -102,10 +102,10 @@ unsigned long long resogun_gpu_flips(void);
 int resogun_game_held(void);
 /* A notice in the corner for `milliseconds` (any thread; the runtime's messages to the player). */
 void resogun_gpu_notice(const char *text, int milliseconds);
-/* Trophy unlocked (any thread): its name as a notice in the corner. The other arguments are kept
- * for the runtime's call: id, description and PNG icon. */
-void resogun_gpu_toast_trophy(int id, const char *title, const char *detail, const unsigned char *png,
-                                 uint64_t png_size);
+/* Trophy unlocked (any thread): its name and grade ("" when unknown) as a notice in the corner for
+ * 4 s. The other arguments are kept for the runtime's call: id, description and PNG icon. */
+void resogun_gpu_toast_trophy(int id, const char *title, const char *detail, const char *grade,
+                                 const unsigned char *png, uint64_t png_size);
 #ifdef __cplusplus
 }
 #endif
