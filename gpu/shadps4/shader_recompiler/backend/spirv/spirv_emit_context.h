@@ -196,6 +196,13 @@ public:
     HwStage hw_stage;
     SwStage sw_stage{};
 
+    /// resogun: descriptor set of this stage's resources (Backend::SplitStageSets).
+    u32 DescriptorSetIndex() const {
+        return SplitStageSets() && sw_stage != SwStage::Fragment && sw_stage != SwStage::Compute
+                   ? 1u
+                   : 0u;
+    }
+
     Id last_label{};
 
     Id void_id{};

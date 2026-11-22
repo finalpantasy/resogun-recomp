@@ -245,6 +245,8 @@ private:
     CompilerPool<Shader::Pools> compiler_pools{8};
     std::unique_ptr<AsyncCompiler> compiler, capture_compiler;
     std::vector<vk::UniquePipelineCache> worker_pipeline_caches;
+    /// resogun: RESOGUN_PIPELINE_LIBRARY=1; declared before the pipelines, so it outlives them.
+    std::unique_ptr<GraphicsPipelineLibraries> pipeline_libraries;
     bool worker_caches_seeded = false;
     /// resogun: RESOGUN_PARALLEL_WARMUP: WarmUp builds the cached pipelines on these threads.
     struct WarmupPool;

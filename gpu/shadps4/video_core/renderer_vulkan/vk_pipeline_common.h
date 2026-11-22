@@ -63,6 +63,11 @@ public:
 protected:
     [[nodiscard]] std::string GetDebugString() const;
 
+    /// Pushes `set_writes` as descriptor set 0 (recorded, or straight into the command buffer
+    /// when too large for a recording chunk).
+    void PushDescriptors(vk::PipelineBindPoint bind_point, vk::PipelineLayout layout,
+                         std::span<const vk::WriteDescriptorSet> set_writes) const;
+
     /// resogun: RESOGUN_WAVE_STATS=1: logs the subgroup width the driver compiled each stage of
     /// `pipeline` at (vk_wave_stats.h). Call once the pipeline exists.
     void RecordWaveSizes() const;
@@ -74,6 +79,12 @@ protected:
     vk::UniquePipeline pipeline;
     vk::UniquePipelineLayout pipeline_layout;
     vk::UniqueDescriptorSetLayout desc_layout;
+    /// resogun: with split stage sets (Shader::Backend::SplitStageSets), set 1: the resources of
+    /// the graphics stages other than the fragment shader, whose bindings start at split_binding.
+    /// desc_layout is then set 0, the fragment shader's; only it may use push descriptors.
+    vk::UniqueDescriptorSetLayout stage_desc_layout;
+    u32 split_binding{};
+    bool split_sets{};
     std::array<const Shader::Info*, Shader::MaxStageTypes> stages{};
     bool uses_push_descriptors{};
     bool is_compute;
