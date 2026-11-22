@@ -419,6 +419,7 @@ typedef struct {
     M2LocalRoom room, advertised_links;
     uint64_t signal_registration, room_message_ack;
     uint8_t room_message_relay[16];
+    uint64_t game_lobby; /* the lobby id the game joined (GOLF_LOCAL_WORLD may map it to another world) */
 } M2LocalSession;
 
 static int m2_lobby_name_char(uint8_t ch) {
@@ -516,7 +517,7 @@ enum { GOLF_SIGNAL_NOT_INITIALIZED=0x80552701u, GOLF_SIGNAL_ALREADY_INITIALIZED=
        GOLF_SIGNAL_OWN_PEER_ADDRESS=0x8055271bu };
 
 typedef struct { uint64_t account; uint32_t platform, padding; } GolfSignalAddress;
-typedef struct { uint32_t id; uint16_t member; int departed; } GolfSignalConnection;
+typedef struct { uint32_t id; uint16_t member; int departed, logged_status; } GolfSignalConnection;
 /* These fields share the Matching2 mutex. Only its worker publishes rosters. */
 static struct {
     uint64_t generation;
@@ -528,7 +529,26 @@ static GolfSignalConnection golf_signals[M2_LOCAL_CAPACITY-1];
 static uint32_t golf_next_signal=1;
 static int golf_signaling_up, golf_signaling_context;
 
+/* M0 diagnostics: print the lobby roster when its size or member ids change. */
+static void m2_log_roster(uint8_t world,const M2LocalRoster *roster) {
+    static uint8_t last_world, last_count;
+    static uint16_t last_ids[M2_LOCAL_CAPACITY], last_own;
+    int changed=world!=last_world || roster->count!=last_count || roster->own_id!=last_own;
+    for (size_t i=0;!changed && i<roster->count && i<M2_LOCAL_CAPACITY;++i) changed=roster->members[i].id!=last_ids[i];
+    if (!changed) return;
+    last_world=world; last_count=roster->count; last_own=roster->own_id;
+    char text[M2_LOCAL_CAPACITY*24+1]; size_t used=0; text[0]=0;
+    for (size_t i=0;i<roster->count && i<M2_LOCAL_CAPACITY;++i) {
+        last_ids[i]=roster->members[i].id;
+        int n=snprintf(text+used,sizeof text-used,"%s%u:%.16s",i?",":"",(unsigned)roster->members[i].id,roster->members[i].name);
+        if (n<0 || (size_t)n>=sizeof text-used) break;
+        used+=(size_t)n;
+    }
+    printf("Runtime: lobby roster world %u own %u count %u members %s\n",(unsigned)world,(unsigned)roster->own_id,(unsigned)roster->count,text);
+    fflush(stdout);
+}
 static void m2_publish_peer_roster(const M2LocalSession *session,const M2LocalRoster *roster) {
+    if (roster) m2_log_roster(session->world,roster);
     pthread_mutex_lock(&m2_lock);
     if (roster && session->generation==m2_generation && m2_ctx==session->ctx &&
         !clock_gettime(CLOCK_MONOTONIC,&m2_peer_roster.expires)) {
@@ -642,7 +662,8 @@ static int32_t golf_signal_connection(int32_t context,const GolfSignalAddress *p
                 free_slot=candidate;
         }
         if (!connection && activate && free_slot) {
-            *free_slot=(GolfSignalConnection){.id=golf_next_signal++,.member=member};
+            *free_slot=(GolfSignalConnection){.id=golf_next_signal++,.member=member,.logged_status=-1};
+            printf("Runtime: signaling activate connection %u -> member %u\n",(unsigned)free_slot->id,(unsigned)member);
             if (!golf_next_signal) golf_next_signal=1;
             connection=free_slot;
         }
@@ -681,6 +702,12 @@ static ABI int32_t golf_signal_status(int32_t context,uint32_t id,int32_t *statu
             const uint8_t address[4]={127,0,(uint8_t)(member>>8),(uint8_t)member};
             const uint8_t physical[2]={3658>>8,3658&255};
             *status=active ? 2 : 0;
+            if (((GolfSignalConnection *)connection)->logged_status!=*status) {
+                ((GolfSignalConnection *)connection)->logged_status=*status;
+                printf("Runtime: signaling connection %u member %u status %d (%s)\n",(unsigned)id,(unsigned)member,
+                       (int)*status,active ? "active" : "inactive");
+                fflush(stdout);
+            }
             *ip=0;
             *port=0;
             if (active) {
@@ -989,7 +1016,7 @@ static int m2_lobby_notify(const M2LocalSession *session,uint16_t event,const M2
     uint8_t record[0x40]={0};
     const void *data=record;
     if (member) m2_lobby_record(record,member,NULL,session->world);
-    cb(session->ctx,session->world,event,member ? &data : NULL,arg);
+    cb(session->ctx,session->game_lobby ? session->game_lobby : session->world,event,member ? &data : NULL,arg);
     return 1;
 }
 
@@ -1060,6 +1087,7 @@ static void m2_local_request(M2LocalSession *session,M2Event *event) {
             }
         }
         session->world=world;
+        memcpy(&session->game_lobby,reply->record+0x10,8);
         session->ctx=event->ctx;
         session->generation=event->generation;
         session->ready=0;
@@ -1843,6 +1871,14 @@ static ABI int32_t m2_lobby_info_list(uint16_t ctx,const void *request,const M2O
     reply->count=1;
     return m2_answer("GetLobbyInfoList",ctx,opt,id,0x6,reply,0);
 }
+/* GOLF_LOCAL_WORLD=N (1..50): every lobby the game joins maps to the server's world N, so two
+ * instances whose Auto Entrance picks different worlds still share one roster. The game keeps its own
+ * lobby id in the replies. */
+static uint64_t m2_host_lobby(uint64_t lobby) {
+    const char *text=getenv("GOLF_LOCAL_WORLD");
+    const long world=text && *text ? strtol(text,NULL,10) : 0;
+    return lobby && world>=1 && world<=M2_WORLDS ? (uint64_t)world : lobby;
+}
 static ABI int32_t m2_join_lobby(uint16_t ctx,const uint64_t *request,const M2Opt *opt,uint32_t *id) {
     if (!request) return NP_INVALID_ARGUMENT;
     if (local_lobbies && (!*request || *request>M2_WORLDS)) return M2_INVALID_LOBBY;
@@ -1856,7 +1892,7 @@ static ABI int32_t m2_join_lobby(uint16_t ctx,const uint64_t *request,const M2Op
     memcpy(reply->record+0x18,&ids,8);
     memcpy(reply->record+0x20,&count,8);
     memcpy(reply->record+0x28,reply->member_ids,2);
-    return m2_answer("JoinLobby",ctx,opt,id,0x201,reply,lobby);
+    return m2_answer("JoinLobby",ctx,opt,id,0x201,reply,m2_host_lobby(lobby));
 }
 static ABI int32_t m2_lobby_members(uint16_t ctx,const void *request,const M2Opt *opt,uint32_t *id) {
     if (!request) return NP_INVALID_ARGUMENT;
@@ -1871,12 +1907,12 @@ static ABI int32_t m2_lobby_members(uint16_t ctx,const void *request,const M2Opt
         reply->first=reply->records;
         reply->count=1;
     }
-    return m2_answer("GetLobbyMemberDataInternalList",ctx,opt,id,0x7207,reply,lobby);
+    return m2_answer("GetLobbyMemberDataInternalList",ctx,opt,id,0x7207,reply,m2_host_lobby(lobby));
 }
 static ABI int32_t m2_leave_lobby(uint16_t ctx,const void *request,const M2Opt *opt,uint32_t *id) {
     uint64_t lobby=0;
     if (local_lobbies && request) memcpy(&lobby,request,8);
-    return m2_answer("LeaveLobby",ctx,opt,id,0x202,NULL,lobby);
+    return m2_answer("LeaveLobby",ctx,opt,id,0x202,NULL,m2_host_lobby(lobby));
 }
 /* ---- NpWordFilter, answered locally (same condition as Matching2) ----
  * Sony's word filter server is gone. The Open Course entry controller (C: eboot 0xa5ada0) censors the
@@ -2113,6 +2149,28 @@ static int golf_rudp_up, golf_rudp_io, golf_rudp_relay_ready;
 static int32_t golf_rudp_callback_id;
 static _Thread_local int golf_rudp_in_callback;
 
+/* M0 diagnostics: bytes and packets per peer member, printed every 10 s and at sceRudpEnd/exit. */
+typedef struct { uint16_t member; uint64_t tx_bytes, tx_packets, rx_bytes, rx_packets; } GolfRudpStats;
+static GolfRudpStats golf_rudp_stats[64];
+static uint64_t golf_rudp_stats_next_ms;
+static GolfRudpStats *golf_rudp_stat(uint16_t member) {
+    for (size_t i=0;i<64;++i) {
+        if (golf_rudp_stats[i].member==member) return &golf_rudp_stats[i];
+        if (!golf_rudp_stats[i].member) { golf_rudp_stats[i].member=member; return &golf_rudp_stats[i]; }
+    }
+    return NULL;
+}
+/* Caller holds golf_rudp_lock (or the process is exiting). */
+static void golf_rudp_stats_print(const char *why) {
+    for (size_t i=0;i<64 && golf_rudp_stats[i].member;++i) {
+        const GolfRudpStats *s=&golf_rudp_stats[i];
+        printf("Runtime: rudp peer %u (%s): sent %llu bytes in %llu packets, received %llu bytes in %llu packets\n",
+               (unsigned)s->member,why,(unsigned long long)s->tx_bytes,(unsigned long long)s->tx_packets,
+               (unsigned long long)s->rx_bytes,(unsigned long long)s->rx_packets);
+    }
+    fflush(stdout);
+}
+static void golf_rudp_stats_exit(void) { golf_rudp_stats_print("exit"); }
 static uint64_t golf_rudp_now_ms(void) {
     struct timespec now={0};
     clock_gettime(CLOCK_MONOTONIC,&now);
@@ -2550,6 +2608,11 @@ static void *golf_rudp_worker(void *unused) {
         golf_rudp_refresh_lease();
         if (golf_rudp_world && golf_rudp_has_work() && golf_rudp_transport_ready()) golf_rudp_update_channels();
         golf_rudp_dispatch_events();
+        if (golf_rudp_stats[0].member) {
+            const uint64_t now_ms=golf_rudp_now_ms();
+            if (!golf_rudp_stats_next_ms) golf_rudp_stats_next_ms=now_ms+10000;
+            else if (now_ms>=golf_rudp_stats_next_ms) { golf_rudp_stats_next_ms=now_ms+10000; golf_rudp_stats_print("10 s"); }
+        }
         if (golf_rudp_world && golf_rudp_has_work() && golf_rudp_relay_ready)
             poll_only=golf_rudp_packets(response,poll_only);
         struct timespec deadline;
@@ -2563,6 +2626,8 @@ static void *golf_rudp_worker(void *unused) {
 
 static ABI int32_t golf_rudp_init(const void *pool,int32_t size) {
     if (!pool || size<=0) return (int32_t)GOLF_RUDP_INVALID_ARGUMENT;
+    static int stats_registered;
+    if (!stats_registered++) atexit(golf_rudp_stats_exit);
     pthread_mutex_lock(&golf_rudp_lock);
     const int32_t result=golf_rudp_up ? (int32_t)GOLF_RUDP_ALREADY_INITIALIZED : 0;
     golf_rudp_up=1;
@@ -2572,6 +2637,7 @@ static ABI int32_t golf_rudp_init(const void *pool,int32_t size) {
 
 static ABI int32_t golf_rudp_end(void) {
     pthread_mutex_lock(&golf_rudp_lock);
+    golf_rudp_stats_print("sceRudpEnd");
     const int32_t result=golf_rudp_up ? 0 : (int32_t)GOLF_RUDP_NOT_INITIALIZED;
     golf_rudp_up=0;
     memset(golf_rudp_contexts,0,sizeof golf_rudp_contexts);
@@ -2683,6 +2749,7 @@ static ABI int32_t golf_rudp_initiate(int32_t id,const uint8_t *address,uint32_t
             if (!peer) result=(int32_t)GOLF_RUDP_TOO_MANY_CONTEXTS;
             else {
                 context->member=member;
+                printf("Runtime: rudp context %d initiated: vport %u -> member %u\n",(int)id,(unsigned)context->port,(unsigned)member);
                 ++peer->binding_generation;
                 peer->ready&=(uint8_t)~golf_rudp_port_bit(context->port);
                 peer->status_observed&=(uint8_t)~golf_rudp_port_bit(context->port);
@@ -2751,7 +2818,11 @@ static ABI int32_t golf_rudp_write(int32_t id,const void *data,uint32_t length,u
                  !golf_rudp_queue_push(&golf_rudp_tx,id,context->member,context->port,context->port^1,data,
                                        (uint16_t)length,peer->incarnation))
             result=(int32_t)GOLF_RUDP_WRITE_RETRY; /* Golf explicitly retries this value at 0xa7f5ba. */
-        else { pthread_cond_signal(&golf_rudp_wake); result=(int32_t)length; }
+        else {
+            pthread_cond_signal(&golf_rudp_wake); result=(int32_t)length;
+            GolfRudpStats *stat=golf_rudp_stat(context->member);
+            if (stat) { stat->tx_bytes+=length; ++stat->tx_packets; }
+        }
     }
     pthread_mutex_unlock(&golf_rudp_lock);
     return result;
@@ -2789,6 +2860,8 @@ static ABI int32_t golf_rudp_read(int32_t id,void *data,uint32_t length,uint8_t 
         else {
             memcpy(data,packet->bytes,packet->length);
             result=packet->length;
+            GolfRudpStats *stat=golf_rudp_stat(packet->peer);
+            if (stat) { stat->rx_bytes+=packet->length; ++stat->rx_packets; }
             golf_rudp_queue_remove(&golf_rudp_rx,packet,previous);
         }
     }

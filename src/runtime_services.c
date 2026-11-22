@@ -353,8 +353,31 @@ static ABI int32_t np_parental(int32_t id,int32_t user,int8_t *age,void *info) {
 /* sceNpGetAccountIdA(user, account): the user's PSN account, kept by the console while PSN is out
  * of reach (sceNpGetState stays signed out). sceNpGetUserIdByAccountId: that account is the one
  * user. */
-#define NP_ACCOUNT_ID 0x5253474E00000001ull /* "RSGN" */
+#define NP_ACCOUNT_ID np_account_base() /* "RSGN" in the high half */
 #define NP_USER_NOT_FOUND ((int32_t)0x80550007)
+/* Two game instances on one PC need two accounts: GOLF_ACCOUNT_ID (decimal) sets the first user's
+ * account; otherwise a GOLF_ONLINE_ID other than "Golfer" picks one from an FNV-1a hash of the name
+ * ("RSGN" high half, an even low half so user 2's account, one more, stays in the same half).
+ * Without either, the account stays 0x5253474E00000001, the one saved fixtures and score
+ * databases use. */
+static uint64_t np_account_base(void) {
+    static uint64_t base;
+    if (base) return base;
+    uint64_t value=0x5253474E00000001ull;
+    const char *text=getenv("GOLF_ACCOUNT_ID"), *name=getenv("GOLF_ONLINE_ID");
+    if (text && *text && !text[strspn(text,"0123456789")] && strlen(text)<=19) {
+        const uint64_t parsed=strtoull(text,NULL,10);
+        if (parsed && parsed<UINT64_MAX) value=parsed;
+    } else if (name && *name && strcmp(name,"Golfer")) {
+        uint64_t hash=0xcbf29ce484222325ull;
+        for (const char *c=name; *c && c-name<16; ++c) { hash^=(uint8_t)*c; hash*=0x100000001b3ull; }
+        value=0x5253474E00000000ull|((hash^hash>>32)&0x7ffffffeull)|2;
+    }
+    base=value;
+    static int reported;
+    if (!reported++) printf("Runtime: NP account id %llu%c",(unsigned long long)value,10);
+    return base;
+}
 static ABI int32_t np_account_id(int32_t user,uint64_t *account) {
     if (!account || user==-1) return NP_INVALID_ARGUMENT;
     if (!logged_in(user)) { *account=0; return NP_USER_NOT_FOUND; }

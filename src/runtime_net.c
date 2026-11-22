@@ -49,7 +49,9 @@ static _Atomic int32_t http_next=0x10000;
 #define NATIONAL_SCORE_LIST_PATH "/nmg-us/replay-probe/gameapi_getscorelistnational"
 #define PROPERTY_INFO_PATH "/nmg-us/replay-probe/gameapi_getgamepropertyinfo"
 #define TELEMETRY_PATH "/nmg-us/replay-probe/analytics/19d916d7-6a01-4371-9e6c-c91b2ff386bb/telemetry"
-#define SESSION_QUERY "?account=5932163534510096385&n="
+/* Session routes end in the account id the game formats ("%llu&n=%d&s=1"); any account matches
+ * (GOLF_ACCOUNT_ID or GOLF_ONLINE_ID give each instance its own). */
+#define SESSION_QUERY "?account="
 #define LOGIN_PREFIX "/nmg-us/replay-probe/gameapi_login" SESSION_QUERY
 /* Score boards, own score, user status and score registration (server --empty-own-score and
  * --score-registration). The game formats "%s%llu&n=%d&s=1" (eboot 0xb5d300), so the discovery
@@ -87,7 +89,7 @@ static const ReplayRoute replay_routes[]={
     /* Daily board with the score-board fixture: the bare "?account=" base, 166..258 bytes. */
     {"https://127.0.0.1:8765" SCORE_BOARD_PATH, SCORE_BOARD_PATH, 166, 258, 16, 0xa2800, 4, NULL},
     /* Session boards (slots 0x19, 0x1b, 0x1d): OneHole_, Daily_, LongDriveContest_ groups. */
-    {"https://127.0.0.1:8765" SCORE_BOARD_PATH "5932163534510096385&n=", NULL, 418, 1450, 16, 0xa2800, 4, NULL},
+    {"https://127.0.0.1:8765" SCORE_BOARD_PATH, NULL, 418, 1450, 16, 0xa2800, 4, NULL},
     {"https://127.0.0.1:8765" OWN_SCORE_PATH, OWN_SCORE_PATH, 402, 1434, 16, 0xa2800, 4, NULL},
     {"https://127.0.0.1:8765" TOP_PLAYER_PATH, TOP_PLAYER_PATH, 410, 1410, 36, 36, 4, NULL},
     {"https://127.0.0.1:8765" SCORE_DISTRIBUTION_PATH, SCORE_DISTRIBUTION_PATH, 402, 1414, 36, 68, 4, NULL},
@@ -123,7 +125,7 @@ typedef struct {
     const ReplayRoute *route;
     int status, read, sending;
     size_t length, request_size, uploaded;
-    char login_path[sizeof REGIST_PREFIX "longdrivecontest" SESSION_QUERY+sizeof "-2147483648&s=1"]; /* any session route */
+    char login_path[sizeof REGIST_PREFIX "longdrivecontest" SESSION_QUERY+sizeof "18446744073709551615&n=-2147483648&s=1"]; /* any session route */
     unsigned char *body, *upload;
 } ReplayRequest;
 static ReplayRequest replay_requests[sizeof replay_routes/sizeof *replay_routes];
@@ -499,12 +501,15 @@ static ABI int32_t http_request2(int32_t conn,const char *method,const char *pat
 /* sceHttpCreateRequestWithURL(connection, method, url, content length) (NID Aeu5wVKkF9w; Golf at
  * 0xec9174 passes method 0..2 from a table and keeps a result >= 0 as the request id): an id; the
  * URL is required. An explicitly configured discovery replay can use the returned id. */
-/* The only variable target is the primary local account and a signed 32-bit counter. */
+/* The variable targets are a decimal account id and a signed 32-bit counter. */
 static int replay_url_matches(const ReplayRoute *route,const char *url) {
     if (route->path) return !strcmp(url,route->url);
     const size_t prefix=strlen(route->url);
     if (strncmp(url,route->url,prefix)) return 0;
     const char *counter=url+prefix;
+    const size_t account=strspn(counter,"0123456789");
+    if (!account || account>20 || *counter=='0' || strncmp(counter+account,"&n=",3)) return 0;
+    counter+=account+3;
     const char *digits=counter+(*counter=='-');
     const size_t size=strspn(digits,"0123456789");
     if (!size || size>10 || (*digits=='0' && (size!=1 || digits!=counter)) ||
