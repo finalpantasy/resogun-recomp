@@ -10,6 +10,7 @@
 #include <deque>
 #include <coroutine>
 #include <exception>
+#include <memory>
 #include <mutex>
 #include <semaphore>
 #include <span>
@@ -94,6 +95,18 @@ struct Liverpool {
                                             RegDirty* dirty = nullptr);
 
 public:
+    /// resogun: a command buffer the GPU thread parses from host memory. The guest may reuse its
+    /// own copy as soon as a fence or flip inside it is signalled (that can happen on the draw
+    /// recording thread before the GPU thread has read the packets after it), so a top-level
+    /// buffer is copied at submit and an indirect buffer when the GPU thread enters it.
+    /// `guest` is where the words came from (Rewind polls the guest's packet); `owner` keeps
+    /// the words alive (the draw preparation copy, or `copy`).
+    struct CmdSnapshot {
+        std::span<const u32> words;
+        const u32* guest{};
+        std::vector<u32> copy;
+        std::shared_ptr<const void> owner;
+    };
     explicit Liverpool();
     ~Liverpool();
 
@@ -223,8 +236,13 @@ private:
 
     using CmdBuffer = std::pair<std::span<const u32>, std::span<const u32>>;
     CmdBuffer CopyCmdBuffers(std::span<const u32> dcb, std::span<const u32> ccb);
-    Task ProcessGraphics(std::span<const u32> dcb, std::span<const u32> ccb, u64 seq = NoSeq);
-    Task ProcessCeUpdate(std::span<const u32> ccb);
+    static std::shared_ptr<const CmdSnapshot> SnapshotCmds(std::span<const u32> guest,
+                                                           std::shared_ptr<const void> owner = {},
+                                                           std::span<const u32> words = {});
+    Task ProcessGraphics(std::span<const u32> dcb, std::span<const u32> ccb, u64 seq = NoSeq,
+                         std::shared_ptr<const CmdSnapshot> dcb_snap = {},
+                         std::shared_ptr<const CmdSnapshot> ccb_snap = {});
+    Task ProcessCeUpdate(std::span<const u32> ccb, std::shared_ptr<const CmdSnapshot> snap = {});
     template <bool is_indirect = false>
     Task ProcessCompute(std::span<const u32> acb, u32 vqid);
 

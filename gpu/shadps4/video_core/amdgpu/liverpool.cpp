@@ -76,6 +76,92 @@ static std::span<const u32> NextPacket(std::span<const u32> span, size_t offset)
     return span.subspan(offset);
 }
 
+namespace {
+/// resogun: RESOGUN_PM4_IN_PLACE=1 parses command buffers in guest memory, as shadPS4 does,
+/// instead of from the copy made at submit (Liverpool::CmdSnapshot).
+bool ParseInPlace() {
+    static const bool value = [] {
+        const char* env = std::getenv("RESOGUN_PM4_IN_PLACE");
+        return env && env[0] == '1';
+    }();
+    return value;
+}
+
+/// resogun: RESOGUN_PM4_CHECK=1 compares each buffer with guest memory once the GPU thread is
+/// done with it and counts the ones the guest rewrote meanwhile.
+bool CheckRewrites() {
+    static const bool value = [] {
+        const char* env = std::getenv("RESOGUN_PM4_CHECK");
+        return env && env[0] == '1';
+    }();
+    return value;
+}
+
+/// resogun: RESOGUN_PM4_RACE_STRESS=<ms> makes the GPU thread sleep that long after it hands over
+/// a fence or flip, before it reads the next packet. That leaves the guest time to reuse the
+/// buffer, which turns the rare in-place parsing race into a frequent one.
+void RaceStress() {
+    static const int ms = [] {
+        const char* env = std::getenv("RESOGUN_PM4_RACE_STRESS");
+        return env ? std::atoi(env) : 0;
+    }();
+    if (ms > 0) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(ms));
+    }
+}
+
+/// resogun: RESOGUN_PM4_CHECK: reports a buffer the guest changed while the GPU thread had it.
+void CheckSnapshot(const Liverpool::CmdSnapshot& snap, const char* kind) {
+    static std::atomic<u64> checked{}, rewritten{};
+    ++checked;
+    const size_t words = snap.words.size();
+    size_t first = 0;
+    while (first < words && snap.guest[first] == snap.words[first]) {
+        ++first;
+    }
+    if (first == words) {
+        return;
+    }
+    // The packet that holds the change: a label the commands write into their own buffer
+    // (NOP payload) is harmless, a changed header or packet body is not.
+    size_t at = 0, size = 1;
+    while (at < words) {
+        const u32 word = snap.words[at];
+        size = (word >> 30) == 2 ? 1 : ((word >> 16) & 0x3fff) + 2;
+        if (first < at + size) {
+            break;
+        }
+        at += size;
+    }
+    const u32 header = at < words ? snap.words[at] : 0;
+    const u64 n = ++rewritten;
+    if (n <= 20 || (n & (n - 1)) == 0) {
+        std::fprintf(stderr,
+                     "PM4 check: guest rewrote a %s buffer at %p while the GPU thread parsed it "
+                     "(first change at dword %zu of %zu: %08x -> %08x, in packet type %u op 0x%02x "
+                     "at dword %zu, %zu words); %llu of %llu buffers\n",
+                     kind, static_cast<const void*>(snap.guest), first, words, snap.words[first],
+                     snap.guest[first], header >> 30, (header >> 8) & 0xff, at, size,
+                     static_cast<unsigned long long>(n),
+                     static_cast<unsigned long long>(checked.load()));
+    }
+}
+} // namespace
+
+std::shared_ptr<const Liverpool::CmdSnapshot> Liverpool::SnapshotCmds(
+    std::span<const u32> guest, std::shared_ptr<const void> owner, std::span<const u32> words) {
+    auto snap = std::make_shared<CmdSnapshot>();
+    snap->guest = guest.data();
+    if (owner) {
+        snap->owner = std::move(owner);
+        snap->words = words;
+    } else {
+        snap->copy.assign(guest.begin(), guest.end());
+        snap->words = snap->copy;
+    }
+    return snap;
+}
+
 Liverpool::Liverpool() : guest_markers_enabled{EmulatorSettings.IsVkGuestMarkersEnabled()} {
     num_counter_pairs = Libraries::Kernel::sceKernelIsNeoMode() ? 16 : 8;
     process_thread = std::jthread{std::bind_front(&Liverpool::Process, this)};
@@ -398,8 +484,12 @@ bool Liverpool::PendingFenceValue(VAddr address, u32& value) {
     return false;
 }
 
-Liverpool::Task Liverpool::ProcessCeUpdate(std::span<const u32> ccb) {
+Liverpool::Task Liverpool::ProcessCeUpdate(std::span<const u32> ccb,
+                                           std::shared_ptr<const CmdSnapshot> snap) {
     FIBER_ENTER(ccb_task_name);
+    if (snap && !ParseInPlace()) {
+        ccb = snap->words;
+    }
 
     while (!ccb.empty()) {
         ProcessCommands();
@@ -447,8 +537,10 @@ Liverpool::Task Liverpool::ProcessCeUpdate(std::span<const u32> ccb) {
         }
         case PM4ItOpcode::IndirectBufferConst: {
             const auto* indirect_buffer = reinterpret_cast<const PM4CmdIndirectBuffer*>(header);
-            auto task =
-                ProcessCeUpdate({indirect_buffer->Address<const u32>(), indirect_buffer->ib_size});
+            const std::span<const u32> ib{indirect_buffer->Address<const u32>(),
+                                          indirect_buffer->ib_size};
+            auto ib_snap = !ParseInPlace() || CheckRewrites() ? SnapshotCmds(ib) : nullptr;
+            auto task = ProcessCeUpdate(ib, std::move(ib_snap));
             RESUME_CE(task);
 
             while (!task.handle.done()) {
@@ -463,6 +555,10 @@ Liverpool::Task Liverpool::ProcessCeUpdate(std::span<const u32> ccb) {
                             static_cast<u32>(opcode), count);
         }
         ccb = NextPacket(ccb, header->type3.NumWords() + 1);
+    }
+
+    if (snap && CheckRewrites()) {
+        CheckSnapshot(*snap, "constant");
     }
 
     FIBER_EXIT;
@@ -644,8 +740,17 @@ static void NoteStuckWait(const PM4CmdWaitRegMem* wait, std::span<const u32> reg
 }
 
 Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<const u32> ccb,
-                                           u64 seq) {
+                                           u64 seq, std::shared_ptr<const CmdSnapshot> dcb_snap,
+                                           std::shared_ptr<const CmdSnapshot> ccb_snap) {
     FIBER_ENTER(dcb_task_name);
+    // resogun: parse the copy (CmdSnapshot); `guest_base` maps a packet back to guest memory.
+    const u32* guest_base = dcb.data();
+    if (dcb_snap && !ParseInPlace()) {
+        dcb = dcb_snap->words;
+    }
+    const u32* parse_base = dcb.data();
+    bool rewound = false;
+    std::shared_ptr<const CmdSnapshot> before_rewind; // the packet being parsed stays readable
     // Top-level buffers enqueued for the draw preparation workers (nested IBs are not).
     Vulkan::DrawPreparation* draw_prep =
         seq != NoSeq && rasterizer ? &rasterizer->GetDrawPreparation() : nullptr;
@@ -661,11 +766,11 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
 
     if (!ccb.empty()) {
         // In case of CCB provided kick off CE asap to have the constant heap ready to use
-        ce_task = ProcessCeUpdate(ccb);
+        ce_task = ProcessCeUpdate(ccb, std::move(ccb_snap));
         RESUME_GFX(ce_task);
     }
 
-    const auto base_addr = reinterpret_cast<uintptr_t>(dcb.data());
+    auto base_addr = reinterpret_cast<uintptr_t>(dcb.data());
     while (!dcb.empty()) {
         ProcessCommands();
 
@@ -730,6 +835,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                     } else {
                         Platform::IrqC::Instance()->Signal(Platform::InterruptId::GfxFlip);
                     }
+                    RaceStress();
                     break;
                 }
                 case PM4CmdNop::PayloadType::DebugMarkerPush: {
@@ -1087,6 +1193,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                     rasterizer->RunInOrder(&RunEventWriteEos, event_eos, sizeof(*event_eos))) {
                     NotePendingFences(*event_eos);
                 }
+                RaceStress();
                 break;
             }
             case PM4ItOpcode::EventWriteEop: {
@@ -1098,6 +1205,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 } else {
                     SignalEop(*event_eop);
                 }
+                RaceStress();
                 break;
             }
             case PM4ItOpcode::DmaData: {
@@ -1161,9 +1269,22 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 if (!rasterizer) {
                     break;
                 }
-                const PM4CmdRewind* rewind = reinterpret_cast<const PM4CmdRewind*>(header);
+                // resogun: the CPU writes the packets after this one and then sets the valid bit
+                // in its own buffer, so the rest is read again from guest memory.
+                const size_t at = reinterpret_cast<const u32*>(header) - parse_base;
+                const u32* guest_packet = guest_base + at;
+                const PM4CmdRewind* rewind = reinterpret_cast<const PM4CmdRewind*>(guest_packet);
                 while (!rewind->Valid()) {
                     YIELD_GFX();
+                }
+                if (guest_packet != reinterpret_cast<const u32*>(header)) {
+                    before_rewind = std::move(dcb_snap);
+                    dcb_snap = SnapshotCmds({guest_packet, dcb.size()});
+                    dcb = dcb_snap->words;
+                    guest_base = guest_packet;
+                    parse_base = dcb.data();
+                    base_addr = reinterpret_cast<uintptr_t>(parse_base);
+                    rewound = true;
                 }
                 break;
             }
@@ -1250,8 +1371,10 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
             }
             case PM4ItOpcode::IndirectBuffer: {
                 const auto* indirect_buffer = reinterpret_cast<const PM4CmdIndirectBuffer*>(header);
-                auto task = ProcessGraphics(
-                    {indirect_buffer->Address<const u32>(), indirect_buffer->ib_size}, {});
+                const std::span<const u32> ib{indirect_buffer->Address<const u32>(),
+                                              indirect_buffer->ib_size};
+                auto ib_snap = !ParseInPlace() || CheckRewrites() ? SnapshotCmds(ib) : nullptr;
+                auto task = ProcessGraphics(ib, {}, NoSeq, std::move(ib_snap));
                 RESUME_GFX(task);
 
                 while (!task.handle.done()) {
@@ -1317,6 +1440,10 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
             RESUME_GFX(ce_task);
         }
         ce_task.handle.destroy();
+    }
+
+    if (dcb_snap && !rewound && CheckRewrites()) {
+        CheckSnapshot(*dcb_snap, seq != NoSeq ? "graphics" : "indirect");
     }
 
     if (rasterizer && seq != NoSeq) {
@@ -1687,6 +1814,16 @@ void Liverpool::SubmitGfx(std::span<const u32> dcb, std::span<const u32> ccb) {
     // the GPU thread needs to pick up work.
     auto* draw_prep = rasterizer ? &rasterizer->GetDrawPreparation() : nullptr;
     auto prep_submission = draw_prep ? draw_prep->Build(dcb) : nullptr;
+    // resogun: the GPU thread parses copies (CmdSnapshot); the draw preparation copy serves.
+    std::shared_ptr<const CmdSnapshot> dcb_snap, ccb_snap;
+    if (!ParseInPlace() || CheckRewrites()) {
+        dcb_snap = prep_submission
+                       ? SnapshotCmds(dcb, prep_submission, prep_submission->commands)
+                       : SnapshotCmds(dcb);
+        if (!ccb.empty()) {
+            ccb_snap = SnapshotCmds(ccb);
+        }
+    }
     {
         // Numbering, enqueueing and queueing under one lock keep the three orders identical.
         std::scoped_lock lock{queue.m_access};
@@ -1695,7 +1832,7 @@ void Liverpool::SubmitGfx(std::span<const u32> dcb, std::span<const u32> ccb) {
             seq = gfx_submit_seq++;
             draw_prep->Enqueue(seq, std::move(prep_submission));
         }
-        auto task = ProcessGraphics(dcb, ccb, seq);
+        auto task = ProcessGraphics(dcb, ccb, seq, std::move(dcb_snap), std::move(ccb_snap));
         queue.submits.emplace(task.handle);
     }
 
