@@ -874,6 +874,11 @@ static int setup_paths(const Options *o, int have_console) {
         !env_set("GPU_USER_DIR", gpu) || !env_set("SHADER_DIR", shader) ||
         !env_set("GPU_ADOPT_SHARED", "0") || !env_set("USER_DIR", save))
         return complain("Cannot set the portable runtime environment");
+    {   /* the trophy names and grades shipped beside the program (a save's own list overrides them) */
+        char names[PATH_CHARS];
+        if (join_path(names, exe_dir, "trophy_names.txt") && exists(names) && !env_set("TROPHY_NAMES", names))
+            return complain("Cannot set the trophy names path");
+    }
 
     for (size_t i = 0; i < sizeof settings / sizeof *settings; ++i) {
         if (!settings[i].path) continue;

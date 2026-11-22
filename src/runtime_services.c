@@ -810,9 +810,13 @@ static const char *trophy_log_path(void) {
     snprintf(path,sizeof(path),"%s/trophies.txt",trophy_dir());
     return path;
 }
-/* Grade of a trophy: only the platinum (id 0, the PS4 convention) is known; the others sit in the
- * encrypted TROPCONF.ESFM, which needs a console key, so they read '?'. */
-static char trophy_grade(int32_t id) { return id==0 ? 'P' : '?'; }
+/* Grade of a trophy: from trophy_names.txt (the game's TROPCONF.ESFM is encrypted with a console key);
+ * without a grade there only the platinum (id 0, the PS4 convention) is known, the rest read '?'. */
+static char trophy_grades[TROPHY_MAX]; /* from trophy_names.txt, 0 when it gave none */
+static char trophy_grade(int32_t id) {
+    if (id>=0 && id<TROPHY_MAX && trophy_grades[id]) return trophy_grades[id];
+    return id==0 ? 'P' : '?';
+}
 static const char *trophy_grade_name(char g) {
     return g=='P' ? "Platinum" : g=='G' ? "Gold" : g=='S' ? "Silver" : g=='B' ? "Bronze" : "";
 }
@@ -870,17 +874,14 @@ static int trophy_icon(int32_t id,const unsigned char **png,uint64_t *size) {
     snprintf(want,sizeof(want),"TROP%03d.PNG",id);
     return trp_file(want,png,size);
 }
-/* Names: <user dir>/trophy_names.txt, one "ID=Name | Description" per line (the description is
- * optional), # starts a comment. */
+/* Names: one "ID=Name | Description | Grade" per line (description and grade are optional; Grade is
+ * Platinum, Gold, Silver or Bronze), # starts a comment. The list shipped beside the program
+ * (RESOGUN_TROPHY_NAMES, set by the launcher) is read first, then <user dir>/trophy_names.txt, whose
+ * lines replace the shipped ones. */
 static char trophy_names[TROPHY_MAX][64];
 static char trophy_details[TROPHY_MAX][160];
-static FILE *trophy_open_text(char *path,size_t size) {
-    snprintf(path,size,"%s/trophy_names.txt",trophy_dir());
-    return fopen(path,"rb");
-}
-static void trophy_load_names(void) {
-    char path[512];
-    FILE *f=trophy_open_text(path,sizeof(path));
+static void trophy_read_names(const char *path) {
+    FILE *f=path && path[0] ? fopen(path,"rb") : NULL;
     if (!f) return;
     char line[512];
     unsigned loaded=0;
@@ -896,11 +897,16 @@ static void trophy_load_names(void) {
         while (*value==' ') value++;
         char *end; long id=strtol(p,&end,10);
         if (end==p || id<0 || id>=TROPHY_MAX) continue;
-        char *detail="";
+        char *detail="", *grade="";
         char *bar=strchr(value,'|');
         if (bar) {
             *bar=0; detail=bar+1;
             while (*detail==' ') detail++;
+            char *bar2=strchr(detail,'|');
+            if (bar2) {
+                *bar2=0; grade=bar2+1;
+                while (*grade==' ') grade++;
+            }
             size_t d=strlen(detail);
             while (d && detail[d-1]==' ') detail[--d]=0;
             size_t m=strlen(value);
@@ -909,10 +915,23 @@ static void trophy_load_names(void) {
         if (!*value) continue;
         snprintf(trophy_names[id],sizeof(trophy_names[id]),"%s",value);
         snprintf(trophy_details[id],sizeof(trophy_details[id]),"%s",detail);
+        switch (grade[0]) {
+            case 'P': case 'p': trophy_grades[id]='P'; break;
+            case 'G': case 'g': trophy_grades[id]='G'; break;
+            case 'S': case 's': trophy_grades[id]='S'; break;
+            case 'B': case 'b': trophy_grades[id]='B'; break;
+            default: break;
+        }
         loaded++;
     }
     fclose(f);
     printf("Runtime: trophies: %u texts read from %s\n",loaded,path);
+}
+static void trophy_load_names(void) {
+    char path[512];
+    trophy_read_names(getenv("RESOGUN_TROPHY_NAMES"));
+    snprintf(path,sizeof(path),"%s/trophy_names.txt",trophy_dir());
+    trophy_read_names(path);
 }
 static void trophy_load_once(void) {
     if (trophy_ready) return;

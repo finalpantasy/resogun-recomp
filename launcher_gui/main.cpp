@@ -1009,6 +1009,48 @@ std::vector<int> trophy_ids() {
     return ids;
 }
 
+// A trophy's name and grade from trophy_names.txt ("ID=Name | Description | Grade"): the list beside the
+// program first, then the save's own, whose lines replace it.
+struct TrophyText { std::wstring name; wchar_t grade = 0; };
+std::wstring utf8_wide(const std::string& s) {
+    if (s.empty()) return L"";
+    int n = MultiByteToWideChar(CP_UTF8, 0, s.data(), (int)s.size(), nullptr, 0);
+    std::wstring w(n, L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, s.data(), (int)s.size(), w.data(), n);
+    return w;
+}
+void read_trophy_texts(const fs::path& path, std::map<int, TrophyText>& out) {
+    std::ifstream f(path, std::ios::binary);
+    std::string line;
+    while (std::getline(f, line)) {
+        if (line.compare(0, 3, "\xEF\xBB\xBF") == 0) line.erase(0, 3);
+        size_t eq = line.find('=');
+        if (line.empty() || line[0] == '#' || eq == std::string::npos) continue;
+        char* end = nullptr;
+        long id = strtol(line.c_str(), &end, 10);
+        if (end == line.c_str() || id < 0 || id >= 256) continue;
+        auto trim = [](std::string v) {
+            while (!v.empty() && (v.back() == ' ' || v.back() == '\r' || v.back() == '\n')) v.pop_back();
+            size_t b = v.find_first_not_of(' ');
+            return b == std::string::npos ? std::string() : v.substr(b);
+        };
+        std::string rest = line.substr(eq + 1);
+        size_t bar = rest.find('|');
+        std::string name = trim(rest.substr(0, bar));
+        if (name.empty()) continue;
+        TrophyText t;
+        t.name = utf8_wide(name);
+        if (bar != std::string::npos) {
+            size_t bar2 = rest.find('|', bar + 1);
+            if (bar2 != std::string::npos) {
+                std::string g = trim(rest.substr(bar2 + 1));
+                if (!g.empty()) t.grade = (wchar_t)toupper((unsigned char)g[0]);
+            }
+        }
+        out[(int)id] = t;
+    }
+}
+
 void refresh_trophies() {
     HWND list = controls[ID_TROPHY_LIST];
     if (!list) return;
@@ -1016,6 +1058,10 @@ void refresh_trophies() {
     TrophyLog log;
     log.n = 0;
     if (FILE* f = _wfopen((save_dir(current_save()) / L"trophies.txt").c_str(), L"rb")) { trophy_log_read(&log, f); fclose(f); }
+    std::map<int, TrophyText> texts;
+    read_trophy_texts(root / L"trophy_names.txt", texts);
+    read_trophy_texts(save_dir(current_save()) / L"trophy_names.txt", texts);
+    auto grade_name = [](wchar_t g) { return g == L'P' ? L"Platinum" : g == L'G' ? L"Gold" : g == L'S' ? L"Silver" : g == L'B' ? L"Bronze" : L"?"; };
     std::vector<int> ids = trophy_ids();
     for (int i = 0; i < log.n; ++i) // a recorded id the list lacks still shows
         if (!std::count(ids.begin(), ids.end(), log.e[i].id)) ids.push_back(log.e[i].id);
@@ -1024,17 +1070,19 @@ void refresh_trophies() {
     for (int id : ids) {
         const TrophyRec* rec = nullptr;
         for (int i = 0; i < log.n; ++i) if (log.e[i].id == id) rec = &log.e[i];
-        std::wstring line = L"Trophy " + std::to_wstring(id) + L"\t";
+        auto text = texts.find(id);
+        const wchar_t listed = text == texts.end() ? 0 : text->second.grade; // the shipped list knows every grade
+        std::wstring line = (text == texts.end() ? L"Trophy " + std::to_wstring(id) : text->second.name) + L"\t";
         if (rec) {
             ++earned;
-            const wchar_t* grade = rec->grade == 'P' ? L"Platinum" : rec->grade == 'G' ? L"Gold" : rec->grade == 'S' ? L"Silver" : rec->grade == 'B' ? L"Bronze" : L"?";
+            const wchar_t* grade = grade_name(listed ? listed : (wchar_t)rec->grade);
             __time64_t when = rec->when;
             tm local{};
             wchar_t date[48] = L"";
             if (!_localtime64_s(&local, &when)) wcsftime(date, 48, L"%Y-%m-%d %H:%M", &local);
             line += std::wstring(grade) + L"\t" + date;
         } else {
-            line += L"?\tnot earned yet";
+            line += std::wstring(grade_name(listed)) + L"\tnot earned yet";
         }
         SendMessageW(list, LB_ADDSTRING, 0, (LPARAM)line.c_str());
     }
@@ -1205,7 +1253,7 @@ void create_controls() {
         SendMessageW(controls[ID_TROPHY_LIST], LB_SETTABSTOPS, 2, (LPARAM)stops);
     }
     add(PageTrophies, L"STATIC", L"Trophies are recorded per save, in its trophies.txt, when the game unlocks them. This list is read-only. "
-        L"Grades show ? where the game's encrypted trophy list cannot be read.", SS_LEFT, 30, 358, 580, 50);
+        L"Names and grades come from trophy_names.txt; they show as Trophy n and ? where that file is missing.", SS_LEFT, 30, 358, 580, 50);
     // Game files
     add(PageFiles, L"STATIC", L"Your decrypted dump of Everybody's Golf (CUSA04687): the folder with eboot.bin and sce_sys.",
         SS_LEFT, 30, 50, 580, 20);
