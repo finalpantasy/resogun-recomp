@@ -170,6 +170,13 @@ static ABI int32_t cond_destroy(GuestCond **cond) {
     if (!e) { runtime_low_free(*cond); *cond = NULL; }
     return orbis_error(e);
 }
+/* A cancellation point after a wake: the thread exits without the guest mutex held. Taken only
+ * when a cancel is pending, so an ordinary wake does not unlock and relock a contended mutex. */
+static void cancel_point(GuestMutex *mutex) {
+    pthread_mutex_unlock(&mutex->native);
+    runtime_thread_testcancel();
+    pthread_mutex_lock(&mutex->native);
+}
 static ABI int32_t cond_wait(GuestCond **cond, GuestMutex **mutex) {
     int32_t e = ensure_cond(cond);
     if (e) return e;
@@ -178,7 +185,7 @@ static ABI int32_t cond_wait(GuestCond **cond, GuestMutex **mutex) {
     const uint64_t wait_start = runtime_wait_begin();
     const int r = pthread_cond_wait(&(*cond)->native, &(*mutex)->native);
     runtime_wait_end("cond wait", wait_start, "cond", (long long)(uintptr_t)*cond);
-    if (!r) { pthread_mutex_unlock(&(*mutex)->native); runtime_thread_testcancel(); pthread_mutex_lock(&(*mutex)->native); }
+    if (!r && runtime_thread_cancel_pending()) cancel_point(*mutex);
     return orbis_error(r);
 }
 static int32_t cond_wait_until(GuestCond **cond, GuestMutex **mutex, const struct timespec *end) {
@@ -187,7 +194,7 @@ static int32_t cond_wait_until(GuestCond **cond, GuestMutex **mutex, const struc
     if (!mutex || (uintptr_t)*mutex < 3 || !end) return orbis_error(EINVAL);
     ++waits;
     const int r = pthread_cond_timedwait(&(*cond)->native, &(*mutex)->native, end);
-    if (!r || r == ETIMEDOUT) { pthread_mutex_unlock(&(*mutex)->native); runtime_thread_testcancel(); pthread_mutex_lock(&(*mutex)->native); }
+    if ((!r || r == ETIMEDOUT) && runtime_thread_cancel_pending()) cancel_point(*mutex);
     return timed_error(r);
 }
 static ABI int32_t cond_timedwait(GuestCond **cond, GuestMutex **mutex, uint32_t usec) {

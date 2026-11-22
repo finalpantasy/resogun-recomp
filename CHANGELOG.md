@@ -5,6 +5,14 @@ Each release's section becomes the text of its GitHub release (`tools/release_no
 without one does not publish. Keep each entry on one line: GitHub shows a line break in release
 text as a break. Sections from v0.15 down are from the Resogun runner this port is built on.
 
+## v0.1.2
+
+- Fixed a rare crash while a course loads: the GPU could read a command buffer after the game had started refilling it
+- Fixed a crash on texture formats the renderer can't convert; it now logs the texture and keeps going
+- Fixed the whole screen flashing to inverted colors for about half a second when the club hits the ball
+- First visits to a course load faster: the GPU thread no longer waits on the renderer for every load-time sync
+- Smoother frame pacing: the runtime asks Windows for a 1 ms timer, and thread waits skip a needless unlock and relock (held back from v0.1.1 until the load crash above was found)
+
 ## v0.1.1
 
 - Updates now clean up after themselves: a refused, failed, canceled or finished update leaves no empty staging folder or half-downloaded file in `data\update`, and your saves, settings, logs and prepared game are never touched
