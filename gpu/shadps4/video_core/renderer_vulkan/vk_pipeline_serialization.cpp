@@ -44,9 +44,11 @@
 namespace Serialization {
 /* You should increment versions below once corresponding serialization scheme is changed. */
 // resogun: 10 = relative VGPR access through a private array in programs with long select chains
-// (VgprArrayPass); 12 = spilled SGPR reloads resolved per lane, v_writelane lowered in IR.
-static constexpr u32 ShaderBinaryVersion = 12u;
-static constexpr u32 ShaderMetaVersion = 10u; // resogun: images and samplers specialize on golf-fix v22's LOD 0 sampling
+// (VgprArrayPass); 12 = spilled SGPR reloads resolved per lane, v_writelane lowered in IR;
+// 13 = implicit-LOD samples in divergent control flow take level 0 of single-level views.
+static constexpr u32 ShaderBinaryVersion = 13u;
+// resogun: 11 = image and sampler specializations without LOD fields (shader meta layout).
+static constexpr u32 ShaderMetaVersion = 11u;
 static constexpr u32 PipelineKeyVersion = 6u; // resogun: Info layout (larger image and sampler lists)
 } // namespace Serialization
 
