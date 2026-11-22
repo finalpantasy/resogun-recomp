@@ -419,6 +419,7 @@ typedef struct {
     M2LocalRoom room, advertised_links;
     uint64_t signal_registration, room_message_ack;
     uint8_t room_message_relay[16];
+    uint64_t game_lobby; /* the lobby id the game joined (GOLF_LOCAL_WORLD may map it to another world) */
 } M2LocalSession;
 
 static int m2_lobby_name_char(uint8_t ch) {
@@ -1015,7 +1016,7 @@ static int m2_lobby_notify(const M2LocalSession *session,uint16_t event,const M2
     uint8_t record[0x40]={0};
     const void *data=record;
     if (member) m2_lobby_record(record,member,NULL,session->world);
-    cb(session->ctx,session->world,event,member ? &data : NULL,arg);
+    cb(session->ctx,session->game_lobby ? session->game_lobby : session->world,event,member ? &data : NULL,arg);
     return 1;
 }
 
@@ -1086,6 +1087,7 @@ static void m2_local_request(M2LocalSession *session,M2Event *event) {
             }
         }
         session->world=world;
+        memcpy(&session->game_lobby,reply->record+0x10,8);
         session->ctx=event->ctx;
         session->generation=event->generation;
         session->ready=0;
@@ -1869,6 +1871,14 @@ static ABI int32_t m2_lobby_info_list(uint16_t ctx,const void *request,const M2O
     reply->count=1;
     return m2_answer("GetLobbyInfoList",ctx,opt,id,0x6,reply,0);
 }
+/* GOLF_LOCAL_WORLD=N (1..50): every lobby the game joins maps to the server's world N, so two
+ * instances whose Auto Entrance picks different worlds still share one roster. The game keeps its own
+ * lobby id in the replies. */
+static uint64_t m2_host_lobby(uint64_t lobby) {
+    const char *text=getenv("GOLF_LOCAL_WORLD");
+    const long world=text && *text ? strtol(text,NULL,10) : 0;
+    return lobby && world>=1 && world<=M2_WORLDS ? (uint64_t)world : lobby;
+}
 static ABI int32_t m2_join_lobby(uint16_t ctx,const uint64_t *request,const M2Opt *opt,uint32_t *id) {
     if (!request) return NP_INVALID_ARGUMENT;
     if (local_lobbies && (!*request || *request>M2_WORLDS)) return M2_INVALID_LOBBY;
@@ -1882,7 +1892,7 @@ static ABI int32_t m2_join_lobby(uint16_t ctx,const uint64_t *request,const M2Op
     memcpy(reply->record+0x18,&ids,8);
     memcpy(reply->record+0x20,&count,8);
     memcpy(reply->record+0x28,reply->member_ids,2);
-    return m2_answer("JoinLobby",ctx,opt,id,0x201,reply,lobby);
+    return m2_answer("JoinLobby",ctx,opt,id,0x201,reply,m2_host_lobby(lobby));
 }
 static ABI int32_t m2_lobby_members(uint16_t ctx,const void *request,const M2Opt *opt,uint32_t *id) {
     if (!request) return NP_INVALID_ARGUMENT;
@@ -1897,12 +1907,12 @@ static ABI int32_t m2_lobby_members(uint16_t ctx,const void *request,const M2Opt
         reply->first=reply->records;
         reply->count=1;
     }
-    return m2_answer("GetLobbyMemberDataInternalList",ctx,opt,id,0x7207,reply,lobby);
+    return m2_answer("GetLobbyMemberDataInternalList",ctx,opt,id,0x7207,reply,m2_host_lobby(lobby));
 }
 static ABI int32_t m2_leave_lobby(uint16_t ctx,const void *request,const M2Opt *opt,uint32_t *id) {
     uint64_t lobby=0;
     if (local_lobbies && request) memcpy(&lobby,request,8);
-    return m2_answer("LeaveLobby",ctx,opt,id,0x202,NULL,lobby);
+    return m2_answer("LeaveLobby",ctx,opt,id,0x202,NULL,m2_host_lobby(lobby));
 }
 /* ---- NpWordFilter, answered locally (same condition as Matching2) ----
  * Sony's word filter server is gone. The Open Course entry controller (C: eboot 0xa5ada0) censors the
