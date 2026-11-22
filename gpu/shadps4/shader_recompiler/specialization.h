@@ -127,6 +127,8 @@ struct StageSpecialization {
         u32 binding{};
         ForEachSharp(binding, buffers, info->buffers,
                      [](auto& spec, const auto& desc, AmdGpu::Buffer sharp) {
+                         AmdGpu::g_numfmt_context = {"V#", reinterpret_cast<const u32*>(&sharp),
+                                                     4};
                          spec.stride = sharp.GetStride();
                          spec.is_formatted = desc.is_formatted;
                          spec.swizzle_enable = sharp.swizzle_enable;
@@ -143,6 +145,8 @@ struct StageSpecialization {
                      });
         ForEachSharp(binding, images, info->images,
                      [&](auto& spec, const auto& desc, AmdGpu::Image sharp) {
+                         AmdGpu::g_numfmt_context = {"T#", reinterpret_cast<const u32*>(&sharp),
+                                                     8};
                          spec.type = sharp.GetViewType(desc.is_array);
                          spec.is_integer = AmdGpu::IsInteger(sharp.GetNumberFmt());
                          spec.is_storage = desc.is_written;

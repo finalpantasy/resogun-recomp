@@ -1197,6 +1197,7 @@ bool PipelineCache::RefreshGraphicsKey(PipelineSelection& sel) {
         auto& color_buffer = key.color_buffers[cb];
         color_buffer.data_format = col_buf.GetDataFmt();
         color_buffer.num_format = col_buf.GetNumberFmt();
+        AmdGpu::g_numfmt_context = {"color buffer", reinterpret_cast<const u32*>(&col_buf), 4};
         color_buffer.num_conversion = col_buf.GetNumberConversion();
         color_buffer.export_format = regs.color_export_format.GetFormat(cb);
         color_buffer.swizzle = col_buf.Swizzle();

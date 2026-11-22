@@ -195,6 +195,7 @@ static void LowerBufferFormatInst(IR::Block& block, IR::Inst& inst, Info& info) 
     const auto desc{info.buffers[inst.Arg(0).U32()]};
     const auto buffer{desc.GetSharp(info)};
 
+    AmdGpu::g_numfmt_context = {"V# (lower pass)", reinterpret_cast<const u32*>(&buffer), 4};
     const auto is_inst_typed = flags.inst_data_fmt != AmdGpu::DataFormat::FormatInvalid;
     const auto data_format =
         is_inst_typed ? AmdGpu::RemapDataFormat(flags.inst_data_fmt.Value()) : buffer.GetDataFmt();
