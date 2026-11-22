@@ -28,8 +28,8 @@ int runtime_golf_local_account(void) { return 0; } /* the test console has no lo
 static char mock_user_dir[512]=MOCK_USER;
 const char *runtime_file_user_dir(void) { return mock_user_dir; }
 static char last_toast_title[128], last_toast_detail[256];
-void resogun_gpu_toast_trophy(int id, const char *title, const char *detail, const unsigned char *png, uint64_t png_size) {
-    (void)id; (void)png; (void)png_size;
+void resogun_gpu_toast_trophy(int id, const char *title, const char *detail, const char *grade, const unsigned char *png, uint64_t png_size) {
+    (void)id; (void)grade; (void)png; (void)png_size;
     if (title) snprintf(last_toast_title, sizeof(last_toast_title), "%s", title);
     else last_toast_title[0] = 0;
     if (detail) snprintf(last_toast_detail, sizeof(last_toast_detail), "%s", detail);

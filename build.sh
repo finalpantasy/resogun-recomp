@@ -78,6 +78,7 @@ if [[ ${1:-} == --test ]]; then
     }
     run_test services tests/test_services.c "${compat[@]}"
     run_test savedata tests/test_savedata.c "${compat[@]}"
+    run_test trophy-record tests/test_trophy_record.c
     run_test content tests/test_content.c "${compat[@]}"
     run_test eventflag tests/test_eventflag.c
     run_test json tests/test_json.c

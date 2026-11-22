@@ -1556,13 +1556,17 @@ extern "C" void resogun_gpu_notice(const char* text, int milliseconds) {
 
 // Called by the runtime (src/runtime_services.c) when the game unlocks a trophy: its name as a
 // notice in the corner.
-extern "C" void resogun_gpu_toast_trophy(int id, const char* title, const char* detail, const unsigned char* png,
-                                            uint64_t png_size) {
+extern "C" void resogun_gpu_toast_trophy(int id, const char* title, const char* detail, const char* grade,
+                                            const unsigned char* png, uint64_t png_size) {
     (void)id;
     (void)detail;
     (void)png;
     (void)png_size;
     if (title && title[0]) {
-        ResogunOverlay::ShowNotice(std::string("Trophy: ") + title, 5000);
+        std::string text = std::string("Trophy: ") + title;
+        if (grade && grade[0]) {
+            text += std::string(" (") + grade + ")";
+        }
+        ResogunOverlay::ShowNotice(text, 4000);
     }
 }
