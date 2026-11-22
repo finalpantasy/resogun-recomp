@@ -5,6 +5,11 @@ Each release's section becomes the text of its GitHub release (`tools/release_no
 without one does not publish. Keep each entry on one line: GitHub shows a line break in release
 text as a break. Sections from v0.15 down are from the Resogun runner this port is built on.
 
+## v0.1.3
+
+- Easy online play: Host a game on the Online tab, share the invite code, and a friend joins with it; games on your local network show up in a list, and the router port opens automatically
+- Trophies: all 31 trophies have their real names, grades and descriptions, a popup shows when one unlocks, and a new Trophies tab lists them per save
+
 ## v0.1.2
 
 - Fixed a rare crash while a course loads: the GPU could read a command buffer after the game had started refilling it
