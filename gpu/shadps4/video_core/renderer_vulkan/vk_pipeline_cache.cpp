@@ -338,6 +338,8 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
     : instance{instance_}, scheduler{scheduler_}, liverpool{liverpool_},
       desc_heap{instance, scheduler.GetWorkSemaphore(), DescriptorHeapSizes} {
     sel.regs = &liverpool->regs;
+    // resogun: per-stage descriptor sets with pipeline libraries (Backend::SplitStageSets).
+    Shader::Backend::SplitStageSets() = instance.IsGraphicsPipelineLibraryEnabled();
     const auto& vk12_props = instance.GetVk12Properties();
     profile = Shader::Profile{
         .max_viewport_width = instance.GetMaxViewportWidth(),

@@ -9,7 +9,9 @@
 #include <string>
 #include <thread>
 #include <type_traits>
+#include <span>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <fmt/format.h>
 #include <boost/container/small_vector.hpp>
@@ -72,10 +74,12 @@ GraphicsPipeline::GraphicsPipeline(
         .size = sizeof(Shader::PushData),
     };
 
-    const vk::DescriptorSetLayout set_layout = *desc_layout;
+    const std::array set_layouts{*desc_layout, *stage_desc_layout};
     const vk::PipelineLayoutCreateInfo layout_info = {
-        .setLayoutCount = 1U,
-        .pSetLayouts = &set_layout,
+        .flags = split_sets ? vk::PipelineLayoutCreateFlagBits::eIndependentSetsEXT
+                            : vk::PipelineLayoutCreateFlags{},
+        .setLayoutCount = split_sets ? 2U : 1U,
+        .pSetLayouts = set_layouts.data(),
         .pushConstantRangeCount = 1,
         .pPushConstantRanges = &push_constants,
     };
@@ -662,16 +666,15 @@ struct GraphicsPipelineLibraries::Impl {
         bool ready = false;
         vk::UniquePipeline pipeline;
     };
-    struct Layout {
-        vk::UniqueDescriptorSetLayout set_layout;
-        vk::UniquePipelineLayout pipeline_layout;
-    };
 
     const Instance& instance;
     std::mutex parts_mutex;
     std::array<std::unordered_map<std::string, std::shared_ptr<Part>>, NumPartKinds> parts;
     std::mutex layouts_mutex;
-    std::unordered_map<std::string, Layout> layouts;
+    std::unordered_map<std::string, vk::UniqueDescriptorSetLayout> set_layouts;
+    std::unordered_map<std::string, vk::UniquePipelineLayout> layouts;
+    u32 fragment_parts_total = 0;
+    std::unordered_set<size_t> fragment_shaders;
     vk::UniquePipelineCache optimizer_cache;
     std::unique_ptr<AsyncCompiler> optimizer;
     std::atomic<bool> stopping{false};
@@ -693,11 +696,9 @@ struct GraphicsPipelineLibraries::Impl {
         }
     }
 
-    /// A pipeline layout identical to a pipeline's own (one descriptor set, push constants), shared
-    /// by every library of that layout: pre-rasterization and fragment libraries linked together
-    /// need identically defined layouts.
-    vk::PipelineLayout GetLayout(const std::vector<vk::DescriptorSetLayoutBinding>& bindings,
-                                 vk::DescriptorSetLayoutCreateFlags flags) {
+    /// A descriptor set layout identical to a pipeline's own, shared by every library using it.
+    vk::DescriptorSetLayout GetSetLayout(const std::vector<vk::DescriptorSetLayoutBinding>& bindings,
+                                         vk::DescriptorSetLayoutCreateFlags flags) {
         PartKey key;
         key.Add(u32(flags));
         for (const auto& b : bindings) {
@@ -707,27 +708,45 @@ struct GraphicsPipelineLibraries::Impl {
             key.Add(u32(b.stageFlags));
         }
         std::scoped_lock lock{layouts_mutex};
-        if (const auto it = layouts.find(key.bytes); it != layouts.end()) {
-            return *it->second.pipeline_layout;
+        if (const auto it = set_layouts.find(key.bytes); it != set_layouts.end()) {
+            return *it->second;
         }
-        const vk::Device device = instance.GetDevice();
-        auto [set_result, set_layout] = device.createDescriptorSetLayoutUnique({
+        auto [result, set_layout] = instance.GetDevice().createDescriptorSetLayoutUnique({
             .flags = flags,
             .bindingCount = static_cast<u32>(bindings.size()),
             .pBindings = bindings.data(),
         });
-        if (set_result != vk::Result::eSuccess) {
+        if (result != vk::Result::eSuccess) {
             return {};
+        }
+        const vk::DescriptorSetLayout handle = *set_layout;
+        set_layouts.emplace(std::move(key.bytes), std::move(set_layout));
+        return handle;
+    }
+
+    /// A pipeline layout of `sets` (null entries allowed with independent sets) and the push
+    /// constants, identical to a pipeline's own when `sets` are its set layouts: libraries linked
+    /// together need identically defined layouts (per set, with independent sets).
+    vk::PipelineLayout GetLayout(std::span<const vk::DescriptorSetLayout> sets, bool independent) {
+        PartKey key;
+        key.Add(independent);
+        for (const auto set : sets) {
+            key.Add(static_cast<VkDescriptorSetLayout>(set));
+        }
+        std::scoped_lock lock{layouts_mutex};
+        if (const auto it = layouts.find(key.bytes); it != layouts.end()) {
+            return *it->second;
         }
         const vk::PushConstantRange push_constants = {
             .stageFlags = AllGraphicsStageBits,
             .offset = 0,
             .size = sizeof(Shader::PushData),
         };
-        const vk::DescriptorSetLayout set = *set_layout;
-        auto [layout_result, layout] = device.createPipelineLayoutUnique({
-            .setLayoutCount = 1U,
-            .pSetLayouts = &set,
+        auto [layout_result, layout] = instance.GetDevice().createPipelineLayoutUnique({
+            .flags = independent ? vk::PipelineLayoutCreateFlagBits::eIndependentSetsEXT
+                                 : vk::PipelineLayoutCreateFlags{},
+            .setLayoutCount = static_cast<u32>(sets.size()),
+            .pSetLayouts = sets.data(),
             .pushConstantRangeCount = 1,
             .pPushConstantRanges = &push_constants,
         });
@@ -735,8 +754,15 @@ struct GraphicsPipelineLibraries::Impl {
             return {};
         }
         const vk::PipelineLayout handle = *layout;
-        layouts.emplace(std::move(key.bytes), Layout{std::move(set_layout), std::move(layout)});
+        layouts.emplace(std::move(key.bytes), std::move(layout));
         return handle;
+    }
+
+    /// Counts a built fragment library of the fragment stage `stage_hash` (cumulative report).
+    void NoteFragmentPart(size_t stage_hash) {
+        std::scoped_lock lock{layouts_mutex};
+        ++fragment_parts_total;
+        fragment_shaders.insert(stage_hash);
     }
 
     /// The part for `key`, built here by `build` when no thread has; a thread that finds it being
@@ -832,6 +858,12 @@ void GraphicsPipelineLibraries::Report() {
     if (!total && !links && !restored && !optimized) {
         return;
     }
+    if (auto* active = g_pipeline_libraries) {
+        std::scoped_lock lock{active->impl->layouts_mutex};
+        parts += fmt::format("; fragment libraries so far {} for {} fragment shaders",
+                             active->impl->fragment_parts_total,
+                             active->impl->fragment_shaders.size());
+    }
     std::printf("Pipeline libraries: %u parts %.1f ms (%s); part waits %.1f ms; %u linked %.1f ms "
                 "(%u failed); %u restored from binaries %.1f ms; %u not eligible; optimized %u "
                 "%.1f ms in background (%u failed, %u dropped)\n",
@@ -878,8 +910,25 @@ bool GraphicsPipeline::CreateFromLibraries(GraphicsPipelineLibraries& libraries,
         }
     }
 
-    const vk::PipelineLayout layout = lib.GetLayout(layout_bindings, layout_flags);
-    if (!layout) {
+    // resogun: with split stage sets the pre-rasterization library takes only set 1 and the
+    // fragment library only set 0, so a fragment library depends on its own shader alone.
+    const vk::DescriptorSetLayout set0 = lib.GetSetLayout(layout_bindings, layout_flags);
+    const vk::DescriptorSetLayout set1 =
+        split_sets ? lib.GetSetLayout(stage_layout_bindings, {}) : vk::DescriptorSetLayout{};
+    if (!set0 || (split_sets && !set1)) {
+        return false;
+    }
+    const std::array<vk::DescriptorSetLayout, 2> link_sets{set0, set1};
+    const std::array<vk::DescriptorSetLayout, 2> pre_sets{vk::DescriptorSetLayout{}, set1};
+    const std::array<vk::DescriptorSetLayout, 2> fragment_sets{set0, vk::DescriptorSetLayout{}};
+    const size_t num_sets = split_sets ? 2 : 1;
+    const vk::PipelineLayout layout =
+        lib.GetLayout(std::span{link_sets}.first(num_sets), split_sets);
+    const vk::PipelineLayout pre_layout =
+        split_sets ? lib.GetLayout(std::span{pre_sets}.first(num_sets), true) : layout;
+    const vk::PipelineLayout fragment_layout =
+        split_sets ? lib.GetLayout(std::span{fragment_sets}.first(num_sets), true) : layout;
+    if (!layout || !pre_layout || !fragment_layout) {
         return false;
     }
     const auto add_dynamic = [&](PartKey& part_key) {
@@ -937,7 +986,7 @@ bool GraphicsPipeline::CreateFromLibraries(GraphicsPipelineLibraries& libraries,
         pre_key.Add(static_cast<VkShaderModule>(stage.module));
     }
     pre_key.Add(state->uses_subgroup_size);
-    pre_key.Add(static_cast<VkPipelineLayout>(layout));
+    pre_key.Add(static_cast<VkPipelineLayout>(pre_layout));
     const auto& raster = state->raster_chain.get<vk::PipelineRasterizationStateCreateInfo>();
     pre_key.Add(raster.depthClampEnable);
     pre_key.Add(raster.rasterizerDiscardEnable);
@@ -966,7 +1015,7 @@ bool GraphicsPipeline::CreateFromLibraries(GraphicsPipelineLibraries& libraries,
             .pViewportState = &state->viewport,
             .pRasterizationState = &state->raster_chain.get(),
             .pDynamicState = &state->dynamic,
-            .layout = layout,
+            .layout = pre_layout,
         });
     });
 
@@ -980,12 +1029,13 @@ bool GraphicsPipeline::CreateFromLibraries(GraphicsPipelineLibraries& libraries,
     fragment_key.Add(fragment_stage ? static_cast<VkShaderModule>(fragment_stage->module)
                                     : VkShaderModule{});
     fragment_key.Add(state->uses_subgroup_size);
-    fragment_key.Add(static_cast<VkPipelineLayout>(layout));
+    fragment_key.Add(static_cast<VkPipelineLayout>(fragment_layout));
     add_multisampling(fragment_key);
     fragment_key.Add(depth_only.depthAttachmentFormat);
     fragment_key.Add(depth_only.stencilAttachmentFormat);
     add_dynamic(fragment_key);
     const vk::Pipeline fragment_part = lib.GetPart(FragmentPart, std::move(fragment_key.bytes), [&] {
+        lib.NoteFragmentPart(key.stage_hashes[u32(Shader::SwStage::Fragment)]);
         auto part = library_info(vk::GraphicsPipelineLibraryFlagBitsEXT::eFragmentShader);
         part.pNext = &depth_only;
         return create({
@@ -996,7 +1046,7 @@ bool GraphicsPipeline::CreateFromLibraries(GraphicsPipelineLibraries& libraries,
             .pMultisampleState = &state->multisampling,
             .pDepthStencilState = &state->depth_stencil,
             .pDynamicState = &state->dynamic,
-            .layout = layout,
+            .layout = fragment_layout,
         });
     });
 
@@ -1159,19 +1209,26 @@ template void GraphicsPipeline::GetVertexInputs(
     VertexInputs<AmdGpu::Buffer>& guest_buffers, u32 step_rate_0, u32 step_rate_1) const;
 
 void GraphicsPipeline::BuildDescSetLayout(bool preloading) {
+    // resogun: with split stage sets the fragment shader's bindings (set 0) and the other
+    // stages' (set 1) go to separate lists; binding numbers are the same either way.
     boost::container::small_vector<vk::DescriptorSetLayoutBinding, 32> bindings;
+    boost::container::small_vector<vk::DescriptorSetLayoutBinding, 32> stage_bindings;
     u32 binding{};
+    split_sets = Shader::Backend::SplitStageSets();
+    split_binding = 0;
 
     for (const auto* stage : stages) {
         if (!stage) {
             continue;
         }
+        const bool set1 = split_sets && stage->sw_stage != Shader::SwStage::Fragment;
+        auto& list = set1 ? stage_bindings : bindings;
         const auto stage_bit = LogicalStageToStageBit[u32(stage->sw_stage)];
         for (const auto& buffer : stage->buffers) {
             const auto sharp =
                 preloading ? AmdGpu::Buffer{}
                            : buffer.GetSharp(*stage); // See for the comment in compute PL creation
-            bindings.push_back({
+            list.push_back({
                 .binding = binding++,
                 .descriptorType = vk::DescriptorType::eStorageBuffer,
                 .descriptorCount = 1,
@@ -1180,7 +1237,7 @@ void GraphicsPipeline::BuildDescSetLayout(bool preloading) {
         }
         for (const auto& image : stage->images) {
             const u32 num_bindings = image.NumBindings(*stage);
-            bindings.push_back({
+            list.push_back({
                 .binding = binding,
                 .descriptorType = image.is_written ? vk::DescriptorType::eStorageImage
                                                    : vk::DescriptorType::eSampledImage,
@@ -1190,19 +1247,24 @@ void GraphicsPipeline::BuildDescSetLayout(bool preloading) {
             binding += num_bindings;
         }
         for (const auto& sampler : stage->samplers) {
-            bindings.push_back({
+            list.push_back({
                 .binding = binding++,
                 .descriptorType = vk::DescriptorType::eSampler,
                 .descriptorCount = 1,
                 .stageFlags = stage_bit,
             });
         }
+        if (stage->sw_stage == Shader::SwStage::Fragment) {
+            split_binding = binding;
+        }
     }
-    uses_push_descriptors = binding < instance.MaxPushDescriptors();
+    // Only set 0 may be a push descriptor set: with split sets it holds the fragment shader's.
+    uses_push_descriptors = (split_sets ? split_binding : binding) < instance.MaxPushDescriptors();
     const auto flags = uses_push_descriptors
                            ? vk::DescriptorSetLayoutCreateFlagBits::ePushDescriptorKHR
                            : vk::DescriptorSetLayoutCreateFlagBits{};
     layout_bindings.assign(bindings.begin(), bindings.end());
+    stage_layout_bindings.assign(stage_bindings.begin(), stage_bindings.end());
     layout_flags = flags;
     const vk::DescriptorSetLayoutCreateInfo desc_layout_ci = {
         .flags = flags,
@@ -1214,6 +1276,16 @@ void GraphicsPipeline::BuildDescSetLayout(bool preloading) {
     ASSERT_MSG(layout_result == vk::Result::eSuccess,
                "Failed to create graphics descriptor set layout: {}", vk::to_string(layout_result));
     desc_layout = std::move(layout);
+    if (split_sets) {
+        auto [stage_result, stage_layout] = instance.GetDevice().createDescriptorSetLayoutUnique({
+            .bindingCount = static_cast<u32>(stage_bindings.size()),
+            .pBindings = stage_bindings.data(),
+        });
+        ASSERT_MSG(stage_result == vk::Result::eSuccess,
+                   "Failed to create graphics descriptor set layout: {}",
+                   vk::to_string(stage_result));
+        stage_desc_layout = std::move(stage_layout);
+    }
 }
 
 } // namespace Vulkan

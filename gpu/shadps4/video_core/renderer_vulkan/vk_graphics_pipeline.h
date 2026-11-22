@@ -203,6 +203,8 @@ private:
     GraphicsPipelineKey key;
     /// resogun: the descriptor set layout's bindings and flags (pipeline library layouts).
     std::vector<vk::DescriptorSetLayoutBinding> layout_bindings;
+    /// resogun: set 1's bindings with split stage sets (Pipeline::stage_desc_layout).
+    std::vector<vk::DescriptorSetLayoutBinding> stage_layout_bindings;
     vk::DescriptorSetLayoutCreateFlags layout_flags;
     std::shared_ptr<OptimizedPipeline> optimized;
     std::optional<const Shader::Gcn::FetchShaderData> fetch_shader{};

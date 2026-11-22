@@ -58,7 +58,9 @@ namespace {
 u32 CurrentShaderBinaryVersion() {
     // resogun: RESOGUN_VGPR_ARRAY also changes recompiled SPIR-V (VgprArrayPass).
     return Serialization::ShaderBinaryVersion + (AmdPathsOff::Current().shaderext ? 32u : 0u) +
-           Shader::Optimization::VgprArrayMode() * 64u;
+           Shader::Optimization::VgprArrayMode() * 64u +
+           // resogun: pipeline libraries put non-fragment graphics resources in set 1.
+           (Shader::Backend::SplitStageSets() ? 512u : 0u);
 }
 } // namespace
 
