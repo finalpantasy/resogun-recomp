@@ -9,6 +9,8 @@ text as a break. Sections from v0.15 down are from the Resogun runner this port 
 
 - Easy online play: Host a game on the Online tab, share the invite code, and a friend joins with it; games on your local network show up in a list, and the router port opens automatically
 - Trophies: all 31 trophies have their real names, grades and descriptions, a popup shows when one unlocks, and a new Trophies tab lists them per save
+- 60 FPS mode now runs through one small hook on the game's flip-rate call and keeps game speed normal
+- Shader fixes rewritten (shadow lines, face lighting), with resource limits set from what the game uses
 
 ## v0.1.2
 
