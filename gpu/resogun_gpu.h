@@ -93,6 +93,8 @@ int resogun_gpu_audio_volume(void);
 unsigned resogun_gpu_symbol_count(void);
 /* Yields of threads waiting for guest memory copies (CPU report). */
 unsigned long long resogun_gpu_copy_yields(void);
+/* End-of-run report: GPU command thread waits by reason and call site. */
+void resogun_gpu_sync_report(void);
 /* Frames handed to the presenter since start (hang dump). */
 unsigned long long resogun_gpu_flips(void);
 /* Nonzero while the Cheats page is open: the game is held at its next flip (runtime_game.c) and

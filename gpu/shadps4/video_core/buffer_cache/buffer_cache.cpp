@@ -131,7 +131,7 @@ void BufferCache::RunGuestCopy(const ResogunCopy::Item& item) {
 // idle most of the time); PoolSmallCopies (toggle 524288) batches them for the copy threads.
 void BufferCache::SmallGuestCopy(const ResogunCopy::Item& item) {
     if (scheduler.IsRecordingDeferred() && !ResogunToggle::Disabled(ResogunToggle::PoolSmallCopies)) {
-        scheduler.RecordHostCopy([item] { item.run(item); });
+        scheduler.RecordHostCopy(item);
         return;
     }
     ResogunCopy::QueueCopy(item);
@@ -826,6 +826,8 @@ void BufferCache::SubmitPendingArenaBinds(Vulkan::SubmitInfo& info) {
     };
 
     info.AddWait(signal_sema, signal_tick);
+    // resogun: the scheduler calls this without submit_mutex (asynchronous submits).
+    std::scoped_lock submit_lock{Vulkan::Scheduler::submit_mutex};
     auto submit_result = instance.GetSparseQueue().bindSparse(sparse_info);
     ASSERT_MSG(submit_result != vk::Result::eErrorDeviceLost, "Device lost during submit");
 

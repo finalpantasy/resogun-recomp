@@ -271,6 +271,20 @@ void TextureCache::ProcessDownloadImages() {
         ReportImageCreates();
     }
     if (deferred_readbacks) {
+        // resogun: with no image to read back no page becomes inaccessible: the wait below
+        // (for the recording thread, on every end-of-pipe fence) is only for downloads.
+        if (ResogunSync::Enabled()) {
+            bool none;
+            {
+                std::unique_lock lock{download_images_mutex};
+                none = download_images.empty();
+            }
+            if (none) {
+                std::scoped_lock readback_lock{readback_mutex};
+                RetireReadbacks();
+                return;
+            }
+        }
         // Upload workers must finish reading RAM before these pages become inaccessible.
         scheduler.WaitHostCopies();
         std::scoped_lock readback_lock{readback_mutex};

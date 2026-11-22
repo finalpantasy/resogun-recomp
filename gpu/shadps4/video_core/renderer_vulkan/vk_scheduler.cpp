@@ -20,12 +20,36 @@
 #include "common/thread.h"
 #include "imgui/renderer/texture_manager.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
+#include "video_core/renderer_vulkan/vk_draw_pipe.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "resogun_threads.h"
 
 namespace Vulkan {
 
 std::mutex Scheduler::submit_mutex;
+std::mutex Scheduler::registry_mutex;
+std::array<Scheduler*, 8> Scheduler::registry{};
+
+namespace {
+u64 NowNs() {
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(
+               std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+}
+
+ResogunSync::Role SyncRole() {
+    if (DrawPipe::OnStageB()) {
+        return ResogunSync::DrawRecording;
+    }
+    return ResogunSync::OnGpuCommandThread() ? ResogunSync::GpuCommand : ResogunSync::OtherThread;
+}
+
+u64 ElapsedNs(std::chrono::steady_clock::time_point start) {
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() -
+                                                                start)
+        .count();
+}
+} // namespace
 
 Scheduler::Scheduler(const Instance& instance, bool threaded_recording)
     : instance{instance}, work_semaphore{instance}, command_pool{instance, &work_semaphore} {
@@ -39,12 +63,25 @@ Scheduler::Scheduler(const Instance& instance, bool threaded_recording)
 #if TRACY_GPU_ENABLED
     profiler_scope = reinterpret_cast<tracy::VkCtxScope*>(std::malloc(sizeof(tracy::VkCtxScope)));
 #endif
-    AllocateWorkerCommandBuffers();
+    AllocateWorkerCommandBuffers(true);
+    {
+        std::scoped_lock lk{registry_mutex};
+        for (auto& slot : registry) {
+            if (!slot) {
+                slot = this;
+                break;
+            }
+        }
+    }
     priority_pending_ops_thread =
         std::jthread(std::bind_front(&Scheduler::PriorityPendingOpsThread, this));
 }
 
 Scheduler::~Scheduler() {
+    {
+        std::scoped_lock lk{registry_mutex};
+        std::replace(registry.begin(), registry.end(), this, static_cast<Scheduler*>(nullptr));
+    }
     if (recorder_thread.joinable()) {
         SyncRecording();
         recorder_thread.request_stop();
@@ -189,41 +226,124 @@ void Scheduler::SignalAfterHostCopies(std::function<void()> signal) {
     }
     ResogunCopy::FlushBatch();
     deferred_signals_issued.fetch_add(1, std::memory_order_relaxed);
-    Record([signal = std::move(signal), done = deferred_signals_done](vk::CommandBuffer) mutable {
+    auto deferred = [signal = std::move(signal), done = deferred_signals_done]() mutable {
         ResogunCopy::AfterCopies([signal = std::move(signal), done = std::move(done)] {
             signal();
             done->fetch_add(1, std::memory_order_release);
         });
-    });
+    };
+    if (!ResogunSync::Enabled()) {
+        Record([deferred = std::move(deferred)](vk::CommandBuffer) mutable { deferred(); });
+    } else {
+        // In the host work queue: after the copies issued before it, and runnable by a thread
+        // that waits for it without waiting for the recording thread.
+        const u64 seq = ++host_copies_issued;
+        {
+            std::scoped_lock lk{host_work_mutex};
+            host_work.push_back({seq, {}, std::move(deferred)});
+        }
+        Record([this, seq](vk::CommandBuffer) { RunHostWork(seq); });
+        // The guest waits for these fences. A recording thread stuck on a pipeline build
+        // would hold them back with it, though nothing in them needs it: they run here.
+        if (RecorderBehind()) {
+            RunHostWork(seq);
+        }
+    }
     KickRecording(true);
 }
 
-void Scheduler::WaitDeferredSignals() {
+bool Scheduler::RecorderBehind() const noexcept {
+    if (queued_chunks.load(std::memory_order_relaxed) >= 2) {
+        return true;
+    }
+    const u64 since = recorder_chunk_start.load(std::memory_order_relaxed);
+    return since && NowNs() - since > 1'000'000;
+}
+
+void Scheduler::RecordHostCopy(const ResogunCopy::Item& item) {
+    const u64 seq = ++host_copies_issued;
+    if (!ResogunSync::Enabled()) {
+        Record([item, this, seq](vk::CommandBuffer) {
+            item.run(item);
+            host_copies_done.store(seq, std::memory_order_release);
+        });
+        return;
+    }
+    {
+        std::scoped_lock lk{host_work_mutex};
+        host_work.push_back({seq, item, {}});
+    }
+    Record([this, seq](vk::CommandBuffer) { RunHostWork(seq); });
+}
+
+void Scheduler::RunHostWork(u64 upto) {
+    if (host_copies_done.load(std::memory_order_acquire) >= upto) {
+        return;
+    }
+    std::scoped_lock run{host_work_run_mutex};
+    while (host_copies_done.load(std::memory_order_relaxed) < upto) {
+        HostWork work;
+        {
+            std::scoped_lock lk{host_work_mutex};
+            work = std::move(host_work.front());
+            host_work.pop_front();
+        }
+        if (work.signal) {
+            work.signal();
+        } else {
+            work.item.run(work.item);
+        }
+        host_copies_done.store(work.seq, std::memory_order_release);
+    }
+}
+
+void Scheduler::WaitDeferredSignals(std::source_location caller) {
     const u64 issued = deferred_signals_issued.load(std::memory_order_relaxed);
     if (deferred_signals_done->load(std::memory_order_acquire) >= issued ||
         ResogunToggle::Disabled(ResogunToggle::OrderedGuestWrites)) {
         return;
     }
-    ResogunStats::WaitTimer timer{ResogunStats::host_copies_wait_ns};
-    KickRecording(true);
-    while (deferred_signals_done->load(std::memory_order_acquire) < issued) {
-        // Helps the copy threads the signals wait for.
-        ResogunCopy::WaitAsync();
-        std::this_thread::yield();
+    const auto start = std::chrono::steady_clock::now();
+    {
+        ResogunStats::WaitTimer timer{ResogunStats::host_copies_wait_ns};
+        KickRecording(true);
+        if (ResogunSync::Enabled()) {
+            // Hands the signals still queued to the copy threads here.
+            RunHostWork(host_copies_issued);
+        }
+        while (deferred_signals_done->load(std::memory_order_acquire) < issued) {
+            // Helps the copy threads the signals wait for.
+            ResogunCopy::WaitAsync();
+            std::this_thread::yield();
+        }
     }
+    ResogunSync::Add(ResogunSync::DeferredSignals, SyncRole(), caller, ElapsedNs(start), true);
 }
 
-void Scheduler::WaitHostCopies() {
+void Scheduler::WaitHostCopies(std::source_location caller) {
+    const auto start = std::chrono::steady_clock::now();
+    bool blocked = false;
     if (host_copies_done.load(std::memory_order_acquire) < host_copies_issued) {
         ResogunStats::WaitTimer timer{ResogunStats::host_copies_wait_ns};
         ResogunStats::host_copy_waits.fetch_add(1, std::memory_order_relaxed);
         KickRecording(true);
+        blocked = true;
+        if (ResogunSync::Enabled()) {
+            RunHostWork(host_copies_issued);
+        }
         while (host_copies_done.load(std::memory_order_acquire) < host_copies_issued) {
             std::this_thread::yield();
         }
     }
-    ResogunStats::WaitTimer timer{ResogunStats::copy_threads_wait_ns};
-    ResogunCopy::WaitAsync();
+    {
+        ResogunStats::WaitTimer timer{ResogunStats::copy_threads_wait_ns};
+        ResogunCopy::WaitAsync();
+    }
+    const u64 ns = ElapsedNs(start);
+    // Only waits worth a line: most calls find nothing pending.
+    if (blocked || ns > 20'000) {
+        ResogunSync::Add(ResogunSync::HostCopies, SyncRole(), caller, ns, true);
+    }
 }
 
 void Scheduler::KickRecording(bool force) {
@@ -261,14 +381,21 @@ void Scheduler::KickRecording(bool force) {
     }
 }
 
-void Scheduler::SyncRecording() {
+void Scheduler::SyncRecording(ResogunSync::Kind kind, std::source_location caller) {
     if (!recording_threaded) {
         return;
     }
     KickRecording(true);
-    ResogunStats::WaitTimer timer{ResogunStats::sync_recording_ns};
-    std::unique_lock lk{recorder_mutex};
-    recorder_idle_cv.wait(lk, [this] { return recorder_queue.empty() && !recorder_busy; });
+    const auto start = std::chrono::steady_clock::now();
+    bool blocked;
+    {
+        ResogunStats::WaitTimer timer{ResogunStats::sync_recording_ns};
+        std::unique_lock lk{recorder_mutex};
+        const auto idle = [this] { return recorder_queue.empty() && !recorder_busy; };
+        blocked = !idle();
+        recorder_idle_cv.wait(lk, idle);
+    }
+    ResogunSync::Add(kind, SyncRole(), caller, ElapsedNs(start), blocked);
 }
 
 void Scheduler::RecorderThread(std::stop_token stoken) {
@@ -302,27 +429,33 @@ void Scheduler::RecorderThread(std::stop_token stoken) {
             queued_chunks.store(recorder_queue.size(), std::memory_order_release);
             recorder_busy = true;
         }
-        // current_cmdbuf only changes after SyncRecording(), which waits for this thread.
+        // current_cmdbuf changes on this thread (an asynchronous submit, always the last
+        // command of its chunk) or after SyncRecording(), which waits for this thread.
+        const u64 queued_before = queued_tick.load(std::memory_order_relaxed);
+        recorder_chunk_start.store(NowNs(), std::memory_order_relaxed);
         chunk->Execute(current_cmdbuf);
+        recorder_chunk_start.store(0, std::memory_order_relaxed);
         {
             std::scoped_lock lk{recorder_mutex};
             free_chunks.push_back(std::move(chunk));
             recorder_busy = false;
-            if (recorder_queue.empty()) {
+            // WaitQueued() waits for submissions made here.
+            if (recorder_queue.empty() ||
+                queued_tick.load(std::memory_order_relaxed) != queued_before) {
                 recorder_idle_cv.notify_all();
             }
         }
     }
 }
 
-void Scheduler::Flush(SubmitInfo& info) {
+void Scheduler::Flush(SubmitInfo& info, std::source_location caller) {
     // When flushing, we only send data to the driver; no waiting is necessary.
-    SubmitExecution(info);
+    SubmitExecution(info, caller);
 }
 
-void Scheduler::Flush() {
+void Scheduler::Flush(std::source_location caller) {
     SubmitInfo info{};
-    Flush(info);
+    Flush(info, caller);
 }
 
 void Scheduler::Finish(std::source_location caller) {
@@ -331,7 +464,7 @@ void Scheduler::Finish(std::source_location caller) {
     const bool diagnose = WaitDiagnostics::Enabled();
     const auto start = diagnose ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
     SubmitInfo info{};
-    SubmitExecution(info);
+    SubmitExecution(info, caller);
     const u64 submit_ns = diagnose ? std::chrono::duration_cast<std::chrono::nanoseconds>(
         std::chrono::steady_clock::now() - start).count() : 0;
     Wait(presubmit_tick, caller, submit_ns);
@@ -350,11 +483,15 @@ void Scheduler::Wait(u64 tick, std::source_location caller, u64 submit_ns) {
     if (tick >= work_semaphore.CurrentTick()) {
         // Make sure we are not waiting for the current tick without signalling
         SubmitInfo info{};
-        Flush(info);
+        Flush(info, caller);
     }
-    ResogunStats::WaitTimer timer{ResogunStats::tick_wait_ns};
-    const auto submitted = diagnose ? std::chrono::steady_clock::now() : start;
-    work_semaphore.Wait(tick);
+    const auto submitted = std::chrono::steady_clock::now();
+    const bool blocked = !IsFree(tick);
+    {
+        ResogunStats::WaitTimer timer{ResogunStats::tick_wait_ns};
+        work_semaphore.Wait(tick);
+    }
+    ResogunSync::Add(ResogunSync::Tick, SyncRole(), caller, ElapsedNs(submitted), blocked);
     if (diagnose) {
         const auto completed = std::chrono::steady_clock::now();
         WaitDiagnostics::Get().Add(caller.file_name(), caller.line(),
@@ -387,7 +524,7 @@ void Scheduler::PopPendingOperations() {
     }
 }
 
-void Scheduler::AllocateWorkerCommandBuffers() {
+void Scheduler::AllocateWorkerCommandBuffers(bool invalidate_state) {
     const vk::CommandBufferBeginInfo begin_info = {
         .flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit,
     };
@@ -395,8 +532,11 @@ void Scheduler::AllocateWorkerCommandBuffers() {
     current_cmdbuf = command_pool.Commit();
     Check(current_cmdbuf.begin(begin_info));
 
-    // Invalidate dynamic state so it gets applied to the new command buffer.
-    dynamic_state.Invalidate();
+    // Invalidate dynamic state so it gets applied to the new command buffer. (After an
+    // asynchronous submit this runs on the recording thread; the submitting thread did it.)
+    if (invalidate_state) {
+        dynamic_state.Invalidate();
+    }
 
 #if TRACY_GPU_ENABLED
     auto* profiler_ctx = instance.GetProfilerContext();
@@ -408,34 +548,98 @@ void Scheduler::AllocateWorkerCommandBuffers() {
 #endif
 }
 
-void Scheduler::SubmitExecution(SubmitInfo& info) {
-    std::scoped_lock lk{submit_mutex};
+void Scheduler::SubmitExecution(SubmitInfo& info, std::source_location caller) {
+    // resogun: a submission that waits for another scheduler's tick needs that tick's
+    // submission on the queue first (its recorder may still hold it: asynchronous submits).
+    WaitOtherSchedulers(info, caller);
+    // Only plain submissions go through the recorder: semaphores and fences belong to
+    // swapchain and present ordering, which expect the submission made here.
+    const bool async = AsyncSubmitEnabled() && info.num_wait_semas == 0 &&
+                       info.num_signal_semas == 0 && !info.fence;
     const u64 signal_value = work_semaphore.NextTick();
 
 #if TRACY_GPU_ENABLED
-    auto* profiler_ctx = instance.GetProfilerContext();
-    if (profiler_ctx) {
-        profiler_scope->~VkCtxScope();
-        TracyVkCollect(profiler_ctx, current_cmdbuf);
+    {
+        SyncRecording(ResogunSync::Submit, caller);
+        std::scoped_lock lk{submit_mutex};
+        auto* profiler_ctx = instance.GetProfilerContext();
+        if (profiler_ctx) {
+            profiler_scope->~VkCtxScope();
+            TracyVkCollect(profiler_ctx, current_cmdbuf);
+        }
     }
 #endif
 
+    // resogun: not under submit_mutex: the recording thread takes it for asynchronous
+    // submits, and on_submit may wait for that thread (data too large for a chunk). The
+    // sparse binds it makes take the lock themselves.
     if (on_submit) {
         on_submit(info);
     }
 
     EndRendering();
-    if (auto* profiler = GpuProfiler::Get(); profiler && profiler->Records(this)) {
+    if (!large_pending.empty()) {
+        // Freed on the recording thread after the commands that use them.
+        Record([blocks = std::move(large_pending)](vk::CommandBuffer) {});
+        large_pending.clear();
+    }
+    auto* profiler = GpuProfiler::Get();
+    const bool profiled = profiler && profiler->Records(this);
+    if (profiled) {
         // Until the next submission's first timestamp: mostly the GPU waiting for it.
         profiler->Mark(0x5B317ull, [] { return std::string{"(between submissions: GPU idle)"}; });
     }
+    if (async && !profiled) {
+        // resogun: the recording thread ends, submits and replaces the command buffer after
+        // the commands before it, so this thread goes on translating while it catches up
+        // (cold loads: the driver building pipelines). Commands recorded from here on belong
+        // to the next submission: the submit ends its chunk (KickRecording), and the next chunk
+        // starts on the command buffer the submit began.
+        // Guest memory copies into staging read by this submission: the copy threads' issued
+        // so far (not later ones), and the recording thread's, which come before the submit.
+        auto copies_done = std::make_shared<std::atomic<bool>>(false);
+        ResogunCopy::AfterCopies(
+            [copies_done] { copies_done->store(true, std::memory_order_release); });
+        direct_mode = false; // what was recorded directly is in the command buffer already
+        Record([this, info, signal_value, copies_done,
+                host_upto = host_copies_issued](vk::CommandBuffer cmdbuf) mutable {
+            RunHostWork(host_upto);
+            while (!copies_done->load(std::memory_order_acquire)) {
+                std::this_thread::yield();
+            }
+            QueueSubmit(cmdbuf, info, signal_value);
+            AllocateWorkerCommandBuffers(false);
+            queued_tick.store(signal_value, std::memory_order_release);
+        });
+        KickRecording(true);
+        dynamic_state.Invalidate();
+        // Bounded: the recorder may fall seconds behind while the driver builds pipelines.
+        static const u64 depth = [] {
+            const char* value = std::getenv("RESOGUN_ASYNC_SUBMIT_DEPTH");
+            return value ? std::max<u64>(1, std::strtoull(value, nullptr, 10)) : u64{8};
+        }();
+        if (signal_value > depth) {
+            WaitQueued(signal_value - depth, caller);
+        }
+        PopPendingOperations();
+        return;
+    }
     {
         ResogunStats::WaitTimer timer{ResogunStats::sync_submit_ns};
-        SyncRecording();
+        SyncRecording(ResogunSync::Submit, caller);
     }
     // Guest memory copies into staging read by this submission (copy threads).
-    WaitHostCopies();
-    Check(current_cmdbuf.end());
+    WaitHostCopies(caller);
+    QueueSubmit(current_cmdbuf, info, signal_value);
+    queued_tick.store(signal_value, std::memory_order_release);
+    AllocateWorkerCommandBuffers(true);
+
+    // Apply pending operations
+    PopPendingOperations();
+}
+
+void Scheduler::QueueSubmit(vk::CommandBuffer cmdbuf, SubmitInfo& info, u64 signal_value) {
+    Check(cmdbuf.end());
 
     const vk::Semaphore timeline = work_semaphore.Handle();
     info.AddSignal(timeline, signal_value);
@@ -458,20 +662,53 @@ void Scheduler::SubmitExecution(SubmitInfo& info) {
         .pWaitSemaphores = info.wait_semas.data(),
         .pWaitDstStageMask = wait_stage_masks.data(),
         .commandBufferCount = 1U,
-        .pCommandBuffers = &current_cmdbuf,
+        .pCommandBuffers = &cmdbuf,
         .signalSemaphoreCount = info.num_signal_semas,
         .pSignalSemaphores = info.signal_semas.data(),
     };
 
+    std::scoped_lock lk{submit_mutex};
     ImGui::Core::TextureManager::Submit();
     auto submit_result = instance.GetGraphicsQueue().submit(submit_info, info.fence);
     ASSERT_MSG(submit_result != vk::Result::eErrorDeviceLost, "Device lost during submit");
-
     work_semaphore.Refresh();
-    AllocateWorkerCommandBuffers();
+}
 
-    // Apply pending operations
-    PopPendingOperations();
+bool Scheduler::AsyncSubmitEnabled() const {
+    // resogun: RESOGUN_LOAD_SYNCS=0: submissions drain the recorder and submit here.
+    return ResogunSync::Enabled() && !TRACY_GPU_ENABLED && recording_threaded &&
+           !ResogunToggle::Disabled(ResogunToggle::ThreadedRecording);
+}
+
+void Scheduler::WaitQueued(u64 tick, std::source_location caller) {
+    if (queued_tick.load(std::memory_order_acquire) >= tick) {
+        return;
+    }
+    const auto start = std::chrono::steady_clock::now();
+    {
+        ResogunStats::WaitTimer timer{ResogunStats::sync_recording_ns};
+        std::unique_lock lk{recorder_mutex};
+        recorder_idle_cv.wait(lk, [&] { return queued_tick.load(std::memory_order_acquire) >= tick; });
+    }
+    ResogunSync::Add(ResogunSync::Queued, SyncRole(), caller, ElapsedNs(start), true);
+}
+
+void Scheduler::WaitOtherSchedulers(const SubmitInfo& info, std::source_location caller) {
+    if (info.num_wait_semas == 0) {
+        return;
+    }
+    std::array<Scheduler*, 8> schedulers;
+    {
+        std::scoped_lock lk{registry_mutex};
+        schedulers = registry;
+    }
+    for (u32 i = 0; i < info.num_wait_semas; ++i) {
+        for (Scheduler* other : schedulers) {
+            if (other && other != this && other->work_semaphore.Handle() == info.wait_semas[i]) {
+                other->WaitQueued(info.wait_ticks[i], caller);
+            }
+        }
+    }
 }
 
 void Scheduler::PriorityPendingOpsThread(std::stop_token stoken) {

@@ -48,7 +48,10 @@ static unsigned cpu_missing_sets; /* CPU_SET_* the host lacks; the guest code ne
 static IsaTable *isa_table; /* rewritten sites (--isa-rewrite); the fault handlers and the report read it */
 static void loader_report_hook(void) {
     if (isa_table) isa_rewrite_report(isa_table, stdout);
-    if (gpu_enabled) printf("GPU: copy waits yielded %llu times\n", resogun_gpu_copy_yields());
+    if (gpu_enabled) {
+        printf("GPU: copy waits yielded %llu times\n", resogun_gpu_copy_yields());
+        resogun_gpu_sync_report();
+    }
 }
 int vulkan_smoke(void);
 
