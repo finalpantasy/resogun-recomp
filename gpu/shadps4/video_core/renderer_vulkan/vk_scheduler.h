@@ -20,6 +20,8 @@
 #include <thread>
 #include <queue>
 
+#include "resogun_copy.h"
+#include "resogun_sync_stats.h"
 #include "resogun_toggles.h"
 #include "common/assert.h"
 #include "common/interval_set.h"
@@ -676,11 +678,11 @@ public:
 
     /// Sends the current execution context to the GPU
     /// and increments the scheduler timeline semaphore.
-    void Flush(SubmitInfo& info);
+    void Flush(SubmitInfo& info, std::source_location caller = std::source_location::current());
 
     /// Sends the current execution context to the GPU
     /// and increments the scheduler timeline semaphore.
-    void Flush();
+    void Flush(std::source_location caller = std::source_location::current());
 
     /// Sends the current execution context to the GPU and waits for it to complete.
     void Finish(std::source_location caller = std::source_location::current());
@@ -727,9 +729,9 @@ public:
     /// recording this first waits until all commands passed to Record() are recorded, then
     /// records directly (Record() included, so callers may mix both) until the next
     /// KickRecording() or submission.
-    vk::CommandBuffer CommandBuffer() {
+    vk::CommandBuffer CommandBuffer(std::source_location caller = std::source_location::current()) {
         if (recording_threaded && !direct_mode) {
-            SyncRecording();
+            SyncRecording(ResogunSync::Direct, caller);
             direct_mode = true;
             direct_recordings.fetch_add(1, std::memory_order_relaxed);
         }
@@ -746,7 +748,7 @@ public:
             return;
         }
         if (ResogunToggle::Disabled(ResogunToggle::ThreadedRecording)) {
-            SyncRecording();
+            SyncRecording(ResogunSync::Direct);
             direct_mode = true;
             func(current_cmdbuf);
             return;
@@ -790,10 +792,19 @@ public:
         // resogun: data too large for a chunk (Everybody's Golf copies thousands of regions at
         // once) lives on the heap. Waiting for the recorder first means every command that used
         // an older block has run; the last 8 blocks are kept for commands not yet recorded.
+        // With RESOGUN_LOAD_SYNCS (default) the block is kept until the next submission, which
+        // hands it to the recording thread to free after the commands before it.
+        if (bytes + alignof(T) + 1024 > RecordChunk::Capacity &&
+            ResogunSync::On(ResogunSync::DeferredFrees) && large_pending.size() < 64) {
+            auto& block = large_pending.emplace_back(
+                std::make_unique<std::max_align_t[]>(bytes / sizeof(std::max_align_t) + 1));
+            std::memcpy(block.get(), data.data(), bytes);
+            return {reinterpret_cast<const T*>(block.get()), data.size()};
+        }
         if (bytes + alignof(T) + 1024 > RecordChunk::Capacity) {
             {
                 ResogunStats::WaitTimer timer{ResogunStats::sync_large_ns};
-                SyncRecording();
+                SyncRecording(ResogunSync::LargeData);
             }
             auto& block = large_record_data[large_record_next++ % large_record_data.size()];
             block = std::make_unique<std::max_align_t[]>(bytes / sizeof(std::max_align_t) + 1);
@@ -808,30 +819,34 @@ public:
 
     std::array<std::unique_ptr<std::max_align_t[]>, 8> large_record_data;
     size_t large_record_next{};
+    /// resogun: large RecordData blocks since the last submission (see RecordData).
+    std::vector<std::unique_ptr<std::max_align_t[]>> large_pending;
+
+    /// resogun: the recording thread is behind: chunks are waiting, or it has spent over a
+    /// millisecond on its current one (a pipeline the driver is still building).
+    [[nodiscard]] bool RecorderBehind() const noexcept;
 
     /// Hands recorded commands to the recording thread. Called at points where no caller holds
     /// the raw command buffer (end of draws and dispatches); small batches are kept.
     void KickRecording(bool force = false);
 
-    /// Waits until every recorded command is in the command buffer.
-    void SyncRecording();
+    /// Waits until every recorded command is in the command buffer. `kind` and `caller` file
+    /// the wait in the end-of-run sync report (ResogunSync).
+    void SyncRecording(ResogunSync::Kind kind = ResogunSync::Other,
+                       std::source_location caller = std::source_location::current());
 
     /// resogun: guest memory copies on the recording thread (small ones, RecordHostCopy) or the
     /// copy threads (ResogunCopy::Async) must be done before the guest learns the GPU is past them
     /// (it may then rewrite the memory, e.g. UI vertices: flickering) and before the
     /// submission that reads them. Waits for all.
-    void WaitHostCopies();
+    void WaitHostCopies(std::source_location caller = std::source_location::current());
 
-    /// Runs `copy` on the recording thread in order with the commands (the thread spins for
-    /// work anyway, so small copies cost no wakeup); WaitHostCopies() covers it.
-    template <typename Func>
-    void RecordHostCopy(Func&& copy) {
-        Record([copy = std::forward<Func>(copy), this,
-                seq = ++host_copies_issued](vk::CommandBuffer) {
-            copy();
-            host_copies_done.store(seq, std::memory_order_release);
-        });
-    }
+    /// Runs `item.run(item)` on the recording thread in order with the commands (the thread
+    /// spins for work anyway, so small copies cost no wakeup); WaitHostCopies() covers it.
+    /// resogun: the copy waits in a queue of its own (host_work), so a thread that needs it
+    /// done runs it instead of waiting for the recording thread to get there: that thread
+    /// may be blocked for seconds on a pipeline the driver is building (cold loads).
+    void RecordHostCopy(const ResogunCopy::Item& item);
 
     /// resogun: runs `signal` once the guest memory copies issued so far are done, without
     /// waiting here: the recording thread reaches it after the copies queued before it and hands
@@ -842,7 +857,7 @@ public:
     /// fences, flip): waits until every signal handed to SignalAfterHostCopies ran, so that
     /// the write cannot overtake an earlier fence. Otherwise the guest, seeing the later value,
     /// may free memory the earlier fence then writes into (corrupted heap, guest fault).
-    void WaitDeferredSignals();
+    void WaitDeferredSignals(std::source_location caller = std::source_location::current());
 
     /// Whether a render pass with exactly this state is open.
     [[nodiscard]] bool IsRenderingWith(const RenderState& state) const {
@@ -897,13 +912,27 @@ public:
     static std::mutex submit_mutex;
 
 private:
-    void AllocateWorkerCommandBuffers();
+    void AllocateWorkerCommandBuffers(bool invalidate_state);
+
+    /// resogun: ends `cmdbuf` and submits it, signalling `signal_value` (calling thread, or the
+    /// recording thread for an asynchronous submit).
+    void QueueSubmit(vk::CommandBuffer cmdbuf, SubmitInfo& info, u64 signal_value);
+
+    /// resogun: whether plain submissions are handed to the recording thread
+    /// (RESOGUN_ASYNC_SUBMIT=0: off).
+    [[nodiscard]] bool AsyncSubmitEnabled() const;
+
+    /// resogun: waits until the submission signalling `tick` is on the queue.
+    void WaitQueued(u64 tick, std::source_location caller);
+
+    /// resogun: WaitQueued for every wait in `info` on another scheduler's timeline.
+    void WaitOtherSchedulers(const SubmitInfo& info, std::source_location caller);
 
     std::unique_ptr<RecordChunk> AcquireChunk();
 
     void RecorderThread(std::stop_token stoken);
 
-    void SubmitExecution(SubmitInfo& info);
+    void SubmitExecution(SubmitInfo& info, std::source_location caller);
 
     void PriorityPendingOpsThread(std::stop_token stoken);
 
@@ -941,8 +970,20 @@ private:
     std::atomic<size_t> queued_chunks{0}; ///< recorder_queue.size() for lock-free polling
     bool recorder_sleeping = false; ///< waiting on recorder_cv (guarded by recorder_mutex)
     bool direct_mode = false; ///< the command buffer is recorded on the caller's thread
-    u64 host_copies_issued = 0;
+    u64 host_copies_issued = 0; ///< host_work items issued (copies and deferred signals)
     std::atomic<u64> host_copies_done{0};
+    /// resogun: guest memory copies and deferred fence signals in issue order. The recording
+    /// thread runs them as it reaches their place among the commands; a thread waiting for
+    /// them (WaitHostCopies, WaitDeferredSignals) runs the rest itself (RunHostWork).
+    struct HostWork {
+        u64 seq{};
+        ResogunCopy::Item item{};
+        std::function<void()> signal; ///< a deferred signal instead of a copy
+    };
+    std::deque<HostWork> host_work;     ///< guarded by host_work_mutex
+    std::mutex host_work_mutex;         ///< the queue
+    std::mutex host_work_run_mutex;     ///< one thread runs items at a time, in order
+    void RunHostWork(u64 upto);
     std::atomic<u64> deferred_signals_issued{0}; ///< by the thread recording (A or B)
     std::shared_ptr<std::atomic<u64>> deferred_signals_done =
         std::make_shared<std::atomic<u64>>(0);
@@ -951,6 +992,14 @@ private:
     bool recording_threaded{false};
     std::jthread recorder_thread;
     tracy::VkCtxScope* profiler_scope{};
+    /// resogun: the last tick whose submission is on the queue (asynchronous submits: set by
+    /// the recording thread, which notifies recorder_idle_cv after each chunk).
+    std::atomic<u64> queued_tick{0};
+    /// resogun: when the recording thread started its current chunk (steady clock ns; 0: idle).
+    std::atomic<u64> recorder_chunk_start{0};
+    /// resogun: live schedulers, so a submission can find whose timeline it waits for.
+    static std::mutex registry_mutex;
+    static std::array<Scheduler*, 8> registry;
 };
 
 } // namespace Vulkan

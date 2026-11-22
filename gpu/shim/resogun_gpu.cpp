@@ -9,6 +9,7 @@
 #else
 #include <sys/resource.h>
 #endif
+#include "resogun_sync_stats.h"
 #include "resogun_toggles.h"
 #include <algorithm>
 #include <atomic>
@@ -333,6 +334,18 @@ extern "C" unsigned resogun_gpu_symbol_count(void) {
 
 extern "C" unsigned long long resogun_gpu_copy_yields(void) {
     return ResogunCopy::Yields();
+}
+
+bool ResogunSync::OnGpuCommandThread() {
+#ifdef _WIN32
+    return GetCurrentThreadId() == ResogunStats::gpu_thread_id.load(std::memory_order_relaxed);
+#else
+    return false;
+#endif
+}
+
+extern "C" void resogun_gpu_sync_report(void) {
+    ResogunSync::Table::Get().Report(stdout);
 }
 
 // Kernel service thread: runs boost::asio timers for equeue timer events.

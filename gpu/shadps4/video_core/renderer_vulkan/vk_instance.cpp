@@ -272,13 +272,15 @@ bool Instance::CreateDevice() {
         vk::PhysicalDeviceImage2DViewOf3DFeaturesEXT, vk::PhysicalDeviceShaderClockFeaturesKHR,
         vk::PhysicalDevicePipelineBinaryFeaturesKHR,
         vk::PhysicalDeviceMaintenance5FeaturesKHR,
-        vk::PhysicalDevicePipelineExecutablePropertiesFeaturesKHR>();
+        vk::PhysicalDevicePipelineExecutablePropertiesFeaturesKHR,
+        vk::PhysicalDeviceGraphicsPipelineLibraryFeaturesEXT>();
     features = feature_chain.get().features;
 
     const vk::StructureChain properties_chain = physical_device.getProperties2<
         vk::PhysicalDeviceProperties2, vk::PhysicalDeviceVulkan11Properties,
         vk::PhysicalDeviceVulkan12Properties, vk::PhysicalDeviceVulkan13Properties,
-        vk::PhysicalDevicePushDescriptorPropertiesKHR>();
+        vk::PhysicalDevicePushDescriptorPropertiesKHR,
+        vk::PhysicalDeviceGraphicsPipelineLibraryPropertiesEXT>();
     vk11_props = properties_chain.get<vk::PhysicalDeviceVulkan11Properties>();
     vk12_props = properties_chain.get<vk::PhysicalDeviceVulkan12Properties>();
     vk13_props = properties_chain.get<vk::PhysicalDeviceVulkan13Properties>();
@@ -451,6 +453,32 @@ bool Instance::CreateDevice() {
         // AMD reports no width for graphics executables; its own extension has the ISA.
         amd_shader_info = add_extension(VK_AMD_SHADER_INFO_EXTENSION_NAME);
     }
+    // resogun: RESOGUN_PIPELINE_LIBRARY=1 builds graphics pipelines from per-stage libraries
+    // (VK_EXT_graphics_pipeline_library) and fast-links them on a first visit; the optimized
+    // pipeline follows in the background (vk_graphics_pipeline.cpp). Off by default.
+    {
+        const char* env = std::getenv("RESOGUN_PIPELINE_LIBRARY");
+        const bool requested = env && env[0] == '1';
+        const auto gpl_features =
+            feature_chain.get<vk::PhysicalDeviceGraphicsPipelineLibraryFeaturesEXT>();
+        const auto gpl_props =
+            properties_chain.get<vk::PhysicalDeviceGraphicsPipelineLibraryPropertiesEXT>();
+        const bool available =
+            gpl_features.graphicsPipelineLibrary &&
+            std::ranges::any_of(available_extensions, [](const std::string& name) {
+                return name == VK_EXT_GRAPHICS_PIPELINE_LIBRARY_EXTENSION_NAME;
+            }) &&
+            std::ranges::any_of(available_extensions, [](const std::string& name) {
+                return name == VK_KHR_PIPELINE_LIBRARY_EXTENSION_NAME;
+            });
+        pipeline_library_fast_linking = bool(gpl_props.graphicsPipelineLibraryFastLinking);
+        graphics_pipeline_library = requested && available && pipeline_library_fast_linking &&
+                                    add_extension(VK_KHR_PIPELINE_LIBRARY_EXTENSION_NAME) &&
+                                    add_extension(VK_EXT_GRAPHICS_PIPELINE_LIBRARY_EXTENSION_NAME);
+        std::printf("Pipeline libraries: %s (requested %u, supported %u, fast linking %u)\n",
+                    graphics_pipeline_library ? "on" : "off", requested, available,
+                    pipeline_library_fast_linking);
+    }
     const bool calibrated_timestamps =
         TRACY_GPU_ENABLED ? add_extension(VK_EXT_CALIBRATED_TIMESTAMPS_EXTENSION_NAME) : false;
 
@@ -611,6 +639,9 @@ bool Instance::CreateDevice() {
         vk::PhysicalDevicePipelineBinaryFeaturesKHR{
             .pipelineBinaries = true,
         },
+        vk::PhysicalDeviceGraphicsPipelineLibraryFeaturesEXT{
+            .graphicsPipelineLibrary = true,
+        },
         vk::PhysicalDeviceMaintenance8FeaturesKHR{
             .maintenance8 = true,
         },
@@ -682,6 +713,9 @@ bool Instance::CreateDevice() {
     }
     if (!pipeline_binaries) {
         device_chain.unlink<vk::PhysicalDevicePipelineBinaryFeaturesKHR>();
+    }
+    if (!graphics_pipeline_library) {
+        device_chain.unlink<vk::PhysicalDeviceGraphicsPipelineLibraryFeaturesEXT>();
     }
     if (!maintenance_8) {
         device_chain.unlink<vk::PhysicalDeviceMaintenance8FeaturesKHR>();

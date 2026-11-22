@@ -58,10 +58,15 @@ std::pair<u64, u64> Prune(const std::filesystem::path& directory, const Key& glo
                           const std::function<bool()>& stop = {});
 } // namespace PipelineBinaryCache
 
+/// resogun: with `restore_only`, only a stored binary is used: without one the result is
+/// ePipelineCompileRequired and no pipeline (no compile, nothing counted).
 vk::ResultValue<vk::UniquePipeline> CreateCachedGraphicsPipeline(
     vk::Device device, vk::PipelineCache cache, const vk::GraphicsPipelineCreateInfo& info,
     const GraphicsPipelineKey& key, const vk::PipelineBinaryKeyKHR& global_key,
-    const std::filesystem::path& directory);
+    const std::filesystem::path& directory, bool restore_only = false);
+/// resogun: set on threads building optimized pipelines behind fast-linked ones; their driver
+/// time then goes to the pipeline library counters instead of the draw-path compile cost.
+extern thread_local bool g_resogun_background_compile;
 void ReportPipelineBinaryCache();
 
 void RegisterPipelineData(const ComputePipelineKey& key,

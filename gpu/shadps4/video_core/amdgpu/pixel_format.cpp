@@ -2,10 +2,35 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <array>
+#include <atomic>
+#include <cstdlib>
+#include <string>
+#include "common/logging/log.h"
 #include "common/assert.h"
 #include "video_core/amdgpu/pixel_format.h"
 
 namespace AmdGpu {
+
+thread_local NumFmtContext g_numfmt_context;
+
+void ReportBadNumberConversion(u32 num_fmt, u32 data_fmt) {
+    static const bool verbose = std::getenv("RESOGUN_LOG_NUMFMT") != nullptr;
+    static std::atomic<u32> total{0};
+    static std::atomic<u32> logged{0};
+    total.fetch_add(1, std::memory_order_relaxed);
+    if (!verbose && logged.fetch_add(1, std::memory_order_relaxed) >= 8) {
+        return;
+    }
+    const auto& c = g_numfmt_context;
+    std::string dw;
+    for (u32 i = 0; c.dwords && i < c.count; i++) {
+        dw += fmt::format(" {:08x}", c.dwords[i]);
+    }
+    LOG_ERROR(Render_Vulkan,
+              "unmappable number conversion: num_fmt={} data_fmt={} (using None); descriptor "
+              "kind={} dwords:{} (occurrence {})",
+              num_fmt, data_fmt, c.kind ? c.kind : "unknown", dw, total.load());
+}
 
 std::string_view NameOf(DataFormat fmt) {
     switch (fmt) {

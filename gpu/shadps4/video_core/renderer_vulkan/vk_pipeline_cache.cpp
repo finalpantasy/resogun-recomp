@@ -338,6 +338,8 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
     : instance{instance_}, scheduler{scheduler_}, liverpool{liverpool_},
       desc_heap{instance, scheduler.GetWorkSemaphore(), DescriptorHeapSizes} {
     sel.regs = &liverpool->regs;
+    // resogun: per-stage descriptor sets with pipeline libraries (Backend::SplitStageSets).
+    Shader::Backend::SplitStageSets() = instance.IsGraphicsPipelineLibraryEnabled();
     const auto& vk12_props = instance.GetVk12Properties();
     profile = Shader::Profile{
         .max_viewport_width = instance.GetMaxViewportWidth(),
@@ -436,9 +438,15 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
         LOG_INFO(Render_Vulkan, "resogun: async graphics compilation ready ({} capture, {} compile workers)",
                  capture_count, count);
     }
+    if (instance.IsGraphicsPipelineLibraryEnabled()) {
+        pipeline_libraries = std::make_unique<GraphicsPipelineLibraries>(instance);
+    }
 }
 
 PipelineCache::~PipelineCache() {
+    if (pipeline_libraries) {
+        pipeline_libraries->StopOptimizer();
+    }
     StopWarmUp();
     StopDiskPrefetch();
     StopBinaryConversion();
@@ -865,6 +873,7 @@ void PipelineCache::ReportCompilerStats() {
                         shaders ? emit_ns / 1e6 / shaders : 0.0,
                         shaders ? module_ns / 1e6 / shaders : 0.0);
         }
+        GraphicsPipelineLibraries::Report();
         std::printf("Compiler stats: capture queue %zu, compile queue %zu; queue waits: capture "
                     "%.1f ms, compile %.1f ms; pools retained %zu, reused %u; pipelines built "
                     "behind their draws %llu\n",
@@ -961,9 +970,33 @@ GraphicsPipeline* PipelineCache::DeferGraphicsPipeline() {
     return published;
 }
 
+// resogun game fix (Everybody's Golf): at club impact the game draws a full-screen quad with
+// pixel shader 0x76f7a64f and blend ONE_MINUS_DST_COLOR, ZERO, which inverts the whole frame
+// including the HUD for about 30 frames. The effect is not visible on a real PS4 and the root
+// cause is not found (the blend registers and vertex swizzle decode as the game set them; its
+// constant buffer is all zero when the draw records), so the draw is skipped. RESOGUN_KEEP_76F7=1
+// draws it again.
+static bool IsImpactInvertDraw(const GraphicsPipeline* pipeline) {
+    static const bool keep = std::getenv("RESOGUN_KEEP_76F7") != nullptr;
+    return !keep && pipeline &&
+           pipeline->GetStage(Shader::SwStage::Fragment).pgm_hash == 0x76f7a64full;
+}
+
 const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectParams params,
                                                            const PreparedDraw* prepared,
                                                            bool no_skip) {
+    const GraphicsPipeline* pipeline = GetGraphicsPipelineImpl(params, prepared, no_skip);
+    if (IsImpactInvertDraw(pipeline)) {
+        used_prepared = nullptr;
+        miss_reason = "game fix: impact invert quad";
+        return nullptr;
+    }
+    return pipeline;
+}
+
+const GraphicsPipeline* PipelineCache::GetGraphicsPipelineImpl(const DrawIndirectParams params,
+                                                               const PreparedDraw* prepared,
+                                                               bool no_skip) {
     SeedWorkerCaches();
     PublishShaders();
     PublishGraphics();
@@ -1188,6 +1221,7 @@ bool PipelineCache::RefreshGraphicsKey(PipelineSelection& sel) {
         auto& color_buffer = key.color_buffers[cb];
         color_buffer.data_format = col_buf.GetDataFmt();
         color_buffer.num_format = col_buf.GetNumberFmt();
+        AmdGpu::g_numfmt_context = {"color buffer", reinterpret_cast<const u32*>(&col_buf), 4};
         color_buffer.num_conversion = col_buf.GetNumberConversion();
         color_buffer.export_format = regs.color_export_format.GetFormat(cb);
         color_buffer.swizzle = col_buf.Swizzle();

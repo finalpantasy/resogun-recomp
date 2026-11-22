@@ -314,6 +314,17 @@ constexpr CompMapping RemapSwizzle(const DataFormat format, const CompMapping sw
     }
 }
 
+// resogun: logs a number/data format pair MapNumberConversion cannot map (pixel_format.cpp). With
+// RESOGUN_LOG_NUMFMT=1 every occurrence is logged with the descriptor dwords set by
+// NumFmtContext; otherwise only the first few distinct pairs.
+void ReportBadNumberConversion(u32 num_fmt, u32 data_fmt);
+struct NumFmtContext {
+    const char* kind = nullptr;
+    const u32* dwords = nullptr;
+    u32 count = 0;
+};
+extern thread_local NumFmtContext g_numfmt_context;
+
 constexpr NumberConversion MapNumberConversion(const NumberFormat num_fmt,
                                                const DataFormat data_fmt) {
     switch (num_fmt) {
@@ -356,7 +367,10 @@ constexpr NumberConversion MapNumberConversion(const NumberFormat num_fmt,
         case DataFormat::Format16_16_16_16:
             return NumberConversion::Sint16ToSnormNz;
         default:
-            UNREACHABLE_MSG("data_fmt = {}", u32(data_fmt));
+            // resogun: no hardware meaning for SnormNz on other formats (seen with data_fmt 7, 14,
+            // 15 from stale or unused descriptors); log and treat as no conversion, never assert.
+            ReportBadNumberConversion(u32(num_fmt), u32(data_fmt));
+            return NumberConversion::None;
         }
     }
     default:

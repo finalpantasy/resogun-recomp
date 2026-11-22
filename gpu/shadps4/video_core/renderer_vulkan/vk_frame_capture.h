@@ -74,6 +74,8 @@ private:
     static inline std::atomic<u64> flips{0};
     static inline std::atomic<VAddr> last_presented{0};
     static inline std::atomic<bool> requested{false};
+    /// Frames still to record back to back after the current one (a number in the trigger file).
+    static inline std::atomic<u32> burst_left{0};
     /// RESOGUN_CAPTURE_TARGET set and its pass not recorded yet.
     static inline std::atomic<bool> target_pending{std::getenv("RESOGUN_CAPTURE_TARGET") != nullptr};
 };
