@@ -35,6 +35,7 @@
 #include <vector>
 
 #include "update_logic.h"
+#include "../src/invite_code.h"
 
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wall"
@@ -69,7 +70,8 @@ enum Id : int {
     ID_COLLECT, ID_TEX_COUNT, ID_SCALE, ID_BUILD, ID_TEX_PROGRESS, ID_TEX_STATUS, ID_USE_PACK,
     ID_PROFILES, ID_PROFILE_NAME, ID_PROFILE_USE, ID_PROFILE_NEW, ID_PROFILE_COPY, ID_PROFILE_RENAME,
     ID_PROFILE_DELETE, ID_PROFILE_BACKUP, ID_PROFILE_OPEN, ID_PROFILE_STATUS,
-    ID_ONLINE_NAME, ID_ONLINE_MODE, ID_ONLINE_PORT, ID_ONLINE_HOST, ID_SERVER, ID_UPNP, ID_INVITE, ID_ONLINE_STATUS,
+    ID_ONLINE_NAME, ID_ONLINE_PORT, ID_ONLINE_HOST, ID_SERVER, ID_UPNP, ID_INVITE, ID_INVITE_CODE, ID_FIND, ID_FOUND,
+    ID_ONLINE_STATUS,
     ID_NOTES, ID_UPDATE_NOW, ID_UPDATE_LATER, ID_UPDATE_SKIP, ID_UPDATE_BAR, ID_UPDATE_TEXT,
 };
 // The pages, in tab order.
@@ -698,20 +700,24 @@ void build_textures() {
 
 
 // --- the Online page ----------------------------------------------------------------------------------
-// Off plays offline. Host runs the bundled title server (tools\server\host.py) on this PC and the
-// game uses it; Join uses a friend's. Players on one server share its rankings; each round is still
-// played alone, since the game's matchmaking runs inside each PC.
+// Host a game runs the bundled title server (tools\server\host.py --online) on this PC: it keeps a
+// room key, asks the router to open its one TCP port (UPnP, NAT-PMP or PCP), and writes invite codes
+// to data\server\online.txt. A friend pastes the code into Join and presses Play. Every packet
+// between the players goes through the host's server, so only the host may need an open port.
+// Find games on my network asks the home network for hosts (UDP broadcast on port 48765).
 
-const std::vector<Choice> online_modes = {{L"Off (play offline)", "off"}, {L"Host a server on this PC", "host"},
-                                          {L"Join a friend's server", "join"}};
 const char* const kDefaultPort = "48765";
+constexpr unsigned short kLanDiscoveryPort = 48765;
+constexpr UINT_PTR kOnlineTimer = 7;
 HANDLE server_process = nullptr, server_job = nullptr;
 std::atomic<bool> server_ready{false};
-std::mutex upnp_lock;
-std::wstring upnp_note;     // the router's answer, shown on the page (under upnp_lock)
-std::wstring upnp_address;  // the router's public address, once a mapping is made (under upnp_lock)
-long upnp_port = 0;         // the mapped port, removed again when the server stops (under upnp_lock)
+std::mutex lan_lock;
+std::vector<std::pair<std::wstring, std::wstring>> lan_games; // (code, host name), under lan_lock
+std::atomic<bool> lan_searching{false};
+bool lan_searched = false;
+int lan_generation = 0, lan_listed = -1; // the list box is rebuilt only after a new search
 
+// "host" (Host a game was pressed and not stopped), "join" or "off".
 std::string online_mode() {
     std::string mode = prefs.get("online", "off");
     return mode == "host" || mode == "join" ? mode : "off";
@@ -728,16 +734,47 @@ bool valid_online_name(const std::string& name) {
     return name.size() >= 3 && name.size() <= 16 &&
            name.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_") == std::string::npos;
 }
-// A host name or IPv4 address: letters, digits, dots and dashes.
-bool valid_host(const std::string& host) {
-    return !host.empty() && host.size() <= 253 &&
-           host.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-") == std::string::npos;
+// The player's name; a new install gets "Golfer-" and four random digits, so two friends who never
+// change it still get separate accounts.
+std::string online_name() {
+    std::string name = prefs.get("online_name");
+    if (name.empty()) {
+        LARGE_INTEGER t;
+        QueryPerformanceCounter(&t);
+        char text[16];
+        snprintf(text, sizeof text, "Golfer-%04u", (unsigned)((t.QuadPart ^ GetCurrentProcessId() * 2654435761u) % 10000));
+        name = text;
+        set_pref("online_name", name);
+    }
+    return name;
+}
+// What the Join box holds: an invite code, or HOST[:PORT] (home network or VPN address).
+bool valid_join(const std::string& text) {
+    GolfInvite code;
+    if (golf_invite_decode(text.c_str(), &code)) return true;
+    if (golf_invite_shaped(text.c_str())) return false; // a mistyped code
+    const size_t colon = text.find(':');
+    const std::string host = text.substr(0, colon);
+    if (host.empty() || host.size() > 253 ||
+        host.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-") != std::string::npos)
+        return false;
+    if (colon == std::string::npos) return true;
+    const std::string port = text.substr(colon + 1);
+    return !port.empty() && port.size() <= 5 && port.find_first_not_of("0123456789") == std::string::npos &&
+           std::stol(port) >= 1 && std::stol(port) <= 65535;
+}
+std::string trimmed(std::string s) {
+    while (!s.empty() && isspace((unsigned char)s.back())) s.pop_back();
+    size_t i = 0;
+    while (i < s.size() && isspace((unsigned char)s[i])) ++i;
+    return s.substr(i);
 }
 bool server_running() { return server_process && WaitForSingleObject(server_process, 0) == WAIT_TIMEOUT; }
 
 // IPv4 addresses of this PC's adapters that are up (a VPN such as Tailscale or ZeroTier shows here
-// too), with the adapter's name; the one with a default gateway (the home network) first.
-struct LocalAddress { std::wstring address, adapter; bool gateway; };
+// too), with the adapter's name and directed broadcast address; the one with a default gateway (the
+// home network) first.
+struct LocalAddress { std::wstring address, adapter; bool gateway; unsigned long broadcast; };
 std::vector<LocalAddress> local_addresses() {
     std::vector<LocalAddress> out;
     ULONG size = 32768;
@@ -760,115 +797,66 @@ std::vector<LocalAddress> local_addresses() {
             if (b[0] == 169 && b[1] == 254) continue; // no DHCP answer: nobody can reach it
             wchar_t text[16];
             swprintf(text, 16, L"%u.%u.%u.%u", b[0], b[1], b[2], b[3]);
-            out.push_back({text, a->FriendlyName ? a->FriendlyName : L"", a->FirstGatewayAddress != nullptr});
+            const unsigned long host = (unsigned long)b[0] << 24 | b[1] << 16 | b[2] << 8 | b[3];
+            const unsigned prefix = u->OnLinkPrefixLength <= 32 ? u->OnLinkPrefixLength : 24;
+            const unsigned long mask = prefix ? 0xFFFFFFFFul << (32 - prefix) & 0xFFFFFFFFul : 0;
+            out.push_back({text, a->FriendlyName ? a->FriendlyName : L"", a->FirstGatewayAddress != nullptr,
+                           (host & mask) | (~mask & 0xFFFFFFFFul)});
         }
     }
     std::stable_sort(out.begin(), out.end(), [](const LocalAddress& x, const LocalAddress& y) { return x.gateway > y.gateway; });
     return out;
 }
 
-// UPnP port mappings on the router, through Windows' NAT traversal objects (hnetcfg.dll). MinGW has
-// no natupnp.h, so the three interfaces are declared here, in natupnp.idl's order, up to the
-// methods used.
-struct IStaticPortMapping : IDispatch {
-    virtual HRESULT STDMETHODCALLTYPE get_ExternalIPAddress(BSTR* address) = 0;
+// data\server\online.txt, written by host.py --online: port=, key=, lan=/vpn=/internet= "ADDRESS CODE",
+// portmap= and note= lines.
+struct HostStatus {
+    std::wstring internet, internet_code, note, portmap;
+    std::vector<std::pair<std::wstring, std::wstring>> local; // (address, code)
 };
-struct IStaticPortMappingCollection : IDispatch {
-    virtual HRESULT STDMETHODCALLTYPE get__NewEnum(IUnknown** items) = 0;
-    virtual HRESULT STDMETHODCALLTYPE get_Item(long port, BSTR protocol, IStaticPortMapping** mapping) = 0;
-    virtual HRESULT STDMETHODCALLTYPE get_Count(long* count) = 0;
-    virtual HRESULT STDMETHODCALLTYPE Remove(long port, BSTR protocol) = 0;
-    virtual HRESULT STDMETHODCALLTYPE Add(long external_port, BSTR protocol, long internal_port, BSTR client,
-                                          VARIANT_BOOL enabled, BSTR description, IStaticPortMapping** mapping) = 0;
-};
-struct IUPnPNAT : IDispatch {
-    virtual HRESULT STDMETHODCALLTYPE get_StaticPortMappingCollection(IStaticPortMappingCollection** mappings) = 0;
-};
-const CLSID kUPnPNAT = {0xae1e00aa, 0x3fd5, 0x403c, {0x8a, 0x27, 0x2b, 0xbd, 0xc3, 0x0c, 0xd0, 0xe1}};
-const IID kIUPnPNAT = {0xb171c812, 0xcc76, 0x485a, {0x94, 0xd8, 0xb6, 0xb3, 0xa2, 0x79, 0x4e, 0x99}};
-
-// The router's port mapping list, or null with the reason in note. Runs on its own thread (the
-// router can take seconds to answer).
-IStaticPortMappingCollection* upnp_mappings(std::wstring& note) {
-    IUPnPNAT* nat = nullptr;
-    if (FAILED(CoCreateInstance(kUPnPNAT, nullptr, CLSCTX_INPROC_SERVER, kIUPnPNAT, (void**)&nat)) || !nat) {
-        note = L"Windows' UPnP support is not available.";
-        return nullptr;
+HostStatus host_status() {
+    HostStatus s;
+    std::ifstream f(data / L"server" / L"online.txt", std::ios::binary);
+    std::string line;
+    while (std::getline(f, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        const size_t eq = line.find('=');
+        if (eq == std::string::npos) continue;
+        const std::string key = line.substr(0, eq), value = line.substr(eq + 1);
+        const size_t space = value.find(' ');
+        if (key == "note") s.note = wide(value);
+        else if (key == "portmap") s.portmap = wide(value);
+        else if (space != std::string::npos && (key == "lan" || key == "vpn" || key == "internet")) {
+            const std::wstring address = wide(value.substr(0, space)), code = wide(value.substr(space + 1));
+            if (key == "internet") { s.internet = address; s.internet_code = code; }
+            else s.local.push_back({address, code});
+        }
     }
-    IStaticPortMappingCollection* mappings = nullptr;
-    HRESULT hr = nat->get_StaticPortMappingCollection(&mappings);
-    nat->Release();
-    if (FAILED(hr) || !mappings) note = L"No UPnP router answered (it may be off in the router's settings).";
-    return mappings;
+    return s;
 }
-void upnp_map(long port, std::wstring client) {
-    std::thread([port, client] {
-        CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-        std::wstring note, address;
-        if (IStaticPortMappingCollection* mappings = upnp_mappings(note)) {
-            BSTR tcp = SysAllocString(L"TCP"), host = SysAllocString(client.c_str()),
-                 what = SysAllocString(L"Everybody's Golf server");
-            IStaticPortMapping* mapping = nullptr;
-            HRESULT hr = mappings->Add(port, tcp, port, host, VARIANT_TRUE, what, &mapping);
-            if (SUCCEEDED(hr) && mapping) {
-                BSTR external = nullptr;
-                if (SUCCEEDED(mapping->get_ExternalIPAddress(&external)) && external) address = external;
-                SysFreeString(external);
-                mapping->Release();
-                note = L"The router forwards port " + std::to_wstring(port) + L" to this PC.";
-                std::lock_guard<std::mutex> hold(upnp_lock);
-                upnp_port = port;
-            } else {
-                note = L"The router refused the port mapping; forward TCP port " + std::to_wstring(port) + L" to " + client + L" in its settings.";
-            }
-            SysFreeString(tcp); SysFreeString(host); SysFreeString(what);
-            mappings->Release();
-        }
-        {
-            std::lock_guard<std::mutex> hold(upnp_lock);
-            upnp_note = note;
-            upnp_address = address;
-        }
-        CoUninitialize();
-        PostMessageW(window, WM_SERVER_STATE, 0, 0);
-    }).detach();
-}
-// Removes this launcher's mapping, waiting for the router (used when the server stops).
-void upnp_unmap() {
-    long port;
-    {
-        std::lock_guard<std::mutex> hold(upnp_lock);
-        port = upnp_port;
-        upnp_port = 0;
-        upnp_address.clear();
-        upnp_note.clear();
-    }
-    if (!port) return;
-    std::thread([port] {
-        CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-        std::wstring note;
-        if (IStaticPortMappingCollection* mappings = upnp_mappings(note)) {
-            BSTR tcp = SysAllocString(L"TCP");
-            mappings->Remove(port, tcp);
-            SysFreeString(tcp);
-            mappings->Release();
-        }
-        CoUninitialize();
-    }).join();
+// The code to hand out: the internet one when the router told us the public address, else the
+// home network one.
+std::wstring main_invite_code(const HostStatus& s) {
+    if (!s.internet_code.empty()) return s.internet_code;
+    return s.local.empty() ? L"" : s.local.front().second;
 }
 
+// Asks host.py to stop (it closes the router port on the way out), then ends it.
 void stop_server() {
     if (server_process) {
-        TerminateProcess(server_process, 0);
+        std::ofstream(data / L"server" / L"stop").put('1');
+        if (WaitForSingleObject(server_process, 4000) == WAIT_TIMEOUT) TerminateProcess(server_process, 0);
         WaitForSingleObject(server_process, 5000);
         CloseHandle(server_process);
         server_process = nullptr;
     }
     server_ready = false;
-    upnp_unmap();
+    KillTimer(window, kOnlineTimer);
+    std::error_code ec;
+    fs::remove(data / L"server" / L"online.txt", ec);
 }
 
-// Starts tools\server\host.py on every network adapter of this PC; its output goes to
+// Starts tools\server\host.py --online on every network adapter of this PC; its output goes to
 // data\logs\server.log. The process is in a job that ends it when the launcher closes.
 bool start_server(std::wstring& error) {
     if (server_running()) return true;
@@ -885,13 +873,16 @@ bool start_server(std::wstring& error) {
     }
     fs::create_directories(logs, ec);
     fs::create_directories(data / L"server", ec);
+    fs::remove(data / L"server" / L"online.txt", ec);
     const std::wstring port = wide(online_port());
     // server_bind in launcher.ini: one adapter's address only (say a VPN's); every adapter by default.
     std::string bind = prefs.get("server_bind", "0.0.0.0");
     if (bind.empty() || bind.size() > 15 || bind.find_first_not_of("0123456789.") != std::string::npos) bind = "0.0.0.0";
-    std::wstring command = quote(python.wstring()) + L" -I " + quote(host.wstring()) + L" --eboot " + quote(eboot.wstring()) +
+    std::wstring command = quote(python.wstring()) + L" -I " + quote(host.wstring()) + L" --online --eboot " + quote(eboot.wstring()) +
                            L" --libcrypto " + quote(crypto.wstring()) + L" --state " + quote((data / L"server").wstring()) +
-                           L" --port " + port + L" --bind " + wide(bind);
+                           L" --port " + port + L" --bind " + wide(bind) + L" --name " + wide(online_name()) +
+                           L" --stop-file " + quote((data / L"server" / L"stop").wstring());
+    if (prefs.get("upnp", "1") == "0") command += L" --no-port-mapping";
     SECURITY_ATTRIBUTES sa{sizeof sa, nullptr, TRUE};
     const fs::path log = logs / L"server.log";
     HANDLE out = CreateFileW(log.c_str(), GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, &sa,
@@ -916,6 +907,7 @@ bool start_server(std::wstring& error) {
     ResumeThread(pi.hThread);
     CloseHandle(pi.hThread);
     server_process = pi.hProcess;
+    SetTimer(window, kOnlineTimer, 1000, nullptr); // online.txt fills in as the router answers
     // Ready once the log holds "ready ADDRESS:PORT" (the first start also builds the fixtures).
     HANDLE watched = server_process;
     std::thread([watched, log] {
@@ -930,19 +922,10 @@ bool start_server(std::wstring& error) {
     return true;
 }
 
-// The text a host sends to friends: where to connect, and how.
-std::wstring invite_text() {
-    std::wstring port = wide(online_port()), where;
-    {
-        std::lock_guard<std::mutex> hold(upnp_lock);
-        if (!upnp_address.empty()) where += L"  " + upnp_address + L" (over the internet)\r\n";
-    }
-    for (const auto& a : local_addresses())
-        where += L"  " + a.address + L" (" + (a.gateway ? L"on my home network" : L"on my " + a.adapter) + L")\r\n";
-    return L"Join my Everybody's Golf PC server.\r\n"
-           L"In the launcher, open Online, choose \"Join a friend's server\", enter the address and port, then press Play.\r\n"
-           L"Address, the first one that works for you:\r\n" + where +
-           L"Port: " + port + L"\r\n";
+// The text a host sends to friends.
+std::wstring invite_text(const std::wstring& code) {
+    return L"Join my Everybody's Golf game: in the launcher's Online tab, paste " + code +
+           L" into Join, press Play, then pick Online > Open Course.";
 }
 void copy_text(const std::wstring& text) {
     if (!OpenClipboard(window)) return;
@@ -956,113 +939,226 @@ void copy_text(const std::wstring& text) {
     CloseClipboard();
 }
 
+// Find games on my network: one broadcast to every adapter, answers for 1.5 seconds.
+void find_lan_games() {
+    if (lan_searching.exchange(true)) return;
+    std::vector<unsigned long> targets = {0xFFFFFFFFul, 0x7F000001ul};
+    for (const auto& a : local_addresses())
+        if (std::find(targets.begin(), targets.end(), a.broadcast) == targets.end()) targets.push_back(a.broadcast);
+    std::thread([targets] {
+        std::vector<std::pair<std::wstring, std::wstring>> found;
+        WSADATA wsa;
+        if (!WSAStartup(MAKEWORD(2, 2), &wsa)) {
+            SOCKET s = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+            if (s != INVALID_SOCKET) {
+                BOOL on = TRUE;
+                DWORD wait = 200;
+                setsockopt(s, SOL_SOCKET, SO_BROADCAST, (const char*)&on, sizeof on);
+                setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (const char*)&wait, sizeof wait);
+                static const char kFind[] = "EGOLF-FIND 1", kReply[] = "EGOLF-HOST 1 ";
+                for (unsigned long target : targets) {
+                    sockaddr_in to{};
+                    to.sin_family = AF_INET;
+                    to.sin_port = htons(kLanDiscoveryPort);
+                    to.sin_addr.s_addr = htonl(target);
+                    sendto(s, kFind, (int)sizeof kFind - 1, 0, (const sockaddr*)&to, sizeof to);
+                }
+                const ULONGLONG end = GetTickCount64() + 1500;
+                while (GetTickCount64() < end) {
+                    char buffer[160];
+                    const int n = recv(s, buffer, (int)sizeof buffer - 1, 0);
+                    if (n <= (int)sizeof kReply - 1 || memcmp(buffer, kReply, sizeof kReply - 1)) continue;
+                    buffer[n] = 0;
+                    std::string rest(buffer + sizeof kReply - 1);
+                    const size_t space = rest.find(' ');
+                    const std::string code = rest.substr(0, space), name = space == std::string::npos ? "" : rest.substr(space + 1);
+                    GolfInvite parsed;
+                    if (!golf_invite_decode(code.c_str(), &parsed)) continue;
+                    std::wstring wcode = wide(code), wname;
+                    for (char c : name) wname += (c >= 32 && c < 127) ? (wchar_t)c : L'?';
+                    // Answers from this PC arrive once per adapter; keep one per host name and port.
+                    bool seen = false;
+                    for (const auto& g : found) {
+                        GolfInvite other;
+                        golf_invite_decode(utf8(g.first).c_str(), &other);
+                        seen |= g.second == wname && other.port == parsed.port && other.key == parsed.key;
+                    }
+                    if (!seen) found.push_back({wcode, wname});
+                }
+                closesocket(s);
+            }
+            WSACleanup();
+        }
+        {
+            std::lock_guard<std::mutex> hold(lan_lock);
+            lan_games = found;
+            ++lan_generation;
+        }
+        lan_searching = false;
+        PostMessageW(window, WM_SERVER_STATE, 2, 0);
+    }).detach();
+}
+
 void refresh_online() {
-    const std::string mode = online_mode();
-    const bool host = mode == "host", join = mode == "join", running = server_running();
-    EnableWindow(controls[ID_ONLINE_HOST], join);
-    EnableWindow(controls[ID_SERVER], host);
-    EnableWindow(controls[ID_UPNP], host);
-    EnableWindow(controls[ID_INVITE], host);
-    SetWindowTextW(controls[ID_SERVER], running ? L"Stop server" : L"Start server");
-    std::wstring s;
+    const bool host = online_mode() == "host", running = server_running();
+    const std::string join = trimmed(prefs.get("online_join"));
+    SetWindowTextW(controls[ID_SERVER], host ? L"Stop hosting" : L"Host a game");
+    EnableWindow(controls[ID_ONLINE_HOST], !host);
+    EnableWindow(controls[ID_FIND], !host && !lan_searching);
+    EnableWindow(controls[ID_FOUND], !host);
+    SetWindowTextW(controls[ID_FIND], lan_searching ? L"Looking..." : L"Find games on my network");
+    if (lan_listed != lan_generation) {
+        std::lock_guard<std::mutex> hold(lan_lock);
+        lan_listed = lan_generation;
+        SendMessageW(controls[ID_FOUND], LB_RESETCONTENT, 0, 0);
+        for (const auto& g : lan_games)
+            SendMessageW(controls[ID_FOUND], LB_ADDSTRING, 0, (LPARAM)(g.second + L"   " + g.first).c_str());
+        if (lan_games.empty() && lan_searched)
+            SendMessageW(controls[ID_FOUND], LB_ADDSTRING, 0, (LPARAM)L"No game found on this network.");
+    }
+    std::wstring code_line, s;
     const std::wstring port = wide(online_port());
     if (host) {
-        s += !running ? L"Server: stopped. Play starts it." : server_ready ? L"Server: running on port " + port + L"." : L"Server: starting...";
-        if (!running && fs::exists(logs / L"server.log")) s += L" Its output is in data\\logs\\server.log.";
-        s += L"\r\nFriends connect to: ";
-        auto addresses = local_addresses();
-        for (size_t i = 0; i < addresses.size() && i < 3; ++i)
-            s += (i ? L", " : L"") + addresses[i].address + L" (" + addresses[i].adapter + L")";
-        {
-            std::lock_guard<std::mutex> hold(upnp_lock);
-            if (!upnp_address.empty()) s += L", " + upnp_address + L" (internet)";
-            if (!upnp_note.empty()) s += L"\r\n" + upnp_note;
+        const HostStatus st = running ? host_status() : HostStatus{};
+        const std::wstring code = main_invite_code(st);
+        code_line = code.empty() ? L"Invite code: ..." : L"Invite code: " + code;
+        EnableWindow(controls[ID_INVITE], !code.empty());
+        if (!running) s += L"The server is stopped. Press Play or Stop hosting, then Host a game again.";
+        else if (!server_ready) s += L"Starting the server (the first time takes a minute)...";
+        else {
+            s += L"Send the invite code to your friends. ";
+            if (!st.note.empty()) s += st.note;
         }
-        s += L"\r\nFriends outside your home network need the port open on your router (the box above, or forward TCP "
-             + port + L" to this PC by hand) or a shared VPN such as Tailscale or ZeroTier. Windows may ask once to let "
-               L"Python through the firewall: allow it.";
-    } else if (join) {
-        s += L"Play connects to your friend's server at the address and port above (their invite has both).";
+        if (running && server_ready && !st.local.empty()) {
+            // Codes for the home network and VPNs (the adapters the launcher sees, by name).
+            s += L"\r\nSame network or VPN:";
+            const auto adapters = local_addresses();
+            int shown = 0;
+            for (const auto& entry : st.local) {
+                auto a = std::find_if(adapters.begin(), adapters.end(), [&](const LocalAddress& x) { return x.address == entry.first; });
+                if (a == adapters.end() || shown == 3) continue;
+                s += L"\r\n  " + entry.second + L"  (" + (a->gateway ? std::wstring(L"home network") : a->adapter) + L")";
+                ++shown;
+            }
+        }
+        s += L"\r\nOnly you need the port (TCP " + port + L"); friends never do. Windows may ask once to let Python "
+             L"through the firewall: allow it.";
+    } else if (!join.empty()) {
+        code_line = L"";
+        EnableWindow(controls[ID_INVITE], FALSE);
+        s += valid_join(join) ? L"Play joins your friend's game. In the game, pick Online, then Open Course."
+                              : L"That is not an invite code or address. Codes look like R2M0-255Y-FPT7-WP1X.";
     } else {
-        s += L"Play runs offline: the game's online menus cannot connect.";
+        EnableWindow(controls[ID_INVITE], FALSE);
+        s += L"Play runs offline. To play with friends, one of you presses Host a game and sends the invite code; "
+             L"the others paste it into Join.";
     }
-    s += L"\r\n\r\nPlayers on one server share its rankings (the Open Course hole scores). Each round is still "
-         L"played alone: the game's matchmaking runs inside each PC, so friends do not appear on your course.";
+    SetWindowTextW(controls[ID_INVITE_CODE], code_line.c_str());
     SetWindowTextW(controls[ID_ONLINE_STATUS], s.c_str());
 }
 
 // Command line options for the game, or false (with a message shown) when the Online page is not filled in.
 bool online_arguments(std::wstring& command) {
-    const std::string mode = online_mode();
-    // Signed in with no server, the game reports "Server connection failed" on the island; signed
-    // out it plays offline without asking.
-    if (mode == "off") { command += L" --np-mode offline"; return true; }
-    const std::string name = prefs.get("online_name", "Golfer"), friend_host = prefs.get("online_host");
+    const std::string mode = online_mode(), join = trimmed(prefs.get("online_join")), name = online_name();
+    if (mode != "host" && join.empty()) {
+        // Signed in with no server, the game reports "Server connection failed" on the island; signed
+        // out it plays offline without asking.
+        command += L" --np-mode offline";
+        return true;
+    }
     if (!valid_online_name(name)) {
         MessageBoxW(window, L"On the Online page, enter a name of 3 to 16 letters, digits, - or _.", kTitle, MB_ICONWARNING);
-        return false;
-    }
-    if (mode == "join" && !valid_host(friend_host)) {
-        MessageBoxW(window, L"On the Online page, enter your friend's server address (from their invite).", kTitle, MB_ICONWARNING);
         return false;
     }
     if (mode == "host") {
         std::wstring error;
         if (!start_server(error)) { MessageBoxW(window, error.c_str(), kTitle, MB_ICONWARNING); return false; }
+        command += L" --online-id " + wide(name) + L" --join 127.0.0.1:" + wide(online_port());
+        return true;
     }
-    command += L" --online-id " + wide(name) + L" --local-auth 1 --discovery-port " + wide(online_port());
-    if (mode == "join") command += L" --server-host " + wide(friend_host);
+    if (!valid_join(join)) {
+        MessageBoxW(window, L"On the Online page, paste your friend's invite code into Join (or clear it to play offline).",
+                    kTitle, MB_ICONWARNING);
+        return false;
+    }
+    command += L" --online-id " + wide(name) + L" --join " + quote(wide(join));
     return true;
+}
+
+void host_toggle() {
+    if (online_mode() == "host") {
+        stop_server();
+        set_pref("online", "off");
+        return;
+    }
+    set_pref("online", "host");
+    std::wstring error;
+    if (!start_server(error)) {
+        set_pref("online", "off");
+        MessageBoxW(window, error.c_str(), kTitle, MB_ICONWARNING);
+    }
 }
 
 void online_command(int id, int code) {
     switch (id) {
-    case ID_ONLINE_MODE:
-        if (code != CBN_SELCHANGE) return;
-        set_pref("online", combo_value(ID_ONLINE_MODE, online_modes));
-        break;
     case ID_ONLINE_NAME: if (code == EN_KILLFOCUS) set_pref("online_name", utf8(text_of(ID_ONLINE_NAME))); return;
-    case ID_ONLINE_HOST: if (code == EN_KILLFOCUS) set_pref("online_host", utf8(text_of(ID_ONLINE_HOST))); return;
+    case ID_ONLINE_HOST:
+        if (code != EN_CHANGE) return;
+        set_pref("online_join", utf8(text_of(ID_ONLINE_HOST)));
+        break;
     case ID_ONLINE_PORT:
         if (code != EN_KILLFOCUS) return;
         set_pref("online_port", utf8(text_of(ID_ONLINE_PORT)));
         SetWindowTextW(controls[ID_ONLINE_PORT], wide(online_port()).c_str());
-        if (server_running()) stop_server(); // the next Start or Play uses the new port
-        break;
-    case ID_UPNP: set_pref("upnp", checked(ID_UPNP) ? "1" : "0"); break;
-    case ID_SERVER:
-        if (server_running()) {
+        if (server_running()) { // the new port needs a new code
             stop_server();
-        } else {
             std::wstring error;
             if (!start_server(error)) MessageBoxW(window, error.c_str(), kTitle, MB_ICONWARNING);
         }
         break;
-    case ID_INVITE:
-        copy_text(invite_text());
-        MessageBoxW(window, (L"Copied to the clipboard; paste it to your friends:\r\n\r\n" + invite_text()).c_str(), kTitle, MB_ICONINFORMATION);
-        break;
+    case ID_UPNP: set_pref("upnp", checked(ID_UPNP) ? "1" : "0"); break;
+    case ID_SERVER: host_toggle(); break;
+    case ID_FIND: lan_searched = true; find_lan_games(); break;
+    case ID_FOUND: {
+        if (code != LBN_SELCHANGE && code != LBN_DBLCLK) return;
+        const LRESULT row = SendMessageW(controls[ID_FOUND], LB_GETCURSEL, 0, 0);
+        std::lock_guard<std::mutex> hold(lan_lock);
+        if (row >= 0 && (size_t)row < lan_games.size()) {
+            SetWindowTextW(controls[ID_ONLINE_HOST], lan_games[row].first.c_str()); // EN_CHANGE saves it
+            return;
+        }
+        return;
+    }
+    case ID_INVITE: {
+        const std::wstring invite = main_invite_code(host_status());
+        if (invite.empty()) return;
+        copy_text(invite_text(invite));
+        SetWindowTextW(controls[ID_INVITE], L"Copied");
+        SetTimer(window, kOnlineTimer + 1, 2000, nullptr);
+        return;
+    }
     }
     refresh_online();
 }
-// The server became ready or stopped: open the router port when asked, and show the state.
-void on_server_state() {
-    if (server_ready && prefs.get("upnp", "0") == "1") {
-        bool mapped;
-        {
-            std::lock_guard<std::mutex> hold(upnp_lock);
-            mapped = upnp_port != 0 || !upnp_note.empty();
-        }
-        auto addresses = local_addresses();
-        if (!mapped && !addresses.empty() && addresses[0].gateway) {
-            {
-                std::lock_guard<std::mutex> hold(upnp_lock);
-                upnp_note = L"Asking the router to open the port...";
-            }
-            upnp_map(std::stol(online_port()), addresses[0].address);
-        }
+// The server became ready or stopped, or a LAN search finished.
+void on_server_state() { refresh_online(); }
+void on_online_timer(UINT_PTR id) {
+    if (id == kOnlineTimer + 1) {
+        KillTimer(window, id);
+        SetWindowTextW(controls[ID_INVITE], L"Copy");
+        return;
     }
+    if (!server_running()) KillTimer(window, id);
     refresh_online();
+}
+// EverybodysGolf.exe --host: open the Online page and host straight away (a PC that keeps a game up
+// for friends without playing).
+void host_from_command_line() {
+    if (online_mode() != "host") host_toggle();
+    else {
+        std::wstring error;
+        if (!start_server(error)) MessageBoxW(window, error.c_str(), kTitle, MB_ICONWARNING);
+    }
 }
 
 void play() {
@@ -1859,28 +1955,33 @@ void create_controls() {
         SS_LEFT, 30, 336, 580, 40);
 
     // Online
-    add(PageOnline, L"STATIC", L"Play against one title server with friends: host it on this PC, or join a friend's.",
+    add(PageOnline, L"STATIC", L"Play with friends: one of you hosts, the others join with the invite code.",
         SS_LEFT, 30, 50, 580, 20);
-    add(PageOnline, L"STATIC", L"Your name", SS_LEFT, 30, 82, 160, 22);
-    add(PageOnline, L"EDIT", L"", WS_BORDER | ES_AUTOHSCROLL | WS_TABSTOP, 200, 78, 200, 24, ID_ONLINE_NAME);
+    add(PageOnline, L"STATIC", L"Your name", SS_LEFT, 30, 82, 90, 22);
+    add(PageOnline, L"EDIT", L"", WS_BORDER | ES_AUTOHSCROLL | WS_TABSTOP, 120, 78, 160, 24, ID_ONLINE_NAME);
     SendMessageW(controls[ID_ONLINE_NAME], EM_SETLIMITTEXT, 16, 0);
-    add(PageOnline, L"STATIC", L"Online", SS_LEFT, 30, 116, 160, 22);
-    add(PageOnline, WC_COMBOBOXW, L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 200, 112, 300, 200, ID_ONLINE_MODE);
-    add(PageOnline, L"STATIC", L"Port", SS_LEFT, 30, 150, 160, 22);
-    add(PageOnline, L"EDIT", L"", WS_BORDER | ES_NUMBER | WS_TABSTOP, 200, 146, 80, 24, ID_ONLINE_PORT);
+    add(PageOnline, L"STATIC", L"Port", SS_LEFT, 300, 82, 40, 22);
+    add(PageOnline, L"EDIT", L"", WS_BORDER | ES_NUMBER | WS_TABSTOP, 340, 78, 70, 24, ID_ONLINE_PORT);
     SendMessageW(controls[ID_ONLINE_PORT], EM_SETLIMITTEXT, 5, 0);
-    add(PageOnline, L"STATIC", L"Friend's address", SS_LEFT, 300, 150, 110, 22);
-    add(PageOnline, L"EDIT", L"", WS_BORDER | ES_AUTOHSCROLL | WS_TABSTOP, 410, 146, 200, 24, ID_ONLINE_HOST);
+    add(PageOnline, L"BUTTON", L"Open the port on my router", BS_AUTOCHECKBOX | WS_TABSTOP, 425, 80, 200, 22, ID_UPNP);
+    add(PageOnline, L"BUTTON", L"Host a game", BS_PUSHBUTTON | WS_TABSTOP, 30, 116, 130, 30, ID_SERVER);
+    add(PageOnline, L"STATIC", L"", SS_LEFT, 175, 119, 340, 26, ID_INVITE_CODE, big_font);
+    add(PageOnline, L"BUTTON", L"Copy", BS_PUSHBUTTON | WS_TABSTOP, 520, 116, 90, 30, ID_INVITE);
+    add(PageOnline, L"STATIC", L"Join", SS_LEFT, 30, 164, 90, 22);
+    add(PageOnline, L"EDIT", L"", WS_BORDER | ES_AUTOHSCROLL | WS_TABSTOP, 120, 160, 290, 24, ID_ONLINE_HOST);
     SendMessageW(controls[ID_ONLINE_HOST], EM_SETLIMITTEXT, 253, 0);
-    add(PageOnline, L"BUTTON", L"Start server", BS_PUSHBUTTON | WS_TABSTOP, 30, 184, 130, 28, ID_SERVER);
-    add(PageOnline, L"BUTTON", L"Copy invite for friends", BS_PUSHBUTTON | WS_TABSTOP, 170, 184, 170, 28, ID_INVITE);
-    add(PageOnline, L"BUTTON", L"Open the port on my router (UPnP)", BS_AUTOCHECKBOX | WS_TABSTOP, 350, 188, 260, 22, ID_UPNP);
-    add(PageOnline, L"STATIC", L"", SS_LEFT, 30, 224, 580, 196, ID_ONLINE_STATUS);
-    fill_combo(ID_ONLINE_MODE, online_modes, online_mode());
-    SetWindowTextW(controls[ID_ONLINE_NAME], wide(prefs.get("online_name", "Golfer")).c_str());
+    add(PageOnline, L"BUTTON", L"Find games on my network", BS_PUSHBUTTON | WS_TABSTOP, 420, 158, 190, 28, ID_FIND);
+    add(PageOnline, L"LISTBOX", L"", WS_BORDER | WS_VSCROLL | LBS_NOTIFY | LBS_NOINTEGRALHEIGHT | WS_TABSTOP,
+        120, 192, 490, 52, ID_FOUND);
+    add(PageOnline, L"STATIC", L"", SS_LEFT, 30, 254, 580, 166, ID_ONLINE_STATUS);
+    // Older launchers kept a friend's address in online_host with online=join.
+    if (prefs.get("online_join").empty() && prefs.get("online") == "join" && !prefs.get("online_host").empty())
+        set_pref("online_join", prefs.get("online_host"));
+    if (online_mode() == "join") set_pref("online", "off");
+    SetWindowTextW(controls[ID_ONLINE_NAME], wide(online_name()).c_str());
     SetWindowTextW(controls[ID_ONLINE_PORT], wide(online_port()).c_str());
-    SetWindowTextW(controls[ID_ONLINE_HOST], wide(prefs.get("online_host")).c_str());
-    check(ID_UPNP, prefs.get("upnp", "0") == "1");
+    SetWindowTextW(controls[ID_ONLINE_HOST], wide(prefs.get("online_join")).c_str());
+    check(ID_UPNP, prefs.get("upnp", "1") != "0");
 
     fill_combo(ID_SCALE, scales, "2");
     load_option_controls();
@@ -1918,8 +2019,8 @@ void on_command(int id, int code) {
         break;
     case ID_PROFILES: if (code == LBN_DBLCLK) save_action(ID_PROFILE_USE); return;
     case ID_BUILD: build_textures(); break;
-    case ID_ONLINE_NAME: case ID_ONLINE_MODE: case ID_ONLINE_PORT: case ID_ONLINE_HOST: case ID_SERVER: case ID_UPNP:
-    case ID_INVITE:
+    case ID_ONLINE_NAME: case ID_ONLINE_PORT: case ID_ONLINE_HOST: case ID_SERVER: case ID_UPNP:
+    case ID_INVITE: case ID_FIND: case ID_FOUND:
         online_command(id, code);
         return;
     case ID_OPEN_SETTINGS:
@@ -2197,6 +2298,7 @@ LRESULT CALLBACK proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         refresh_status();
         return 0;
     case WM_SERVER_STATE: on_server_state(); return 0;
+    case WM_TIMER: on_online_timer(wp); return 0;
     case WM_CLOSE:
         if (busy && MessageBoxW(hwnd, L"A job is still running. Close anyway? It stops where it is.", kTitle, MB_YESNO | MB_ICONQUESTION) != IDYES)
             return 0;
@@ -2278,12 +2380,19 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
         if (!wcscmp(argv[i], L"--page")) page = _wtoi(argv[i + 1]);
         if (!wcscmp(argv[i], L"--updated")) updated_from = argv[i + 1];
     }
+    bool host_now = false;
+    for (int i = 1; argv && i < argc; ++i) host_now |= !wcscmp(argv[i], L"--host");
     if (argv) LocalFree(argv);
     open_first_page(page);
     check(ID_CHECK_UPDATES, prefs.get("update_check", "1") != "0");
     std::wstring version_text = L"Version " + wide(kVersion);
     if (!updated_from.empty()) version_text += L"\r\nUpdated from " + updated_from + L".";
     SetWindowTextW(controls[ID_VERSION], version_text.c_str());
+    if (host_now) {
+        TabCtrl_SetCurSel(tabs, PageOnline);
+        show_page(PageOnline);
+        host_from_command_line();
+    }
     ShowWindow(window, show);
     if (update_undone)
         MessageBoxW(window, L"The last update did not finish, so the previous version was put back. You can try it again "

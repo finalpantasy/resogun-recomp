@@ -164,7 +164,9 @@ int runtime_golf_local_account(void);
 uint16_t runtime_golf_peer_socket_port(int32_t id);
 enum { GOLF_LOBBY_REQUEST_BYTES=36, GOLF_LOBBY_RESPONSE_BYTES=920 };
 int runtime_golf_lobby_exchange(const uint8_t *request,uint8_t *response,size_t *length);
-enum { GOLF_PEER_REQUEST_MIN=36, GOLF_PEER_REQUEST_MAX=65828, GOLF_PEER_RESPONSE_MAX=65932 };
+/* Up to 64 packets each way (GOLF_RUDP_BATCH; server/lobby_registry.py PACKETS_PER_EXCHANGE): 36 + 64 * 16
+ * request header bytes and 12 + 64 * 24 reply header bytes around at most 65536 payload bytes. */
+enum { GOLF_PEER_REQUEST_MIN=36, GOLF_PEER_REQUEST_MAX=66596, GOLF_PEER_RESPONSE_MAX=67084 };
 int runtime_golf_peer_exchange(const uint8_t *request,size_t size,uint8_t *response,size_t *length);
 enum { GOLF_CHANNEL_REQUEST_BYTES=28, GOLF_CHANNEL_RESPONSE_BYTES=12, GOLF_CHANNEL_RESPONSE_MAX=20 };
 int runtime_golf_channel_exchange(const uint8_t *request,uint8_t *response,size_t *length);

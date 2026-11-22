@@ -1,6 +1,7 @@
 /* The executable configures its own portable state before the loader starts. */
 #include "launcher.h"
 #include "prepare.h"
+#include "invite_code.h"
 #include <SDL3/SDL.h>
 #include <errno.h>
 #include <limits.h>
@@ -481,7 +482,7 @@ static const Setting settings[] = {
 typedef struct {
     const char *game, *dlc, *data, *save, *log, *prepared, *shortcut;
     const char *boot, *profile, *isa, *timeout, *http_dump;
-    int prepare_only, reprepare, any_build, console, no_dlc;
+    int prepare_only, reprepare, any_build, console, no_dlc, joined;
     int forward_count, mount_count;
     char *forward[106], mount[24][PATH_CHARS + 128];
 } Options;
@@ -522,6 +523,10 @@ static void usage(void) {
            "  --online-id NAME    Local account ID (1-16 ASCII letters, digits, _ or -)\n"
            "  --discovery-port N  Title server port (0 disables replay)\n"
            "  --server-host HOST  Title server name or IPv4 address (default 127.0.0.1)\n"
+           "  --join CODE         Play online on a friend's server: an invite code, or HOST[:PORT]\n"
+           "                      on a home network or VPN (port 48765 by default)\n"
+           "  --server-key KEY    Room key of the title server (7 hex digits; --join sets it)\n"
+           "  --local-world N     Map every lobby the game joins to server world N (1-50)\n"
            "  --local-auth N      Synthetic login fixture, 0 or 1\n"
            "  --local-lobbies N   Local multiplayer replay, 0 or 1\n"
            "  --http-dump DIR     Save local replay request bodies (relative to DATA)\n"
@@ -563,6 +568,37 @@ static int number(const char *value, unsigned long maximum) {
     if (!*value || strspn(value, "0123456789") != strlen(value)) return 0;
     errno = 0;
     return strtoul(value, NULL, 10) <= maximum && !errno;
+}
+
+/* --join: an invite code (address, port and room key) or HOST[:PORT] for a server on a home
+ * network or VPN. Either way the game signs in to that server with lobbies on, and every lobby
+ * it joins maps to the server's world 1, so friends who pick Open Course meet in one hub. */
+static int join_server(const char *value) {
+    char host[256], port[8] = "48765", key[8] = "";
+    GolfInvite code;
+    if (golf_invite_decode(value, &code)) {
+        snprintf(host, sizeof host, "%u.%u.%u.%u", code.ip[0], code.ip[1], code.ip[2], code.ip[3]);
+        snprintf(port, sizeof port, "%u", (unsigned)code.port);
+        golf_invite_key_text(code.key, key);
+    } else if (golf_invite_shaped(value)) {
+        return 0; /* a mistyped invite code */
+    } else {
+        const char *colon = strchr(value, ':');
+        const size_t length = colon ? (size_t)(colon - value) : strlen(value);
+        if (!length || length >= sizeof host) return 0;
+        memcpy(host, value, length);
+        host[length] = 0;
+        if (host[strspn(host, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-")]) return 0;
+        if (colon) {
+            if (!colon[1] || strlen(colon + 1) > 5 || !number(colon + 1, 65535) || !strtoul(colon + 1, NULL, 10)) return 0;
+            snprintf(port, sizeof port, "%lu", strtoul(colon + 1, NULL, 10));
+        }
+    }
+    if (!set_env("GOLF_SERVER_HOST", host) || !set_env("GOLF_DISCOVERY_PORT", port) ||
+        (key[0] && !set_env("GOLF_SERVER_KEY", key)) || !set_env("GOLF_NP", "local") ||
+        !set_env("GOLF_LOCAL_AUTH", "1") || !set_env("GOLF_LOCAL_LOBBIES", "1")) return 0;
+    const char *world = getenv("GOLF_LOCAL_WORLD");
+    return world && *world ? 1 : set_env("GOLF_LOCAL_WORLD", "1");
 }
 
 static int forward(Options *o, char *argument) {
@@ -607,6 +643,12 @@ static int parse(Options *o, int argc, char **argv) {
             if (!set_env("GOLF_ENTITLEMENTS", argv[i])) return option_error(flag, "cannot set entitlement mode");
             continue;
         }
+        if (!strcmp(flag, "--join")) {
+            if (++i >= argc || !argv[i][0]) return option_error(flag, "missing argument");
+            if (!join_server(argv[i])) return option_error(flag, "expected an invite code or HOST[:PORT]");
+            o->joined = 1;
+            continue;
+        }
         const char *golf_env = NULL;
         if (!strcmp(flag, "--np-mode")) golf_env = "GOLF_NP";
         else if (!strcmp(flag, "--online-id")) golf_env = "GOLF_ONLINE_ID";
@@ -614,6 +656,8 @@ static int parse(Options *o, int argc, char **argv) {
         else if (!strcmp(flag, "--server-host")) golf_env = "GOLF_SERVER_HOST";
         else if (!strcmp(flag, "--local-auth")) golf_env = "GOLF_LOCAL_AUTH";
         else if (!strcmp(flag, "--local-lobbies")) golf_env = "GOLF_LOCAL_LOBBIES";
+        else if (!strcmp(flag, "--server-key")) golf_env = "GOLF_SERVER_KEY";
+        else if (!strcmp(flag, "--local-world")) golf_env = "GOLF_LOCAL_WORLD";
         else if (!strcmp(flag, "--ticket-grants")) golf_env = "GOLF_TICKET_GRANTS";
         else if (!strcmp(flag, "--tus")) golf_env = "GOLF_TUS";
         else if (!strcmp(flag, "--font-file")) golf_env = "GOLF_FONT_FILE";
@@ -633,6 +677,10 @@ static int parse(Options *o, int argc, char **argv) {
                 if (length > 16 || strspn(value, allowed) != length)
                     return option_error(flag, "expected 1-16 ASCII letters, digits, underscores or hyphens");
             }
+            if (!strcmp(golf_env, "GOLF_SERVER_KEY") && (strlen(value) != 7 || strspn(value, "0123456789abcdef") != 7))
+                return option_error(flag, "expected 7 lowercase hex digits");
+            if (!strcmp(golf_env, "GOLF_LOCAL_WORLD") && (strlen(value) > 2 || !number(value, 50) || !strtoul(value, NULL, 10)))
+                return option_error(flag, "expected a world from 1 through 50");
             if (!strcmp(golf_env, "GOLF_DISCOVERY_PORT")) {
                 if (strlen(value) > 5 || !number(value, 65535))
                     return option_error(flag, "expected a port from 0 through 65535");
@@ -1023,6 +1071,20 @@ int launcher_start(int *argc, char ***argv) {
     const char *data = o.data ? o.data : env_option("DATA_DIR");
     if (!(data ? from_cwd(data_dir, data) : copy_path(data_dir, exe_dir)))
         return option_error("--data-dir", "invalid path");
+    /* Online play caches the tournament archive in /download0; without a writable folder the
+     * sign-in stops there and the game says "Server connection failed". */
+    if (o.joined) {
+        int mounted = 0;
+        for (int i = 0; i < o.mount_count; ++i) mounted |= !strncmp(o.mount[i], "/download0=", 11);
+        char folder[PATH_CHARS];
+        if (!mounted) {
+            if (o.mount_count == 24 || !join_path(folder, data_dir, "download0") || !make_dirs(folder))
+                return complain("Cannot create the online download folder");
+            char *spec = o.mount[o.mount_count++];
+            snprintf(spec, PATH_CHARS + 128, "/download0=%s", folder);
+            if (!forward(&o, (char *)"--mount") || !forward(&o, spec)) return option_error("--join", "too many loader options");
+        }
+    }
 #ifdef _WIN32
     /* Libraries that honor AppData can use a process-local portable location. */
     char local[PATH_CHARS], roaming[PATH_CHARS];

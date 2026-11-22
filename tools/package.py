@@ -80,6 +80,20 @@ Options
   upscaled pack with Real-ESRGAN. Saves keeps several save folders.
   In the game, F10 (or Options held for 2 seconds) opens Display Settings.
 
+Playing online
+  One player hosts. The others join with the invite code the host sends
+  them, and all game traffic passes through the host's PC, so only the
+  host needs an open port; the launcher asks the router to open it.
+  1. Host: on the Online tab, press Host a game, then press Copy and
+     send the invite code to your friends.
+  2. Friends: on the Online tab, paste the code into Join. On the same
+     home network, Find games on my network lists the host instead.
+  3. Everyone presses Play, then picks Online > Open Course in the game.
+  Can't connect? The Online tab says why. Forward TCP port 48765 to the
+  host's PC in the router's settings, or have everyone join one VPN such
+  as Tailscale and use the host's VPN code. To host without playing, run
+  tools\\server\\host-online.cmd.
+
 Updates
   The launcher asks GitHub for a newer release at most once a day and
   offers to install it. Turn this off on the Play tab. An update checks the
@@ -285,6 +299,8 @@ def add_windows_tools(out, ship):
         if not SERVER_SKIP.match(script.name):
             ship(script, f'tools/server/{script.name}')
     ship(ROOT / 'analysis' / 'online' / 'title-url-map.tsv', 'tools/server/title-url-map.tsv')
+    # Hosting without the launcher window: host.py --online --auto in a console.
+    ship(PORT / 'packaging' / 'windows' / 'host-online.cmd', 'tools/server/host-online.cmd')
     # host.py builds the discovery fixture with OpenSSL's Blowfish (MSYS2 CLANG64's libcrypto, which
     # needs only Windows' own DLLs).
     clang64 = Path(os.environ.get('MSYS2_ROOT', r'C:\msys64')) / 'clang64'

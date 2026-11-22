@@ -7,6 +7,8 @@
 #else
 #include <arpa/inet.h>
 #include <netdb.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <unistd.h>
@@ -186,22 +188,36 @@ static int discovery_send(DiscoverySocket sock,const void *data,int size) {
     return 1;
 }
 
-static int discovery_exchange(ReplayRequest *req,const void *data,int size) {
+/* GOLF_SERVER_KEY: the room key of a friend's server (7 hex digits, from the invite code). The
+ * server asks for it only from callers on public addresses. */
+static const char *discovery_key(void) {
+    const char *key=getenv("GOLF_SERVER_KEY");
+    return key && strlen(key)==7 && strspn(key,"0123456789abcdef")==7 ? key : NULL;
+}
+
+/* The lobby, channel and packet routes reuse one kept-alive connection per runtime thread: the
+ * RUDP worker exchanges every 20 ms, and a TCP handshake each time would double the round trips to
+ * a friend's server over the internet. A kept socket holds its own WSAStartup reference. */
+static __thread DiscoverySocket kept_socket=DISCOVERY_INVALID;
+static __thread unsigned kept_port;
+
+static void discovery_drop_kept(void) {
+    if (kept_socket==DISCOVERY_INVALID) return;
+    discovery_close(kept_socket);
+    kept_socket=DISCOVERY_INVALID;
+#ifdef _WIN32
+    WSACleanup();
+#endif
+}
+
+/* 1 answered, 0 failed, -1 failed before any reply byte on a reused connection (the server had
+ * closed it while idle; the request can go again on a new one). */
+static int discovery_exchange_once(ReplayRequest *req,const void *data,int size,int keep,int *reused) {
     static const char request_format[]=
         "%s %s HTTP/1.1\r\nHost: %s:%u\r\n"
         "User-Agent: PS4Application nolib/0.0 (U-UP9000-CUSA04687_00-EVERYBODYSGOLF07/2017022700/1170)\r\n"
-        "%sConnection: close\r\n\r\n";
+        "%sConnection: %s\r\n\r\n";
     const ReplayRoute *route=req->route;
-    /* GOLF_HTTP_DUMP=<folder> (diagnostics): save each replayed request body as <counter>-<last path part>.bin. */
-    if (getenv("GOLF_HTTP_DUMP") && data && size>0) {
-        static atomic_int dumped;
-        const char *path=route->path ? route->path : req->login_path, *name=strrchr(path,'/');
-        char file[512];
-        snprintf(file,sizeof file,"%s/%03d-%.64s.bin",getenv("GOLF_HTTP_DUMP"),atomic_fetch_add(&dumped,1),name ? name+1 : path);
-        for (char *c=strrchr(file,'/')+1;*c;++c) if (*c=='?' || *c=='&' || *c=='=') *c='_';
-        FILE *f=fopen(file,"wb");
-        if (f) { fwrite(data,1,(size_t)size,f); fclose(f); }
-    }
 #ifdef _WIN32
     WSADATA wsa;
     if (WSAStartup(MAKEWORD(2,2),&wsa)) return 0;
@@ -209,27 +225,50 @@ static int discovery_exchange(ReplayRequest *req,const void *data,int size) {
 #else
     struct timeval timeout={.tv_sec=3};
 #endif
-    int ok=0;
+    int ok=0, any=0;
     char *response=NULL;
-    DiscoverySocket sock=socket(AF_INET,SOCK_STREAM,IPPROTO_TCP);
-    if (sock==DISCOVERY_INVALID) goto done;
-    if (setsockopt(sock,SOL_SOCKET,SO_SNDTIMEO,(const char *)&timeout,sizeof timeout) ||
-        setsockopt(sock,SOL_SOCKET,SO_RCVTIMEO,(const char *)&timeout,sizeof timeout)) goto done;
-    struct sockaddr_in target={0};
-    target.sin_family=AF_INET;
-    if (!discovery_address(&target.sin_addr)) goto done;
-    target.sin_port=htons((uint16_t)req->port);
-    if (connect(sock,(const struct sockaddr *)&target,sizeof target)) goto done;
+    DiscoverySocket sock=DISCOVERY_INVALID;
+    *reused=0;
+    if (keep && kept_socket!=DISCOVERY_INVALID && kept_port==req->port) {
+        sock=kept_socket;
+        kept_socket=DISCOVERY_INVALID;
+        *reused=1;
+#ifdef _WIN32
+        WSACleanup(); /* the kept reference; this call's own one covers the socket now */
+#endif
+    } else {
+        if (keep) discovery_drop_kept();
+        sock=socket(AF_INET,SOCK_STREAM,IPPROTO_TCP);
+        if (sock==DISCOVERY_INVALID) goto done;
+        if (setsockopt(sock,SOL_SOCKET,SO_SNDTIMEO,(const char *)&timeout,sizeof timeout) ||
+            setsockopt(sock,SOL_SOCKET,SO_RCVTIMEO,(const char *)&timeout,sizeof timeout)) goto done;
+        if (keep) {
+            int on=1;
+            setsockopt(sock,IPPROTO_TCP,TCP_NODELAY,(const char *)&on,sizeof on);
+        }
+        struct sockaddr_in target={0};
+        target.sin_family=AF_INET;
+        if (!discovery_address(&target.sin_addr)) goto done;
+        target.sin_port=htons((uint16_t)req->port);
+        if (connect(sock,(const struct sockaddr *)&target,sizeof target)) goto done;
+    }
 
-    char request[768], headers[96]="";
+    char request[768], headers[160]="";
+    int used=0;
     if (size) {
         const char *type=route->content_type ? route->content_type : "multipart/form-data; boundary=xYzZY";
-        int n=snprintf(headers,sizeof headers,"Content-Type: %s\r\nContent-Length: %d\r\n",type,size);
-        if (n<0 || (size_t)n>=sizeof headers) goto done;
+        used=snprintf(headers,sizeof headers,"Content-Type: %s\r\nContent-Length: %d\r\n",type,size);
+        if (used<0 || (size_t)used>=sizeof headers) goto done;
+    }
+    const char *key=discovery_key();
+    if (key) {
+        int n=snprintf(headers+used,sizeof headers-(size_t)used,"X-Golf-Key: %s\r\n",key);
+        if (n<0 || (size_t)n>=sizeof headers-(size_t)used) goto done;
     }
     const char *method=size ? "POST" : "GET";
     const char *path=route->path ? route->path : req->login_path;
-    int request_size=snprintf(request,sizeof request,request_format,method,path,discovery_host(),req->port,headers);
+    int request_size=snprintf(request,sizeof request,request_format,method,path,discovery_host(),req->port,headers,
+                              keep ? "keep-alive" : "close");
     if (request_size<0 || (size_t)request_size>=sizeof request ||
         !discovery_send(sock,request,request_size) || !discovery_send(sock,data,size)) goto done;
 
@@ -240,12 +279,13 @@ static int discovery_exchange(ReplayRequest *req,const void *data,int size) {
     struct timespec start, now;
     if (clock_gettime(CLOCK_MONOTONIC,&start)) goto done;
     size_t received=0, header_size=0, length=0;
-    int status=0;
+    int status=0, server_closes=1;
     do {
         if (received==capacity || clock_gettime(CLOCK_MONOTONIC,&now) ||
             now.tv_sec-start.tv_sec>=4) goto done;
         int n=(int)recv(sock,response+received,(int)(capacity-received),0);
         if (n<=0) goto done;
+        any=1;
         received+=(size_t)n;
         if (!header_size) {
             response[received]=0;
@@ -260,6 +300,7 @@ static int discovery_exchange(ReplayRequest *req,const void *data,int size) {
                 status<100 || status>599 ||
                 (response[12]!=' ' && response[12]!='\r')) goto done;
             *end=0;
+            server_closes=!strstr(response,"\r\nConnection: keep-alive");
             char *field=strstr(response,"\r\nContent-Length: ");
             if (!field || strstr(response,"\r\nTransfer-Encoding:") ||
                 strstr(field+2,"\r\nContent-Length:")) goto done;
@@ -278,13 +319,39 @@ static int discovery_exchange(ReplayRequest *req,const void *data,int size) {
     req->status=status;
     req->length=length;
     ok=1;
+    if (keep && !server_closes) {
+        kept_socket=sock;
+        kept_port=req->port;
+        sock=DISCOVERY_INVALID;
+#ifdef _WIN32
+        if (WSAStartup(MAKEWORD(2,2),&wsa)) { discovery_close(kept_socket); kept_socket=DISCOVERY_INVALID; }
+#endif
+    }
 done:
     free(response);
     if (sock!=DISCOVERY_INVALID) discovery_close(sock);
 #ifdef _WIN32
     WSACleanup();
 #endif
-    return ok;
+    return ok ? 1 : *reused && !any ? -1 : 0;
+}
+
+static int discovery_exchange(ReplayRequest *req,const void *data,int size) {
+    const ReplayRoute *route=req->route;
+    /* GOLF_HTTP_DUMP=<folder> (diagnostics): save each replayed request body as <counter>-<last path part>.bin. */
+    if (getenv("GOLF_HTTP_DUMP") && data && size>0) {
+        static atomic_int dumped;
+        const char *path=route->path ? route->path : req->login_path, *name=strrchr(path,'/');
+        char file[512];
+        snprintf(file,sizeof file,"%s/%03d-%.64s.bin",getenv("GOLF_HTTP_DUMP"),atomic_fetch_add(&dumped,1),name ? name+1 : path);
+        for (char *c=strrchr(file,'/')+1;*c;++c) if (*c=='?' || *c=='&' || *c=='=') *c='_';
+        FILE *f=fopen(file,"wb");
+        if (f) { fwrite(data,1,(size_t)size,f); fclose(f); }
+    }
+    const int keep=route->path && !strncmp(route->path,"/nmg-us/local-lobby/",sizeof "/nmg-us/local-lobby"-1);
+    int reused=0, result=discovery_exchange_once(req,data,size,keep,&reused);
+    if (result<0) result=discovery_exchange_once(req,data,size,keep,&reused);
+    return result>0;
 }
 
 /* These routes originate in the runtime's workers. */

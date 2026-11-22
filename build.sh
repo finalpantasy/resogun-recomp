@@ -87,6 +87,7 @@ if [[ ${1:-} == --test ]]; then
     run_test content tests/test_content.c "${compat[@]}"
     run_test eventflag tests/test_eventflag.c
     run_test json tests/test_json.c
+    run_test invite tests/test_invite.c
     run_test ngs2 tests/test_ngs2.c -lm
     run_test wide tests/test_wide.c -lm
     run_test fiber tests/test_fiber.c

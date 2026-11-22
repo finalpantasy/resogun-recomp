@@ -211,7 +211,7 @@ if (WIN32)
     target_compile_definitions(golf-launcher PRIVATE UNICODE _UNICODE)
     target_compile_options(golf-launcher PRIVATE -Wall -Wextra -Werror -Wno-missing-field-initializers)
     target_link_options(golf-launcher PRIVATE -municode -static)
-    target_link_libraries(golf-launcher PRIVATE comctl32 ole32 oleaut32 shell32 uuid iphlpapi winhttp gdi32 miniz::miniz)
+    target_link_libraries(golf-launcher PRIVATE comctl32 ole32 oleaut32 shell32 uuid iphlpapi winhttp ws2_32 gdi32 miniz::miniz)
 else()
     # Not PIE: host heap objects handed to the guest stay in the brk heap, below 1 TiB (loader.c main).
     set_target_properties(resogun PROPERTIES POSITION_INDEPENDENT_CODE OFF)
