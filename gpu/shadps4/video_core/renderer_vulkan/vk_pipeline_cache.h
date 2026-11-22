@@ -160,6 +160,12 @@ public:
                                                 const PreparedDraw* prepared = nullptr,
                                                 bool no_skip = false);
 
+private:
+    const GraphicsPipeline* GetGraphicsPipelineImpl(const DrawIndirectParams params,
+                                                    const PreparedDraw* prepared, bool no_skip);
+
+public:
+
     /// resogun: worker side of draw preparation: selects the pipeline key for `sel.regs` without
     /// creating anything. False when a program or permutation does not exist yet.
     bool PrepareGraphicsPipeline(PipelineSelection& sel);

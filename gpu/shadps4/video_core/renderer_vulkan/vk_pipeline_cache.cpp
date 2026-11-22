@@ -970,9 +970,33 @@ GraphicsPipeline* PipelineCache::DeferGraphicsPipeline() {
     return published;
 }
 
+// resogun game fix (Everybody's Golf): at club impact the game draws a full-screen quad with
+// pixel shader 0x76f7a64f and blend ONE_MINUS_DST_COLOR, ZERO, which inverts the whole frame
+// including the HUD for about 30 frames. The effect is not visible on a real PS4 and the root
+// cause is not found (the blend registers and vertex swizzle decode as the game set them; its
+// constant buffer is all zero when the draw records), so the draw is skipped. RESOGUN_KEEP_76F7=1
+// draws it again.
+static bool IsImpactInvertDraw(const GraphicsPipeline* pipeline) {
+    static const bool keep = std::getenv("RESOGUN_KEEP_76F7") != nullptr;
+    return !keep && pipeline &&
+           pipeline->GetStage(Shader::SwStage::Fragment).pgm_hash == 0x76f7a64full;
+}
+
 const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectParams params,
                                                            const PreparedDraw* prepared,
                                                            bool no_skip) {
+    const GraphicsPipeline* pipeline = GetGraphicsPipelineImpl(params, prepared, no_skip);
+    if (IsImpactInvertDraw(pipeline)) {
+        used_prepared = nullptr;
+        miss_reason = "game fix: impact invert quad";
+        return nullptr;
+    }
+    return pipeline;
+}
+
+const GraphicsPipeline* PipelineCache::GetGraphicsPipelineImpl(const DrawIndirectParams params,
+                                                               const PreparedDraw* prepared,
+                                                               bool no_skip) {
     SeedWorkerCaches();
     PublishShaders();
     PublishGraphics();
