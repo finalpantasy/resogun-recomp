@@ -138,20 +138,15 @@ void EmitContext::GolfDebugSetup() {
     if (config.empty()) {
         return;
     }
-    for (u32 i = 0; i < images.size(); ++i) {
-        std::printf("PS debug %016llx: img%u single_mip %d\n",
-                    static_cast<unsigned long long>(info.pgm_hash), i, images[i].single_mip);
-    }
     for (u32 i = 0; i < info.samplers.size(); ++i) {
         const auto sharp = info.samplers[i].GetSharp(info);
-        std::printf("PS debug %016llx: samp%u mag %u min %u mip %u aniso %u same %d raw "
+        std::printf("PS debug %016llx: samp%u mag %u min %u mip %u aniso %u raw "
                     "%016llx %016llx\n",
                     static_cast<unsigned long long>(info.pgm_hash), i,
                     static_cast<u32>(sharp.xy_mag_filter.Value()),
                     static_cast<u32>(sharp.xy_min_filter.Value()),
                     static_cast<u32>(sharp.mip_filter.Value()),
                     static_cast<u32>(sharp.max_aniso.Value()),
-                    i < sampler_same_minmag.size() && sampler_same_minmag[i],
                     static_cast<unsigned long long>(sharp.raw0),
                     static_cast<unsigned long long>(sharp.raw1));
     }
@@ -1245,7 +1240,6 @@ void EmitContext::DefineImagesAndSamplers() {
             .view_type = sharp.GetViewType(image_desc.is_array),
             .is_integer = is_integer,
             .is_storage = is_storage,
-            .single_mip = !is_storage && sharp.NumViewLevels(image_desc.is_array) == 1,
             .mip_fallback_mode = mip_fallback_mode,
         });
         interfaces.push_back(id);
@@ -1266,7 +1260,6 @@ void EmitContext::DefineImagesAndSamplers() {
         Decorate(id, spv::Decoration::DescriptorSet, DescriptorSetIndex());
         Name(id, fmt::format("{}_{}{}", hw_stage, "samp", samplers.size()));
         samplers.push_back(id);
-        sampler_same_minmag.push_back(GolfSameMinMag(samp_desc.GetSharp(info)));
         interfaces.push_back(id);
     }
 }

@@ -43,11 +43,15 @@
 
 namespace Serialization {
 /* You should increment versions below once corresponding serialization scheme is changed. */
-// resogun: 8 = v_writelane and spilled SGPR reloads (golf-fix v41); 10 = relative VGPR access
-// through a private array in programs with long select chains (VgprArrayPass).
-static constexpr u32 ShaderBinaryVersion = 11u;
-static constexpr u32 ShaderMetaVersion = 10u; // resogun: images and samplers specialize on golf-fix v22's LOD 0 sampling
-static constexpr u32 PipelineKeyVersion = 6u; // resogun: Info layout (larger image and sampler lists)
+// resogun: 10 = relative VGPR access through a private array in programs with long select chains
+// (VgprArrayPass); 12 = spilled SGPR reloads resolved per lane, v_writelane lowered in IR;
+// 13 = implicit-LOD samples in divergent control flow take level 0 of single-level views.
+static constexpr u32 ShaderBinaryVersion = 13u;
+// resogun: 11 = image and sampler specializations without LOD fields (shader meta layout);
+// 12 = resource list sizes measured from the game (Info layout).
+static constexpr u32 ShaderMetaVersion = 12u;
+// resogun: 7 = resource list sizes measured from the game (Info layout).
+static constexpr u32 PipelineKeyVersion = 7u;
 } // namespace Serialization
 
 namespace Vulkan {
