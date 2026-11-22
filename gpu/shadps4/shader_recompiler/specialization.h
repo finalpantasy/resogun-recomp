@@ -79,6 +79,8 @@ struct SamplerSpecialization {
  */
 struct StageSpecialization {
     static constexpr size_t MaxStageResources = 128;
+    static_assert(NUM_BUFFERS + NUM_IMAGES + NUM_FMASKS <= MaxStageResources,
+                  "buffers, images and fmasks of one stage share the specialization bitset");
 
     const Info* info{};
     RuntimeInfo runtime_info{};

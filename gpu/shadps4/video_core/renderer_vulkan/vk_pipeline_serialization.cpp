@@ -47,9 +47,11 @@ namespace Serialization {
 // (VgprArrayPass); 12 = spilled SGPR reloads resolved per lane, v_writelane lowered in IR;
 // 13 = implicit-LOD samples in divergent control flow take level 0 of single-level views.
 static constexpr u32 ShaderBinaryVersion = 13u;
-// resogun: 11 = image and sampler specializations without LOD fields (shader meta layout).
-static constexpr u32 ShaderMetaVersion = 11u;
-static constexpr u32 PipelineKeyVersion = 6u; // resogun: Info layout (larger image and sampler lists)
+// resogun: 11 = image and sampler specializations without LOD fields (shader meta layout);
+// 12 = resource list sizes measured from the game (Info layout).
+static constexpr u32 ShaderMetaVersion = 12u;
+// resogun: 7 = resource list sizes measured from the game (Info layout).
+static constexpr u32 PipelineKeyVersion = 7u;
 } // namespace Serialization
 
 namespace Vulkan {

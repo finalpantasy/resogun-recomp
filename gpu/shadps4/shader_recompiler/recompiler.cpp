@@ -1,6 +1,9 @@
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <array>
+#include <cstdio>
+#include <mutex>
 #include "common/logging/classes.h"
 #include "shader_recompiler/frontend/control_flow_graph.h"
 #include "shader_recompiler/frontend/decode.h"
@@ -58,6 +61,30 @@ void EmitControlFlowGraph(IR::Program& program, Pools& pools, Gcn::CFG& cfg,
         }
     }
     program.post_order_blocks = Shader::IR::PostOrder(program.blocks.front());
+}
+
+// resogun: the longest resource lists one stage has needed so far, printed when one grows; the
+// NUM_* limits in resource.h are set from what the game binds.
+static void NoteResourceCounts(const Info& info) {
+    static std::mutex mutex;
+    static std::array<size_t, 4> most{};
+    const std::array<size_t, 4> now{info.buffers.size(), info.images.size(), info.samplers.size(),
+                                    info.fmasks.size()};
+    std::scoped_lock lock{mutex};
+    bool grew = false;
+    for (size_t i = 0; i < now.size(); ++i) {
+        if (now[i] > most[i]) {
+            most[i] = now[i];
+            grew = true;
+        }
+    }
+    if (grew) {
+        std::printf("Shader resources: most per stage so far %zu buffers, %zu images, %zu samplers, "
+                    "%zu fmasks (shader %016llx: %zu, %zu, %zu, %zu)\n",
+                    most[0], most[1], most[2], most[3],
+                    static_cast<unsigned long long>(info.pgm_hash), now[0], now[1], now[2],
+                    now[3]);
+    }
 }
 
 IR::Program TranslateProgram(const std::span<const u32>& code, Pools& pools, Info& info,
@@ -152,6 +179,7 @@ IR::Program TranslateProgram(const std::span<const u32>& code, Pools& pools, Inf
     }
     Shader::Optimization::DivergentLodPass(program);
     Shader::Optimization::CollectShaderInfoPass(program, profile);
+    NoteResourceCounts(program.info);
     Shader::IR::DumpProgram(program, info);
 
     return program;

@@ -12,13 +12,15 @@
 namespace Shader {
 
 static constexpr u32 NUM_USER_DATA_REGS = 16;
-// resogun: Everybody's Golf binds more images and samplers per stage than the stock limits (64,
-// 16, 8 fmasks) hold; a shader past them failed with boost::container::bad_alloc. The sizes follow
-// golf-fix v41. NUM_BUFFERS stays 40: PushData carries one byte per buffer and must fit 128 bytes.
-static constexpr u32 NUM_IMAGES = 128;
-static constexpr u32 NUM_BUFFERS = 40;
-static constexpr u32 NUM_SAMPLERS = 64;
-static constexpr u32 NUM_FMASKS = 32;
+// resogun: per-stage resource list sizes, set from Everybody's Golf's own shaders. The recompiler
+// prints the longest lists it has translated ("Shader resources: most per stage so far ...");
+// lobby, menus, course tee and a shot needed at most 13 buffers, 77 images, 16 samplers and no
+// fmasks in one stage. Each limit leaves headroom over that. Buffers, images and fmasks share one
+// specialization bitset (StageSpecialization::MaxStageResources = 128), so their sum must fit it.
+static constexpr u32 NUM_IMAGES = 88;
+static constexpr u32 NUM_BUFFERS = 32;
+static constexpr u32 NUM_SAMPLERS = 32;
+static constexpr u32 NUM_FMASKS = 8;
 
 using SharpLocation = u16;
 
