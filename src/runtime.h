@@ -68,6 +68,13 @@ int runtime_game_cheats(unsigned char *image);
  * eboot is not 1.17. */
 int runtime_game_golf_sixty(unsigned char *image);
 int runtime_game_golf_resolution(unsigned char *image);
+int runtime_game_golf_collab(unsigned char *image);
+/* The tie-in parts runtime_game_golf_collab grants (savedataIDs). */
+const uint16_t *runtime_game_golf_collab_list(size_t *count);
+/* runtime_collab.c: the shop archive's patched copy for collab_items=earn, in place of `host`. */
+void runtime_collab_redirect(const char *guest,char *host,size_t size);
+int runtime_collab_patch_archive(const unsigned char *data,size_t size,unsigned char **out,size_t *out_size,
+                                 unsigned *opened,unsigned *added);
 int runtime_game_golf_set_render_height(int height);
 int runtime_game_golf_render_height_limit(void);
 uint32_t runtime_game_wide_width(const char *name, uint32_t width, uint32_t height, uint32_t width_4k);

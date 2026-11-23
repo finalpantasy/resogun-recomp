@@ -185,7 +185,7 @@ add_executable(resogun ../src/loader.c ${RESOGUN_RUNTIME} ${RESOGUN_COMPAT} ../s
 set_target_properties(resogun PROPERTIES C_STANDARD 11 C_EXTENSIONS OFF)
 target_compile_options(resogun PRIVATE $<$<COMPILE_LANGUAGE:C>:-Wall -Wextra -Werror>)
 target_include_directories(resogun PRIVATE .. ../src)
-target_link_libraries(resogun PRIVATE resogun_gpu -pthread)
+target_link_libraries(resogun PRIVATE resogun_gpu -pthread z) # z: runtime_collab.c
 if (WIN32)
     enable_language(RC)
     target_sources(resogun PRIVATE ../res/resogun.rc)

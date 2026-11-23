@@ -76,6 +76,12 @@ void Set(Values& v, const std::string& key, const std::string& value) {
         v.skip_intro = Truthy(value);
     } else if (key == "frame_rate_priority") {
         v.startup_frame_rate_priority = v.frame_rate_priority = Truthy(value);
+    } else if (key == "collab_items") {
+        const std::string mode = Lower(value);
+        if (mode == "unlocked") v.collab_items = 1;
+        else if (mode == "earn") v.collab_items = 2;
+        else if (mode == "original") v.collab_items = 0;
+        else std::printf("Settings: collab_items=%s is not unlocked, earn or original; using unlocked\n", value.c_str());
     } else if (key == "render_height") {
         const bool listed = i == 0 || i == 1080 || i == 1440 || i == 1800 || i == 2160 || i == 2880;
         v.startup_render_height = v.render_height = listed ? i : 0;
@@ -270,6 +276,7 @@ void Load() {
         {"RESOGUN_SKIP_INTRO", "skip_intro"},     {"RESOGUN_FRAME_RATE", "frame_rate"},
         {"RESOGUN_TITLE_BACK_EXITS", "title_back_exits"},
         {"RESOGUN_FRAME_RATE_PRIORITY", "frame_rate_priority"},
+        {"RESOGUN_COLLAB_ITEMS", "collab_items"},
         {"RESOGUN_RENDER_HEIGHT", "render_height"},
         {"RESOGUN_TEXTURE_PACK", "texture_pack"}, {"RESOGUN_TEXTURE_DUMP", "texture_dump"},
         {"RESOGUN_RENDER_RESOLUTION", "render_resolution"},
@@ -335,6 +342,10 @@ extern "C" int resogun_skip_intro(void) {
 
 extern "C" int resogun_frame_rate_priority(void) {
     return ResogunSettings::Get().startup_frame_rate_priority ? 1 : 0;
+}
+
+extern "C" int resogun_collab_items(void) {
+    return ResogunSettings::Get().collab_items;
 }
 
 namespace ResogunSettings {
