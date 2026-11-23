@@ -42,7 +42,7 @@ enum : UINT { WM_JOB_LINE = WM_APP + 1, WM_JOB_PROGRESS, WM_JOB_DONE, WM_GAME_EX
 enum Id : int {
     ID_TABS = 100, ID_PLAY, ID_OPEN_FOLDER, ID_OPEN_LOGS, ID_STATUS,
     ID_BASE, ID_BASE_BROWSE, ID_UPDATE, ID_UPDATE_BROWSE, ID_DLC, ID_DLC_BROWSE, ID_SETUP, ID_SETUP_PROGRESS, ID_SETUP_STATUS,
-    ID_WINDOW, ID_SIZE, ID_RENDER, ID_SIXTY, ID_SMAA, ID_SHARPEN, ID_VSYNC, ID_HDR, ID_INTRO,
+    ID_WINDOW, ID_SIZE, ID_RENDER, ID_SIXTY, ID_SMAA, ID_SHARPEN, ID_VSYNC, ID_HDR, ID_INTRO, ID_MISSFLASH,
     ID_COLLECT, ID_TEX_COUNT, ID_SCALE, ID_BUILD, ID_TEX_PROGRESS, ID_TEX_STATUS, ID_USE_PACK,
     ID_PROFILES, ID_PROFILE_NAME, ID_PROFILE_USE, ID_PROFILE_NEW, ID_PROFILE_COPY, ID_PROFILE_RENAME,
     ID_PROFILE_DELETE, ID_PROFILE_BACKUP, ID_PROFILE_OPEN, ID_PROFILE_STATUS,
@@ -402,6 +402,7 @@ void check(int id, bool on) { SendMessageW(controls[id], BM_SETCHECK, on ? BST_C
 struct Choice { const wchar_t* label; const char* value; };
 // Next start; Earn in game sells them in the shop's coin tab for 1500 to 2500 coins.
 const std::vector<Choice> collab_modes = {{L"All unlocked", "unlocked"}, {L"Earn in game", "earn"}, {L"Original", "original"}};
+const std::vector<Choice> miss_flash_modes = {{L"Off", "0"}, {L"On (original)", "1"}};
 const std::vector<Choice> window_modes = {{L"Borderless window (recommended)", "borderless"}, {L"Fullscreen", "fullscreen"}, {L"Window", "windowed"}};
 const std::vector<Choice> sizes = {{L"1280 x 720", "1280x720"}, {L"1600 x 900", "1600x900"}, {L"1920 x 1080", "1920x1080"},
                                    {L"2560 x 1440", "2560x1440"}, {L"3840 x 2160", "3840x2160"}};
@@ -1167,10 +1168,13 @@ void create_controls() {
     add(PageDisplay, L"BUTTON", L"VSync", BS_AUTOCHECKBOX | WS_TABSTOP, 30, 280, 560, 22, ID_VSYNC);
     add(PageDisplay, L"BUTTON", L"HDR (needs Windows HDR on)", BS_AUTOCHECKBOX | WS_TABSTOP, 30, 308, 560, 22, ID_HDR);
     add(PageDisplay, L"BUTTON", L"Skip the start-up logos", BS_AUTOCHECKBOX | WS_TABSTOP, 30, 336, 560, 22, ID_INTRO);
+    // settings.ini miss_shot_flash: the game's inverted full-screen flash on a missed swing (gpu/shim/resogun_miss_flash.h).
+    add(PageDisplay, L"STATIC", L"Miss-shot flash", SS_LEFT, 30, 368, 160, 22);
+    add(PageDisplay, WC_COMBOBOXW, L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 200, 364, 300, 200, ID_MISSFLASH);
     add(PageDisplay, L"STATIC", L"Changes are saved at once. In the game, press F10 or hold Options for 2 seconds for Display Settings: window, "
         L"vsync, render resolution (up to 1800 lines), SMAA, sharpening and HD textures change at once; 60 FPS mode and HDR "
         L"take effect at the next start.",
-        SS_LEFT, 30, 368, 580, 52);
+        SS_LEFT, 30, 400, 580, 52);
     // HD textures
     add(PageTextures, L"STATIC", L"HD textures are made on this PC from your own game: the game saves each texture it uses while you play, "
                       L"then Real-ESRGAN upscales them on your GPU into a pack the game loads instead.",
@@ -1212,6 +1216,7 @@ void create_controls() {
     check(ID_UPNP, prefs.get("upnp", "0") == "1");
 
     fill_combo(ID_WINDOW, window_modes, settings.get("display_mode", "borderless"));
+    fill_combo(ID_MISSFLASH, miss_flash_modes, settings.get("miss_shot_flash", "0") == "1" ? "1" : "0");
     fill_combo(ID_COLLAB, collab_modes, settings.get("collab_items", "unlocked"));
     fill_combo(ID_SIZE, sizes, settings.get("output_resolution", "1920x1080"));
     fill_combo(ID_RENDER, renders, settings.get("render_height", "0"));
@@ -1259,6 +1264,7 @@ void on_command(int id, int code) {
     case ID_INVITE:
         online_command(id, code);
         return;
+    case ID_MISSFLASH: if (code == CBN_SELCHANGE) set_setting("miss_shot_flash", combo_value(ID_MISSFLASH, miss_flash_modes)); break;
     case ID_COLLAB: if (code == CBN_SELCHANGE) set_setting("collab_items", combo_value(ID_COLLAB, collab_modes)); break;
     case ID_WINDOW: if (code == CBN_SELCHANGE) set_setting("display_mode", combo_value(ID_WINDOW, window_modes)); break;
     case ID_SIZE: if (code == CBN_SELCHANGE) set_setting("output_resolution", combo_value(ID_SIZE, sizes)); break;
@@ -1406,7 +1412,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
     wc.hbrBackground = GetSysColorBrush(COLOR_WINDOW);
     wc.lpszClassName = L"EverybodysGolfLauncher";
     RegisterClassExW(&wc);
-    RECT r{0, 0, px(640), px(430)};
+    RECT r{0, 0, px(640), px(462)};
     DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_CLIPCHILDREN;
     AdjustWindowRect(&r, style, FALSE);
     window = CreateWindowExW(0, wc.lpszClassName, kTitle, style, CW_USEDEFAULT, CW_USEDEFAULT, r.right - r.left, r.bottom - r.top,

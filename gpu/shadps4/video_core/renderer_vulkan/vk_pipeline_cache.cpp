@@ -11,6 +11,7 @@
 #include <ranges>
 #include <string>
 #include <unordered_set>
+#include "resogun_miss_flash.h"
 #include "resogun_overlay.h"
 #include "resogun_threads.h"
 #include "resogun_toggles.h"
@@ -970,16 +971,25 @@ GraphicsPipeline* PipelineCache::DeferGraphicsPipeline() {
     return published;
 }
 
-// resogun game fix (Everybody's Golf): at club impact the game draws a full-screen quad with
-// pixel shader 0x76f7a64f and blend ONE_MINUS_DST_COLOR, ZERO, which inverts the whole frame
-// including the HUD for about 30 frames. The effect is not visible on a real PS4 and the root
-// cause is not found (the blend registers and vertex swizzle decode as the game set them; its
-// constant buffer is all zero when the draw records), so the draw is skipped. RESOGUN_KEEP_76F7=1
-// draws it again.
+extern "C" int resogun_miss_shot_flash(void); // gpu/resogun_gpu.h
+
+// resogun game fix (Everybody's Golf): when a swing is judged a miss the game draws a full-screen
+// quad with pixel shader 0x76f7a64f and blend ONE_MINUS_DST_COLOR, ZERO for 30 game ticks, which
+// inverts the whole frame including the HUD. It is the game's own miss-shot effect (the flag is set
+// only when the shot's timing class is a miss, together with the AfterMissSwing animation).
+// settings.ini miss_shot_flash=1 (RESOGUN_MISS_SHOT_FLASH) draws it; off (default) skips it. The
+// shader has other uses with other blends, which stay skipped as before (resogun_miss_flash.h).
 static bool IsImpactInvertDraw(const GraphicsPipeline* pipeline) {
-    static const bool keep = std::getenv("RESOGUN_KEEP_76F7") != nullptr;
-    return !keep && pipeline &&
-           pipeline->GetStage(Shader::SwStage::Fragment).pgm_hash == 0x76f7a64full;
+    if (!pipeline) {
+        return false;
+    }
+    const u64 hash = pipeline->GetStage(Shader::SwStage::Fragment).pgm_hash;
+    if (hash != ResogunMissFlash::ImpactShaderHash) {
+        return false;
+    }
+    u32 blend0 = 0;
+    std::memcpy(&blend0, &pipeline->GetGraphicsKey().blend_controls[0], sizeof(blend0));
+    return ResogunMissFlash::SkipImpactInvert(hash, blend0, resogun_miss_shot_flash() != 0);
 }
 
 const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectParams params,

@@ -146,6 +146,15 @@
         { "label": "Show them", "set": { "skip_intro": "0" } }
       ],
       "defaults": { "skip_intro": "1" }
+    },
+    {
+      "id": "miss_shot_flash", "label": "Miss-shot flash",
+      "help": "The game's inverted full-screen flash when a swing is judged a miss.",
+      "choices": [
+        { "label": "Off", "set": { "miss_shot_flash": "0" } },
+        { "label": "On (original)", "set": { "miss_shot_flash": "1" } }
+      ],
+      "defaults": { "miss_shot_flash": "0" }
     }
   ],
   "actions": [

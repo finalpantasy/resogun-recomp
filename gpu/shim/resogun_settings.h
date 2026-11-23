@@ -183,6 +183,9 @@ struct Values {
     /// Back (Circle) on the title screen asks whether to close the game (src/runtime_pad.c and
     /// the overlay's exit prompt); read at each press. On by default.
     std::atomic<bool> title_back_exits{true};
+    /// Everybody's Golf: the full-screen inverted flash the game draws when a swing is judged a miss
+    /// (resogun_miss_flash.h). Off by default; read at each draw of that shader.
+    std::atomic<bool> miss_shot_flash{false};
     /// The game's frame rate: 30, 60, 90, 120, 144 or 180 (ResogunGraphics::FrameRates). The PS4 vblank
     /// (videoout driver) and the engine's target frame rate (src/runtime_game.c, at each flip)
     /// follow it, so the game speed stays the same; the Display Settings panel changes it live.

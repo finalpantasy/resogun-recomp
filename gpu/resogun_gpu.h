@@ -52,6 +52,9 @@ void resogun_exit_prompt_open(void);
 /* settings.ini title_back_exits (RESOGUN_TITLE_BACK_EXITS, default on): Back on the title screen
  * opens the exit prompt (runtime_pad.c). Any thread. */
 int resogun_title_back_exits(void);
+/* settings.ini miss_shot_flash (RESOGUN_MISS_SHOT_FLASH, default off): 1 draws the inverted
+ * full-screen flash the game shows on a missed swing. Any thread. */
+int resogun_miss_shot_flash(void);
 /* Ends the game as closing its window does (any thread). */
 void resogun_gpu_request_quit(void);
 /* 1 when settings.ini render_resolution (RESOGUN_RENDER_RESOLUTION) is 4k: the game runs in PS4
