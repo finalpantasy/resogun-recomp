@@ -978,7 +978,9 @@ extern "C" int resogun_miss_shot_flash(void); // gpu/resogun_gpu.h
 // inverts the whole frame including the HUD. It is the game's own miss-shot effect (the flag is set
 // only when the shot's timing class is a miss, together with the AfterMissSwing animation).
 // settings.ini miss_shot_flash=1 (RESOGUN_MISS_SHOT_FLASH) draws it; off (default) skips it. The
-// shader has other uses with other blends, which stay skipped as before (resogun_miss_flash.h).
+// same shader also draws the title and menu screen fades (blend SRC_ALPHA, ONE_MINUS_SRC_ALPHA),
+// which always draw; its other blends (one draw seen per boot, blending off, effect unknown) stay skipped
+// (resogun_miss_flash.h).
 static bool IsImpactInvertDraw(const GraphicsPipeline* pipeline) {
     if (!pipeline) {
         return false;
