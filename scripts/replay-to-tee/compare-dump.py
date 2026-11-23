@@ -1,18 +1,18 @@
-"""Compare two 1920x1080 BGRA frame dumps (the newest display_*.raw in each folder or a file).
-Usage: python -I compare-dump.py A B   -> mean abs diff per channel and the share of pixels differing by more than 24."""
-import sys, glob, os
-def load(p):
-    if os.path.isdir(p): p = sorted(glob.glob(os.path.join(p, 'display_*.raw')))[-1]
-    return open(p, 'rb').read(), p
-import array
-a, pa = load(sys.argv[1]); b, pb = load(sys.argv[2])
-n = min(len(a), len(b)) // 4
-try:
-    import numpy as np
-    x = np.frombuffer(a[:n*4], np.uint8).reshape(-1, 4)[:, :3].astype(int); y = np.frombuffer(b[:n*4], np.uint8).reshape(-1, 4)[:, :3].astype(int)
-    d = abs(x - y); print(f"{pa} vs {pb}: sizes {len(a)} {len(b)} mean {d.mean():.3f} big {(d.max(axis=1) > 24).mean()*100:.3f}%")
-except ImportError:
-    s = big = 0
-    for i in range(0, n*4, 4*7):
-        m = max(abs(a[i+k]-b[i+k]) for k in range(3)); s += m; big += m > 24
-    c = len(range(0, n*4, 28)); print(f"{pa} vs {pb}: sizes {len(a)} {len(b)} mean-max {s/c:.3f} big {big/c*100:.3f}% (sampled)")
+"""Compare two 1920x1080 BGRA frame dumps of the Set Up Tee Shot view.
+Usage: python -I compare-dump.py A.raw B.raw
+Prints the mean abs diff (0-255) over two sets of regions: HUD (hole badge, par, player cards: static), and scenery
+(trees, hills, sky: static but lit by a random time of day / weather, so it can differ between boots).
+The golfers on the tee, the ball, the wind arrow and the menu are left out."""
+import sys
+HUD = [(20, 230, 10, 90), (40, 140, 520, 800)]
+SCENERY = [(390, 690, 120, 300), (1200, 1680, 180, 330), (700, 1100, 40, 110)]  # x0, x1, y0, y1
+a, b = (open(p, 'rb').read() for p in sys.argv[1:3])
+def diff(regions):
+    tot = n = 0
+    for x0, x1, y0, y1 in regions:
+        for y in range(y0, y1, 2):
+            for x in range(x0, x1, 2):
+                o = (y * 1920 + x) * 4
+                tot += sum(abs(a[o + k] - b[o + k]) for k in range(3)) / 3; n += 1
+    return tot / n
+print(f"HUD diff {diff(HUD):.2f}  scenery diff {diff(SCENERY):.2f}")

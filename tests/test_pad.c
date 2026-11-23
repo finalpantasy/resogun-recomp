@@ -98,7 +98,7 @@ static void test_replay(void) {
     const char *path="test_pad_replay.tmp";
     FILE *f=fopen(path,"w");
     assert(f);
-    fprintf(f,"# pad record v1%c10 16384 128 128 128 128 0 0%c20 0 255 128 128 128 0 0%c",10,10,10);
+    fprintf(f,"# pad record v1%c10 16384 128 128 128 128 0 0%cS 18 testsync%c20 0 255 128 128 128 0 0%c",10,10,10,10);
     fclose(f);
     #ifdef _WIN32
     _putenv_s("RESOGUN_PAD_REPLAY",path);
@@ -106,6 +106,11 @@ static void test_replay(void) {
     setenv("RESOGUN_PAD_REPLAY",path,1);
 #endif
     fake_flips=1000;
+#ifdef _WIN32
+    _putenv_s("RESOGUN_PAD_SYNC",".");
+#else
+    setenv("RESOGUN_PAD_SYNC",".",1);
+#endif
     PadData d;
     memset(&d,0,sizeof(d));
     d.buttons=BTN_SQUARE; d.left_x=d.left_y=d.right_x=d.right_y=128;
@@ -113,11 +118,17 @@ static void test_replay(void) {
     assert(replay_sample(&d) && replay_count==2 && d.buttons==0); /* before the first line: neutral */
     d.buttons=BTN_SQUARE;
     fake_flips=1010; assert(replay_sample(&d) && d.buttons==16384 && d.left_x==128);
-    fake_flips=1019; assert(replay_sample(&d) && d.buttons==16384);
-    fake_flips=1020; assert(replay_sample(&d) && d.buttons==0 && d.left_x==255);
-    fake_flips=1020+REPLAY_TAIL; assert(replay_sample(&d) && d.left_x==255);
+        fake_flips=1017; assert(replay_sample(&d) && d.buttons==16384);
     d.buttons=BTN_SQUARE;
-    fake_flips=1021+REPLAY_TAIL; assert(!replay_sample(&d) && d.buttons==BTN_SQUARE && replay_armed==2);
+    fake_flips=1018; assert(!replay_sample(&d) && d.buttons==BTN_SQUARE); /* waits: real input is live */
+    fake_flips=1090; assert(!replay_sample(&d));
+    FILE *g=fopen("testsync","w"); assert(g); fclose(g);
+    fake_flips=1100; assert(replay_sample(&d) && d.buttons==16384); /* synced: flip 18 again */
+    fake_flips=1102; assert(replay_sample(&d) && d.buttons==0 && d.left_x==255);
+    remove("testsync");
+    fake_flips=1102+REPLAY_TAIL; assert(replay_sample(&d) && d.left_x==255);
+    d.buttons=BTN_SQUARE;
+    fake_flips=1103+REPLAY_TAIL; assert(!replay_sample(&d) && d.buttons==BTN_SQUARE && replay_armed==2);
     remove(path);
 }
 

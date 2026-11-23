@@ -562,12 +562,21 @@ static void record_sample(const PadData *d) {
             s.axes[1],s.axes[2],s.axes[3],s.l2,s.r2);
     fflush(record_file);
 }
-static PadSample *replay; static size_t replay_count, replay_next;
+/* Resync points, "S <flip> <name>" lines: when the replay reaches that flip it hands the pad back to real input and logs
+ * "pad replay waiting for <name>" until the file $RESOGUN_PAD_SYNC/<name> exists (a test harness makes it
+ * once the screen the recording was at shows), then continues with the flips after it counted from now. */
+#define SYNC_MAX 32
+static struct { uint64_t flip; char name[48]; } sync_pt[SYNC_MAX];
+static size_t sync_count, sync_next;
 static size_t replay_parse(FILE *f, PadSample **out) {
     PadSample *v=NULL; size_t n=0, cap=0;
     char line[256];
     while (fgets(line,sizeof(line),f)) {
         unsigned long long fl; unsigned a[7];
+        if (line[0]=='S' && sync_count<SYNC_MAX && sscanf(line,"S %llu %47s",&fl,sync_pt[sync_count].name)==2) {
+            sync_pt[sync_count++].flip=fl;
+            continue;
+        }
         if (line[0]=='#' || sscanf(line,"%llu %u %u %u %u %u %u %u",&fl,&a[0],&a[1],&a[2],&a[3],&a[4],&a[5],&a[6])!=8) continue;
         if (n==cap && !(v=realloc(v,(cap=cap ? cap*2 : 1024)*sizeof(*v)))) { n=0; break; }
         v[n++]=(PadSample){fl,a[0],{(uint8_t)a[1],(uint8_t)a[2],(uint8_t)a[3],(uint8_t)a[4]},(uint8_t)a[5],(uint8_t)a[6]};
@@ -575,6 +584,7 @@ static size_t replay_parse(FILE *f, PadSample **out) {
     *out=v;
     return n;
 }
+static PadSample *replay; static size_t replay_count, replay_next;
 /* Overwrites d with the recorded state; false once the recording is over (real input is back). */
 static bool replay_sample(PadData *d) {
     if (!replay_armed) return false;
@@ -593,7 +603,22 @@ static bool replay_sample(PadData *d) {
         replay_next=0;
     }
     if (replay_armed==2) return false;
-    const uint64_t flip=resogun_gpu_flips()-base;
+    uint64_t flip=resogun_gpu_flips()-base;
+    static uint64_t logged;
+    if (flip/120!=logged) { logged=flip/120; printf("Runtime: pad replay at flip %llu\n",(unsigned long long)flip); }
+    if (sync_next<sync_count && flip>=sync_pt[sync_next].flip) {
+        const char *dir=getenv("RESOGUN_PAD_SYNC");
+        char path[512]; snprintf(path,sizeof(path),"%s/%s",dir ? dir : ".",sync_pt[sync_next].name);
+        FILE *f=dir ? fopen(path,"r") : NULL;
+        static size_t announced=(size_t)-1;
+        if (f) { fclose(f); printf("Runtime: pad replay synced at %s (flip %llu)\n",sync_pt[sync_next].name,(unsigned long long)flip); base=resogun_gpu_flips()-sync_pt[sync_next].flip; ++sync_next; }
+        else {
+            if (announced!=sync_next) { announced=sync_next; printf("Runtime: pad replay waiting for %s at flip %llu\n",sync_pt[sync_next].name,(unsigned long long)flip); }
+            base=resogun_gpu_flips()-sync_pt[sync_next].flip; /* the clock stands still */
+            return false; /* real input stays live while it waits (a harness can press through a title screen) */
+        }
+        flip=resogun_gpu_flips()-base;
+    }
     while (replay_next<replay_count && replay[replay_next].flip<=flip) ++replay_next;
     if (!replay_count || (replay_next==replay_count && flip>replay[replay_count-1].flip+REPLAY_TAIL)) {
         printf("Runtime: pad replay finished at flip %llu; real input is back\n",(unsigned long long)flip);
