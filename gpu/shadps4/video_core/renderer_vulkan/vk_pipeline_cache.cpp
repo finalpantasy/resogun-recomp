@@ -758,6 +758,7 @@ void PipelineCache::PublishShaders(bool wait) {
             disk_stats.compiled += DiskShadersActive();
             build->module = nullptr;
         }
+        ResolvePermutationAlias(hash, *program, build->permutation);
         retire();
     }
 }
@@ -875,6 +876,14 @@ void PipelineCache::ReportCompilerStats() {
                         shaders ? module_ns / 1e6 / shaders : 0.0);
         }
         GraphicsPipelineLibraries::Report();
+        if (alias_stats.resolved) {
+            std::printf("Permutation aliases: %u of %u new permutations share an earlier one's "
+                        "pipelines (identical SPIR-V); %u more have identical SPIR-V but other "
+                        "runtime info or fetch shader; %u stored SPIR-V reads\n",
+                        alias_stats.aliased, alias_stats.resolved,
+                        alias_stats.same_spirv_other_state, alias_stats.disk_reads);
+            alias_stats = {};
+        }
         std::printf("Compiler stats: capture queue %zu, compile queue %zu; queue waits: capture "
                     "%.1f ms, compile %.1f ms; pools retained %zu, reused %u; pipelines built "
                     "behind their draws %llu\n",
@@ -1508,7 +1517,7 @@ PipelineCache::Result PipelineCache::GetProgram(PipelineSelection& sel, HwStage 
         worker.stages.push_back(
             {program, params.hash, hw_stage, info.pgm_base, &info.flattened_ud_buf});
         return std::make_tuple(&info, it->module, it->spec.fetch_shader_data,
-                               HashCombine(params.hash, perm_idx));
+                               HashCombine(params.hash, program->KeyPermutation(perm_idx)));
     }
 
     auto it_pgm = program_cache.find(params.hash); // this thread is the only writer
@@ -1672,14 +1681,18 @@ PipelineCache::Result PipelineCache::GetProgram(PipelineSelection& sel, HwStage 
 
         RegisterShaderMeta(info, spec.fetch_shader_data, spec, perm_hash, perm_idx);
         disk_stats.compiled += DiskShadersActive();
-        std::unique_lock lk{programs_mutex};
-        program->InsertPermut(module, std::move(spec), perm_idx);
+        {
+            std::unique_lock lk{programs_mutex};
+            program->InsertPermut(module, std::move(spec), perm_idx);
+        }
+        ResolvePermutationAlias(params.hash, *program, perm_idx);
     } else {
         info.AddBindings(binding);
         module = it->module;
         perm_idx = std::distance(program->modules.begin(), it);
-        perm_hash = HashCombine(params.hash, perm_idx);
     }
+    // resogun: permutations with identical SPIR-V share a pipeline key (ResolvePermutationAlias).
+    perm_hash = HashCombine(params.hash, program->KeyPermutation(perm_idx));
     return std::make_tuple(&program->info, module,
                            program->modules[perm_idx].spec.fetch_shader_data, perm_hash);
 }

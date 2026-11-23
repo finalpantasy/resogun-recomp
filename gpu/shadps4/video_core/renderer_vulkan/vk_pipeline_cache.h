@@ -49,11 +49,17 @@ struct AsyncGraphicsCompilation;
 struct DeferredGraphicsBuild;
 
 struct Program {
+    static constexpr u32 NoAlias = ~0u;
     struct Module {
         vk::ShaderModule module;
         Shader::StageSpecialization spec;
         /// resogun: saved in the disk store, module not created yet (PipelineCache::CreateDiskModule)
         bool on_disk = false;
+        /// resogun: XXH3 of the SPIR-V, 0 while unknown (PipelineCache::ResolvePermutationAlias).
+        u64 content = 0;
+        /// resogun: the permutation whose stage hash pipelines use for this one (identical
+        /// SPIR-V, runtime info and fetch shader); NoAlias until resolved, which means itself.
+        u32 alias = NoAlias;
     };
     static constexpr size_t MaxPermutations = 8;
     using ModuleList = boost::container::small_vector<Module, MaxPermutations>;
@@ -78,6 +84,13 @@ struct Program {
     Program() = default;
     Program(Shader::HwStage stage, Shader::SwStage l_stage, Shader::ShaderParams params)
         : info{stage, l_stage, params} {}
+
+    /// resogun: the permutation index pipeline keys use for `perm_idx` (itself unless aliased).
+    [[nodiscard]] size_t KeyPermutation(size_t perm_idx) const {
+        return perm_idx < modules.size() && modules[perm_idx].alias != NoAlias
+                   ? modules[perm_idx].alias
+                   : perm_idx;
+    }
 
     void AddPermut(vk::ShaderModule module, Shader::StageSpecialization&& spec) {
         modules.emplace_back(module, std::move(spec));
@@ -312,6 +325,13 @@ private:
     bool LoadDiskProgram(u64 hash);
     /// Creates the module of a saved permutation on its first use. False leaves the slot empty.
     bool CreateDiskModule(u64 hash, Program& program, size_t perm_idx);
+    /// resogun: once a permutation has its module, points it at the lowest permutation of the
+    /// program with byte-identical SPIR-V, runtime info and fetch shader, so their draws share
+    /// one pipeline key and the driver compiles it once. GPU thread.
+    void ResolvePermutationAlias(u64 hash, Program& program, size_t perm_idx);
+    struct {
+        u32 resolved = 0, aliased = 0, same_spirv_other_state = 0, disk_reads = 0;
+    } alias_stats{};
     /// Index for a new permutation: a slot the store left empty, else the next one.
     [[nodiscard]] size_t NewPermutationIndex(const Program& program) const;
     /// False when this pipeline key is already in the store (nothing to write).
