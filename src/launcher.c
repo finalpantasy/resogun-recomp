@@ -338,6 +338,7 @@ static const Setting settings[] = {
     {"--buffer-stats", "BUFFER_STATS", 0},
     {"--capture-dir", "CAPTURE_DIR", 1},
     {"--capture-trigger", "CAPTURE_TRIGGER", 1},
+    {"--collab-items", "COLLAB_ITEMS", 0},
     {"--config-default", "CONFIG_DEFAULT", 1},
     {"--config", "CONFIG", 1},
     {"--copy-gpu-buffers", "COPY_GPU_BUFFERS", 0},

@@ -83,6 +83,7 @@ if [[ ${1:-} == --test ]]; then
     run_test json tests/test_json.c
     run_test ngs2 tests/test_ngs2.c -lm
     run_test wide tests/test_wide.c -lm
+    run_test collab tests/test_collab.c -lz
     run_test fiber tests/test_fiber.c
     run_test threadcalls tests/test_threadcalls.c "${compat[@]}"
     run_test net tests/test_net.c "${compat[@]}" "${net[@]}"

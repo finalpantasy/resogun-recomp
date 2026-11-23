@@ -47,6 +47,7 @@ enum Id : int {
     ID_PROFILES, ID_PROFILE_NAME, ID_PROFILE_USE, ID_PROFILE_NEW, ID_PROFILE_COPY, ID_PROFILE_RENAME,
     ID_PROFILE_DELETE, ID_PROFILE_BACKUP, ID_PROFILE_OPEN, ID_PROFILE_STATUS,
     ID_ONLINE_NAME, ID_ONLINE_MODE, ID_ONLINE_PORT, ID_ONLINE_HOST, ID_SERVER, ID_UPNP, ID_INVITE, ID_ONLINE_STATUS,
+    ID_COLLAB,
 };
 // The pages, in tab order.
 enum Page : int { PagePlay, PageDisplay, PageSaves, PageTextures, PageOnline, PageFiles, PageCount };
@@ -399,6 +400,8 @@ bool checked(int id) { return SendMessageW(controls[id], BM_GETCHECK, 0, 0) == B
 void check(int id, bool on) { SendMessageW(controls[id], BM_SETCHECK, on ? BST_CHECKED : BST_UNCHECKED, 0); }
 
 struct Choice { const wchar_t* label; const char* value; };
+// Next start; Earn in game sells them in the shop's coin tab for 1500 to 2500 coins.
+const std::vector<Choice> collab_modes = {{L"All unlocked", "unlocked"}, {L"Earn in game", "earn"}, {L"Original", "original"}};
 const std::vector<Choice> window_modes = {{L"Borderless window (recommended)", "borderless"}, {L"Fullscreen", "fullscreen"}, {L"Window", "windowed"}};
 const std::vector<Choice> sizes = {{L"1280 x 720", "1280x720"}, {L"1600 x 900", "1600x900"}, {L"1920 x 1080", "1920x1080"},
                                    {L"2560 x 1440", "2560x1440"}, {L"3840 x 2160", "3840x2160"}};
@@ -1127,9 +1130,12 @@ void create_controls() {
     add(PageSaves, L"BUTTON", L"New empty save", BS_PUSHBUTTON | WS_TABSTOP, 280, 256, 120, 28, ID_PROFILE_NEW);
     add(PageSaves, L"BUTTON", L"Copy selected", BS_PUSHBUTTON | WS_TABSTOP, 406, 256, 100, 28, ID_PROFILE_COPY);
     add(PageSaves, L"BUTTON", L"Rename", BS_PUSHBUTTON | WS_TABSTOP, 512, 256, 98, 28, ID_PROFILE_RENAME);
-    add(PageSaves, L"STATIC", L"", SS_LEFT, 30, 300, 580, 40, ID_PROFILE_STATUS);
+    add(PageSaves, L"STATIC", L"", SS_LEFT, 30, 296, 580, 36, ID_PROFILE_STATUS);
+    // settings.ini collab_items: the tie-in outfits no add-on grants (src/runtime_game.c, runtime_collab.c).
+    add(PageSaves, L"STATIC", L"Collab outfits", SS_LEFT, 30, 342, 160, 22);
+    add(PageSaves, WC_COMBOBOXW, L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 200, 338, 300, 200, ID_COLLAB);
     add(PageSaves, L"STATIC", L"Back up copies a save to data\\backups. Saves stay in data\\save (Main) and data\\saves.",
-        SS_LEFT, 30, 350, 580, 40);
+        SS_LEFT, 30, 376, 580, 40);
     // Game files
     add(PageFiles, L"STATIC", L"Your decrypted dump of Everybody's Golf (CUSA04687): the folder with eboot.bin and sce_sys.",
         SS_LEFT, 30, 50, 580, 20);
@@ -1206,6 +1212,7 @@ void create_controls() {
     check(ID_UPNP, prefs.get("upnp", "0") == "1");
 
     fill_combo(ID_WINDOW, window_modes, settings.get("display_mode", "borderless"));
+    fill_combo(ID_COLLAB, collab_modes, settings.get("collab_items", "unlocked"));
     fill_combo(ID_SIZE, sizes, settings.get("output_resolution", "1920x1080"));
     fill_combo(ID_RENDER, renders, settings.get("render_height", "0"));
     fill_combo(ID_SCALE, scales, "2");
@@ -1252,6 +1259,7 @@ void on_command(int id, int code) {
     case ID_INVITE:
         online_command(id, code);
         return;
+    case ID_COLLAB: if (code == CBN_SELCHANGE) set_setting("collab_items", combo_value(ID_COLLAB, collab_modes)); break;
     case ID_WINDOW: if (code == CBN_SELCHANGE) set_setting("display_mode", combo_value(ID_WINDOW, window_modes)); break;
     case ID_SIZE: if (code == CBN_SELCHANGE) set_setting("output_resolution", combo_value(ID_SIZE, sizes)); break;
     case ID_RENDER:

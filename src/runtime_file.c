@@ -108,6 +108,7 @@ static int translate(const char *guest,char *out,size_t size) {
     else if ((size_t)snprintf(out,size,"%s%s",m->host,buffer+best)>=size) result=ENAMETOOLONG;
     pthread_mutex_unlock(&lock);
     if (result==ENOENT) fprintf(stderr,"Runtime: no mount for guest path %s\n",guest);
+    if (!result) runtime_collab_redirect(buffer,out,size); /* collab_items=earn: the shop's stock */
     return result;
 }
 static int host_flags(int flags) {

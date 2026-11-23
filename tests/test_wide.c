@@ -14,6 +14,8 @@
 
 int resogun_frame_rate(void) { return 60; }
 int resogun_frame_rate_priority(void) { return 0; }
+static int collab_option = 1;
+int resogun_collab_items(void) { return collab_option; }
 void resogun_set_frame_rate(int rate) { (void)rate; }
 int resogun_cheats(void) { return 0; }
 int resogun_game_held(void) { return 0; }
@@ -53,6 +55,81 @@ static int close_to(float a, float b) { return fabsf(a - b) < 1e-4f; }
 
 typedef uint32_t (ABI *CreateTarget)(void *self, const char *name, uint32_t format, uint32_t width, uint32_t height, void *options);
 typedef uint32_t (ABI *CreateDepth)(void *self, const char *name, uint32_t width, uint32_t height, uint32_t a, void *options);
+
+
+/* The collab grant: stand-ins for the entitlement update (0xc74f90: its prologue, then returns 7)
+ * and the item grant (0xcd0250: its first 13 bytes, then collab_grant_seen), a two-node item tree
+ * and a save object. */
+static unsigned char *collab_save;
+static uint32_t collab_seen[8];
+static unsigned collab_seen_count;
+static ABI void collab_grant_seen(unsigned char *record, uint32_t owned, uint32_t count) {
+    uint32_t id;
+    memcpy(&id, record + 4, 4);
+    assert(owned == 1 && count == 1 && collab_seen_count < 8);
+    collab_seen[collab_seen_count++] = id;
+    collab_save[0x3723e8 + (size_t)id * 0x44] = 3;
+}
+static unsigned char *collab_node(uint32_t id) {
+    unsigned char *node = calloc(1, 0xc0);
+    assert(node);
+    memcpy(node + 0x24, &id, 4);
+    return node;
+}
+static void collab_link(unsigned char *node, int at, unsigned char *to) { memcpy(node + at, &to, sizeof to); }
+static void test_collab(void) {
+    const size_t size = 0x2c7d000;
+    unsigned char *image = runtime_low_map(size, 0);
+    assert(image);
+    memset(image, 0xcc, size);
+    clock_foreign = 1;
+    assert(!runtime_game_golf_collab(image)); /* not eboot 1.17 */
+    static const unsigned char update[] = {0x55, 0x48, 0x89, 0xe5, 0x41, 0x57, 0x41, 0x56, 0x41, 0x55, 0x41, 0x54, 0x53,
+                                           0x48, 0x81, 0xec, 0xa8, 0x00, 0x00, 0x00,
+                                           0xb8, 0x07, 0x00, 0x00, 0x00, 0x48, 0x81, 0xc4, 0xa8, 0x00, 0x00, 0x00,
+                                           0x5b, 0x41, 0x5c, 0x41, 0x5d, 0x41, 0x5e, 0x41, 0x5f, 0x5d, 0xc3};
+    memcpy(image + 0xc74f90, update, sizeof update);
+    unsigned char grant[64] = {0x55, 0x48, 0x89, 0xe5, 0x41, 0x57, 0x41, 0x56, 0x41, 0x55, 0x41, 0x54, 0x53,
+                               0x48, 0x83, 0xec, 0x08, 0x48, 0xb8};                  /* sub rsp,8; mov rax, */
+    const uint64_t seen = (uint64_t)(uintptr_t)collab_grant_seen;
+    memcpy(grant + 19, &seen, 8);
+    static const unsigned char grant_tail[] = {0xff, 0xd0, 0x48, 0x83, 0xc4, 0x08, /* call rax; add rsp,8 */
+                                               0x5b, 0x41, 0x5c, 0x41, 0x5d, 0x41, 0x5e, 0x41, 0x5f, 0x5d, 0xc3};
+    memcpy(grant + 27, grant_tail, sizeof grant_tail);
+    memcpy(image + 0xcd0250, grant, sizeof grant);
+    const int32_t rel = (int32_t)(0xcd0250 - (0xc7522a + 5));
+    image[0xc7522a] = 0xe8;
+    memcpy(image + 0xc7522b, &rel, 4);
+    collab_option = 2;
+    assert(!runtime_game_golf_collab(image)); /* earn: the shop sells them instead */
+    collab_option = 0;
+    assert(!runtime_game_golf_collab(image)); /* the option off: untouched */
+    assert(!memcmp(image + 0xc74f90, update, sizeof update));
+    collab_option = 1;
+    assert(runtime_game_golf_collab(image));
+    /* Tree 3: root b (Jibanyan, 8984) with left child a (Cactuar cap-01, 8929); the header is the nil. */
+    unsigned char *trees = calloc(42, 24), *header = collab_node(0), *a = collab_node(8929), *b = collab_node(8984);
+    assert(trees);
+    header[0x19] = 1;
+    collab_link(header, 0, a); collab_link(header, 8, b); collab_link(header, 0x10, b);
+    collab_link(a, 0, header); collab_link(a, 8, b); collab_link(a, 0x10, header);
+    collab_link(b, 0, a); collab_link(b, 8, header); collab_link(b, 0x10, header);
+    collab_link(trees, 3 * 24 + 8, header);
+    collab_save = calloc(1, 0x3723e8 + 30000 * 0x44);
+    assert(collab_save);
+    collab_save[0x3723e8 + 8984 * 0x44] = 0;
+    collab_save[0x3723e8 + 8953 * 0x44] = 4; /* owned already: not looked up */
+    memcpy(image + 0x2c7cc70, &trees, sizeof trees);
+    typedef int (ABI *Update)(void *self);
+    memset(image + 0x2c6b648, 0, 8);
+    assert(((Update)(void *)(image + 0xc74f90))(NULL) == 7);
+    assert(collab_seen_count == 0); /* no save object yet */
+    memcpy(image + 0x2c6b648, &collab_save, sizeof collab_save);
+    assert(((Update)(void *)(image + 0xc74f90))(NULL) == 7);
+    assert(collab_seen_count == 2 && collab_seen[0] == 8929 && collab_seen[1] == 8984);
+    assert(((Update)(void *)(image + 0xc74f90))(NULL) == 7); /* both owned now: nothing more */
+    assert(collab_seen_count == 2);
+}
 
 int main(void) {
     /* 21:9 at 2560x1080: 5120 at 2160 lines, so x4/3. */
@@ -165,6 +242,8 @@ int main(void) {
     const float fov1610 = 2.0f * atanf(tanf(fov * 0.5f) / scale1610);
     assert(close_to(((SetCamera)(sixteen_ten + 0x420bd0))(NULL, view, menu1610, fov, 20, 300, a1610),
                     fov1610 + m5_1610 * scale1610));
+    test_collab();
+    puts("collab: ok");
     puts("wide: ok");
     return 0;
 }

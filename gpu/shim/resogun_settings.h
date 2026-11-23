@@ -160,6 +160,11 @@ struct Values {
     /// (src/runtime_game.c); read once, before the game starts (startup_frame_rate_priority). On by
     /// default. The Display Settings panel saves a change for the next start.
     bool startup_frame_rate_priority = true;
+    /// Everybody's Golf: the tie-in outfits no add-on grants (Level-5, Final Fantasy 30th, Atelier,
+    /// Famitsu): 1 unlocked (granted with the add-ons, src/runtime_game.c, the default), 2 earn
+    /// (sold in the shop, src/runtime_collab.c), 0 original (locked; also GOLF_ENTITLEMENTS=original).
+    /// Read once, before the game starts.
+    int collab_items = 1;
     std::atomic<bool> frame_rate_priority{true};
     /// Everybody's Golf in PS4 Pro mode: the height the game renders its scene at, 16:9 (1080,
     /// 1440, 1800, 2160 or 2880), in either display mode (src/runtime_game.c); 0 leaves it to the
