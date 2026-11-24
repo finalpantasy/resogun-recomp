@@ -5,6 +5,14 @@ Each release's section becomes the text of its GitHub release (`tools/release_no
 without one does not publish. Keep each entry on one line: GitHub shows a line break in release
 text as a break. Sections from v0.15 down are from the Resogun runner this port is built on.
 
+## v0.1.4
+
+- Fixed Host a game saying "Set up the game files first" on games set up from the launcher (issue #1): setup now writes the file the online server needs, and a game already set up gets it on its next start, in about a second
+- Japan's tie-in outfits that no add-on grants (Final Fantasy 30th anniversary with the Chocobo cart, Level-5, Atelier, Famitsu): 55 parts, unlocked from the start by default. On the Saves tab, Earn in game sells them in the shop's coin tab for 1500 to 2500 coins each, and Original keeps them locked as on a PS4 today
+- Fewer stutters on the first visit to a course: shader variants that compile to the same code now share one pipeline, so about a third fewer get built and hitches over a second dropped from about 30 to about 12 in testing. Your shader cache rebuilds those once after updating
+- Screen fades draw again (title, loading and moving between holes); the v0.1.2 fix for the inverted-color flash had hidden them
+- New Display row, Miss-shot flash: the game flashes the screen in inverted colors when you miss a swing's timing. Off (default) hides it; On shows it as the PS4 draws it
+
 ## v0.1.3
 
 - Easy online play: Host a game on the Online tab, share the invite code, and a friend joins with it; games on your local network show up in a list, and the router port opens automatically. Tested with two copies on one PC; play between two homes is not tested yet, so please report how it goes
