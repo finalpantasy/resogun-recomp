@@ -583,6 +583,18 @@ int prepare_source_key(const char *game, char key[GOLF_SOURCE_KEY], int any_buil
     return 0;
 }
 
+/* The plain ELF of eboot.bin (SELF header removed), as eboot.elf: the online title server reads its
+   tables from it (tools/server/host.py --eboot). Written to a .part file first, then renamed. */
+static void write_server_elf(Prep *p, const Object *main, const char *dir) {
+    const char *part = join(p, dir, "eboot.elf.part"), *final = join(p, dir, "eboot.elf");
+    start_output(p, dir, "eboot.elf.part");
+    emit(p, main->elf.data, (size_t)main->elf.size);
+    close_stream(p);
+    remove(final);
+    p->file = final;
+    if (rename(part, final)) { remove(part); reject(p, "cannot write eboot.elf"); }
+}
+
 static void link_source(Prep *p, const Source *source, const char *dir) {
     Object main = {0}, *objects = alloc(p, source->count * sizeof *objects);
     p->file = "eboot.bin";
@@ -634,6 +646,7 @@ static void link_source(Prep *p, const Source *source, const char *dir) {
     push(p, &link.unwind, &main_info, sizeof main_info);
     bind(p, &link.bindings, link.imports, link.exports);
     write_image(p, dir, &main, &link, image, size, flags);
+    write_server_elf(p, &main, dir);
     start_output(p, dir, "content.bin");
     emit(p, "RGCONT01", 8);
     emit(p, source->profile, sizeof source->profile);
@@ -653,6 +666,19 @@ int prepare_image(const char *game, const char *destination, const char *key, in
     read_source(p, game, &source, any_build);
     if (strcmp(source.key, key)) reject(p, "dump changed during preparation");
     link_source(p, &source, destination);
+    release(p);
+    return 0;
+}
+
+/* An image prepared before eboot.elf was part of it gets the file without being prepared again. */
+int prepare_server_elf(const char *game, const char *destination) {
+    Prep *p = calloc(1, sizeof *p);
+    if (!p) return 1;
+    if (setjmp(p->failure)) { release(p); return 1; }
+    Object main = {0};
+    p->file = "eboot.bin";
+    read_elf(p, read_file(p, join(p, game, "eboot.bin"), LIMIT), &main);
+    write_server_elf(p, &main, destination);
     release(p);
     return 0;
 }

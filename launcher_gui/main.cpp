@@ -765,7 +765,12 @@ bool start_server(std::wstring& error) {
     const fs::path python = tools / L"python" / L"python.exe", host = tools / L"server" / L"host.py",
                    crypto = tools / L"server" / L"libcrypto-4-x64.dll";
     std::error_code ec;
-    if (p.image.empty() || !fs::exists(eboot, ec)) { error = L"Set up the game files first (Game files page)."; return false; }
+    // Images set up by v0.1.3 and earlier lack eboot.elf: the runtime writes it on its next start.
+    if (!p.image.empty() && !fs::exists(eboot, ec))
+        run_tool({runtime_exe.wstring(), L"--data-dir", data.wstring(), L"--prepare-only", L"--console"}, [](const std::string&) {});
+    p = saved_paths();
+    const fs::path ready = data / L"game" / p.image / L"eboot.elf";
+    if (p.image.empty() || !fs::exists(ready, ec)) { error = L"Set up the game files first (Game files page)."; return false; }
     if (!fs::exists(python, ec) || !fs::exists(host, ec) || !fs::exists(crypto, ec)) {
         error = L"The server files in tools\\ are missing. Reinstall the game.";
         return false;
@@ -776,7 +781,7 @@ bool start_server(std::wstring& error) {
     // server_bind in launcher.ini: one adapter's address only (say a VPN's); every adapter by default.
     std::string bind = prefs.get("server_bind", "0.0.0.0");
     if (bind.empty() || bind.size() > 15 || bind.find_first_not_of("0123456789.") != std::string::npos) bind = "0.0.0.0";
-    std::wstring command = quote(python.wstring()) + L" -I " + quote(host.wstring()) + L" --eboot " + quote(eboot.wstring()) +
+    std::wstring command = quote(python.wstring()) + L" -I " + quote(host.wstring()) + L" --eboot " + quote(ready.wstring()) +
                            L" --libcrypto " + quote(crypto.wstring()) + L" --state " + quote((data / L"server").wstring()) +
                            L" --port " + port + L" --bind " + wide(bind);
     SECURITY_ATTRIBUTES sa{sizeof sa, nullptr, TRUE};
