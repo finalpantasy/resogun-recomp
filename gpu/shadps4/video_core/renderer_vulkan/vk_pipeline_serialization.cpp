@@ -39,6 +39,7 @@
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
 #include "video_core/renderer_vulkan/vk_shader_util.h"
+#include "video_core/renderer_vulkan/vk_permutation_alias.h"
 #include "video_core/renderer_vulkan/vk_warmup_inbox.h"
 
 namespace Serialization {
@@ -1994,7 +1995,77 @@ bool PipelineCache::CreateDiskModule(u64 hash, Program& program, size_t perm_idx
                                   std::chrono::steady_clock::now() - started)
                                   .count());
     disk_stats.matched += bool(module);
+    if (module) {
+        ResolvePermutationAlias(hash, program, perm_idx);
+    }
     return bool(module);
+}
+
+// resogun: a program's permutations differ in their specialization (resource formats, strides,
+// runtime info), but many translate to byte-identical SPIR-V: a fresh boot to the island hub made 746
+// permutations with 522 distinct modules. Each still had its own stage hash, so every pipeline
+// using one was built again, and the NVIDIA driver spent up to 14 s on each copy of one large
+// pixel shader. A permutation whose SPIR-V, runtime info and fetch shader all equal another's
+// gives the same Vulkan pipeline for the same remaining key, so it takes the lowest such
+// permutation's stage hash. Draw-time binding reads the program's Info, not the permutation, and
+// identical SPIR-V has identical bindings. Only the key changes: a key built under another alias
+// in an earlier session is a cache miss, never a wrong pipeline. RESOGUN_PERMUTATION_ALIAS=0: off.
+void PipelineCache::ResolvePermutationAlias(u64 hash, Program& program, size_t perm_idx) {
+    static const bool enabled = EmulatorSettingsImpl::Flag("RESOGUN_PERMUTATION_ALIAS", true);
+    if (!enabled || perm_idx >= program.modules.size()) {
+        return;
+    }
+    auto& self = program.modules[perm_idx];
+    if (!self.module || !self.spec.Valid()) {
+        return;
+    }
+    const u64 content = ShaderModuleHash(self.module);
+    if (!content) {
+        return;
+    }
+    const auto choice = ChooseKeyPermutation(
+        perm_idx, program.modules.size(), content,
+        [&](size_t j) -> std::optional<PermutationCandidate> {
+            const auto& other = program.modules[j];
+            if (!other.spec.Valid() || (!other.module && !other.on_disk)) {
+                return std::nullopt;
+            }
+            // A resolved permutation stands for its alias.
+            return PermutationCandidate{
+                other.alias != Program::NoAlias ? other.alias : j,
+                other.spec.runtime_info == self.spec.runtime_info &&
+                    other.spec.fetch_shader_data == self.spec.fetch_shader_data};
+        },
+        [&](size_t j) -> std::optional<u64> {
+            auto& other = program.modules[j];
+            if (other.content) {
+                return other.content;
+            }
+            if (other.module) {
+                return ShaderModuleHash(other.module);
+            }
+            // Saved, not used yet: hash its stored SPIR-V without creating the module.
+            std::vector<u32> spv;
+            Storage::DataBase::Instance().Load(Storage::BlobType::ShaderBinary,
+                                               fmt::format("{:#018x}_{}", hash, j), spv);
+            ++alias_stats.disk_reads;
+            if (spv.empty()) {
+                return std::nullopt;
+            }
+            std::unique_lock lock{programs_mutex};
+            other.content = XXH3_64bits(spv.data(), spv.size() * sizeof(u32));
+            return other.content;
+        });
+    const size_t alias = choice.index;
+    const bool same_spirv = choice.same_spirv;
+    {
+        std::unique_lock lock{programs_mutex};
+        self.content = content;
+        self.alias = u32(alias);
+    }
+    ++alias_stats.resolved;
+    alias_stats.aliased += alias != perm_idx;
+    alias_stats.same_spirv_other_state += same_spirv && alias == perm_idx;
 }
 
 bool PipelineCache::NewPipelineKey(const std::string& name) {

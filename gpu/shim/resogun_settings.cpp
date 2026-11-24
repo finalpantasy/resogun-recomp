@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include <cmath>
 #include "resogun_settings.h"
+#include "resogun_miss_flash.h"
 #include "resogun_graphics.h"
 
 #include <algorithm>
@@ -76,6 +77,12 @@ void Set(Values& v, const std::string& key, const std::string& value) {
         v.skip_intro = Truthy(value);
     } else if (key == "frame_rate_priority") {
         v.startup_frame_rate_priority = v.frame_rate_priority = Truthy(value);
+    } else if (key == "collab_items") {
+        const std::string mode = Lower(value);
+        if (mode == "unlocked") v.collab_items = 1;
+        else if (mode == "earn") v.collab_items = 2;
+        else if (mode == "original") v.collab_items = 0;
+        else std::printf("Settings: collab_items=%s is not unlocked, earn or original; using unlocked\n", value.c_str());
     } else if (key == "render_height") {
         const bool listed = i == 0 || i == 1080 || i == 1440 || i == 1800 || i == 2160 || i == 2880;
         v.startup_render_height = v.render_height = listed ? i : 0;
@@ -88,6 +95,8 @@ void Set(Values& v, const std::string& key, const std::string& value) {
         v.texture_pack = value;
     } else if (key == "texture_dump") {
         v.texture_dump = value;
+    } else if (key == "miss_shot_flash") {
+        v.miss_shot_flash = ResogunMissFlash::ParseMissShotFlash(value);
     } else if (key == "title_back_exits") {
         v.title_back_exits = Truthy(value);
     } else if (key == "sharpening") {
@@ -269,7 +278,9 @@ void Load() {
         {"RESOGUN_AUDIO_CHANNELS", "audio_channels"}, {"RESOGUN_AUDIO_VOLUME", "audio_volume"},
         {"RESOGUN_SKIP_INTRO", "skip_intro"},     {"RESOGUN_FRAME_RATE", "frame_rate"},
         {"RESOGUN_TITLE_BACK_EXITS", "title_back_exits"},
+        {"RESOGUN_MISS_SHOT_FLASH", "miss_shot_flash"},
         {"RESOGUN_FRAME_RATE_PRIORITY", "frame_rate_priority"},
+        {"RESOGUN_COLLAB_ITEMS", "collab_items"},
         {"RESOGUN_RENDER_HEIGHT", "render_height"},
         {"RESOGUN_TEXTURE_PACK", "texture_pack"}, {"RESOGUN_TEXTURE_DUMP", "texture_dump"},
         {"RESOGUN_RENDER_RESOLUTION", "render_resolution"},
@@ -337,6 +348,10 @@ extern "C" int resogun_frame_rate_priority(void) {
     return ResogunSettings::Get().startup_frame_rate_priority ? 1 : 0;
 }
 
+extern "C" int resogun_collab_items(void) {
+    return ResogunSettings::Get().collab_items;
+}
+
 namespace ResogunSettings {
 float TextureLodBias() {
     const Values& v = Get();
@@ -348,6 +363,10 @@ float TextureLodBias() {
     return height > 1080 ? -std::min(0.5f, std::log2(float(height) / 1080.0f)) : 0.0f;
 }
 } // namespace ResogunSettings
+
+extern "C" int resogun_miss_shot_flash(void) {
+    return ResogunSettings::Get().miss_shot_flash.load(std::memory_order_relaxed) ? 1 : 0;
+}
 
 extern "C" int resogun_title_back_exits(void) {
     return ResogunSettings::Get().title_back_exits.load(std::memory_order_relaxed) ? 1 : 0;

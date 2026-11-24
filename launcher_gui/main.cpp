@@ -66,7 +66,7 @@ enum : UINT { WM_JOB_LINE = WM_APP + 1, WM_JOB_PROGRESS, WM_JOB_DONE, WM_GAME_EX
 enum Id : int {
     ID_TABS = 100, ID_PLAY, ID_OPEN_FOLDER, ID_OPEN_LOGS, ID_STATUS,
     ID_BASE, ID_BASE_BROWSE, ID_UPDATE, ID_UPDATE_BROWSE, ID_DLC, ID_DLC_BROWSE, ID_SETUP, ID_SETUP_PROGRESS, ID_SETUP_STATUS,
-    ID_WINDOW, ID_SIZE, ID_RENDER, ID_SIXTY, ID_SMAA, ID_SHARPEN, ID_VSYNC, ID_HDR, ID_INTRO,
+    ID_WINDOW, ID_SIZE, ID_RENDER, ID_SIXTY, ID_SMAA, ID_SHARPEN, ID_VSYNC, ID_HDR, ID_INTRO, ID_MISSFLASH,
     ID_MONITOR, ID_PRO, ID_SHARPNESS, ID_ANISO, ID_LOD, ID_FRAMEGEN, ID_VOLUME, ID_SPEAKERS, ID_TITLE_BACK,
     ID_DEADZONE, ID_OUTER, ID_TRIGGER, ID_RUMBLE, ID_SWAP, ID_OPEN_SETTINGS, ID_DISPLAY_NOTE, ID_GRAPHICS_NOTE,
     ID_CHECK_UPDATES, ID_CHECK_NOW, ID_VERSION,
@@ -77,6 +77,7 @@ enum Id : int {
     ID_ONLINE_NAME, ID_ONLINE_PORT, ID_ONLINE_HOST, ID_SERVER, ID_UPNP, ID_INVITE, ID_INVITE_CODE, ID_FIND, ID_FOUND,
     ID_ONLINE_STATUS,
     ID_NOTES, ID_UPDATE_NOW, ID_UPDATE_LATER, ID_UPDATE_SKIP, ID_UPDATE_BAR, ID_UPDATE_TEXT,
+    ID_COLLAB,
 };
 // The pages, in tab order.
 enum Page : int { PagePlay, PageDisplay, PageGraphics, PageControls, PageSaves, PageTrophies, PageTextures, PageOnline, PageFiles, PageCount };
@@ -447,6 +448,9 @@ bool checked(int id) { return SendMessageW(controls[id], BM_GETCHECK, 0, 0) == B
 void check(int id, bool on) { SendMessageW(controls[id], BM_SETCHECK, on ? BST_CHECKED : BST_UNCHECKED, 0); }
 
 struct Choice { const wchar_t* label; const char* value; };
+// Next start; Earn in game sells them in the shop's coin tab for 1500 to 2500 coins.
+const std::vector<Choice> collab_modes = {{L"All unlocked", "unlocked"}, {L"Earn in game", "earn"}, {L"Original", "original"}};
+const std::vector<Choice> miss_flash_modes = {{L"Off", "0"}, {L"On (original)", "1"}};
 const std::vector<Choice> window_modes = {{L"Borderless window (recommended)", "borderless"}, {L"Fullscreen", "fullscreen"}, {L"Window", "windowed"}};
 const std::vector<Choice> sizes = {{L"1280 x 720", "1280x720"}, {L"1600 x 900", "1600x900"}, {L"1920 x 1080", "1920x1080"},
                                    {L"2560 x 1440", "2560x1440"}, {L"3840 x 2160", "3840x2160"}};
@@ -872,7 +876,12 @@ bool start_server(std::wstring& error) {
     const fs::path python = tools / L"python" / L"python.exe", host = tools / L"server" / L"host.py",
                    crypto = tools / L"server" / L"libcrypto-4-x64.dll";
     std::error_code ec;
-    if (p.image.empty() || !fs::exists(eboot, ec)) { error = L"Set up the game files first (Game files page)."; return false; }
+    // Images set up by v0.1.3 and earlier lack eboot.elf: the runtime writes it on its next start.
+    if (!p.image.empty() && !fs::exists(eboot, ec))
+        run_tool({runtime_exe.wstring(), L"--data-dir", data.wstring(), L"--prepare-only", L"--console"}, [](const std::string&) {});
+    p = saved_paths();
+    const fs::path ready = data / L"game" / p.image / L"eboot.elf";
+    if (p.image.empty() || !fs::exists(ready, ec)) { error = L"Set up the game files first (Game files page)."; return false; }
     if (!fs::exists(python, ec) || !fs::exists(host, ec) || !fs::exists(crypto, ec)) {
         error = L"The server files in tools\\ are missing. Reinstall the game.";
         return false;
@@ -884,7 +893,7 @@ bool start_server(std::wstring& error) {
     // server_bind in launcher.ini: one adapter's address only (say a VPN's); every adapter by default.
     std::string bind = prefs.get("server_bind", "0.0.0.0");
     if (bind.empty() || bind.size() > 15 || bind.find_first_not_of("0123456789.") != std::string::npos) bind = "0.0.0.0";
-    std::wstring command = quote(python.wstring()) + L" -I " + quote(host.wstring()) + L" --online --eboot " + quote(eboot.wstring()) +
+    std::wstring command = quote(python.wstring()) + L" -I " + quote(host.wstring()) + L" --online --eboot " + quote(ready.wstring()) +
                            L" --libcrypto " + quote(crypto.wstring()) + L" --state " + quote((data / L"server").wstring()) +
                            L" --port " + port + L" --bind " + wide(bind) + L" --name " + wide(online_name()) +
                            L" --stop-file " + quote((data / L"server" / L"stop").wstring());
@@ -1895,6 +1904,8 @@ void load_option_controls() {
     check(ID_SWAP, settings.get("pad_swap_cross_circle", "0") == "1");
     check(ID_INTRO, setting_on("skip_intro", true));
     check(ID_TITLE_BACK, setting_on("title_back_exits", true));
+    fill_combo(ID_MISSFLASH, miss_flash_modes, settings.get("miss_shot_flash", "0") == "1" ? "1" : "0");
+    fill_combo(ID_COLLAB, collab_modes, settings.get("collab_items", "unlocked"));
     update_option_states();
 }
 
@@ -1936,6 +1947,8 @@ bool option_command(int id, int code) {
     case ID_SWAP: toggle("pad_swap_cross_circle"); break;
     case ID_INTRO: toggle("skip_intro"); break;
     case ID_TITLE_BACK: toggle("title_back_exits"); break;
+    case ID_MISSFLASH: pick("miss_shot_flash", miss_flash_modes); break;
+    case ID_COLLAB: pick("collab_items", collab_modes); break;
     default: return false;
     }
     update_option_states();
@@ -1977,9 +1990,12 @@ void create_controls() {
     add(PageSaves, L"BUTTON", L"New empty save", BS_PUSHBUTTON | WS_TABSTOP, 280, 256, 120, 28, ID_PROFILE_NEW);
     add(PageSaves, L"BUTTON", L"Copy selected", BS_PUSHBUTTON | WS_TABSTOP, 406, 256, 100, 28, ID_PROFILE_COPY);
     add(PageSaves, L"BUTTON", L"Rename", BS_PUSHBUTTON | WS_TABSTOP, 512, 256, 98, 28, ID_PROFILE_RENAME);
-    add(PageSaves, L"STATIC", L"", SS_LEFT, 30, 300, 580, 40, ID_PROFILE_STATUS);
+    add(PageSaves, L"STATIC", L"", SS_LEFT, 30, 296, 580, 36, ID_PROFILE_STATUS);
+    // settings.ini collab_items: the tie-in outfits no add-on grants (src/runtime_game.c, runtime_collab.c).
+    add(PageSaves, L"STATIC", L"Collab outfits", SS_LEFT, 30, 342, 160, 22);
+    add(PageSaves, WC_COMBOBOXW, L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 200, 338, 300, 200, ID_COLLAB);
     add(PageSaves, L"STATIC", L"Back up copies a save to data\\backups. Saves stay in data\\save (Main) and data\\saves.",
-        SS_LEFT, 30, 350, 580, 40);
+        SS_LEFT, 30, 376, 580, 40);
     // Trophies
     add(PageTrophies, L"STATIC", L"", SS_LEFT, 30, 50, 580, 22, ID_TROPHY_STATUS);
     add(PageTrophies, L"LISTBOX", L"", WS_BORDER | WS_VSCROLL | LBS_NOSEL | LBS_USETABSTOPS | LBS_NOINTEGRALHEIGHT, 30, 78, 580, 270, ID_TROPHY_LIST);
@@ -2020,9 +2036,11 @@ void create_controls() {
                                 L"GPU; at 3840 x 2160 some course flyovers drop below 60 FPS.",
         SS_LEFT, 240, 214, 440, 36);
     row(PageDisplay, L"VSync", 254, ID_VSYNC);
+    // settings.ini miss_shot_flash: the game's inverted full-screen flash on a missed swing (gpu/shim/resogun_miss_flash.h).
+    row(PageDisplay, L"Miss-shot flash", 288, ID_MISSFLASH);
     add(PageDisplay, L"BUTTON", L"60 FPS mode (the game's frame rate priority, held on in every scene)", BS_AUTOCHECKBOX | WS_TABSTOP,
-        30, 290, 640, 22, ID_SIXTY);
-    add(PageDisplay, L"STATIC", L"", SS_LEFT, 30, 320, 650, 76, ID_DISPLAY_NOTE);
+        30, 324, 640, 22, ID_SIXTY);
+    add(PageDisplay, L"STATIC", L"", SS_LEFT, 30, 354, 650, 76, ID_DISPLAY_NOTE);
 
     // Graphics
     add(PageGraphics, L"BUTTON", L"Anti-aliasing (SMAA 1x at the render size)", BS_AUTOCHECKBOX | WS_TABSTOP, 30, 50, 640, 22, ID_SMAA);

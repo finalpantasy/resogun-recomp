@@ -52,6 +52,9 @@ void resogun_exit_prompt_open(void);
 /* settings.ini title_back_exits (RESOGUN_TITLE_BACK_EXITS, default on): Back on the title screen
  * opens the exit prompt (runtime_pad.c). Any thread. */
 int resogun_title_back_exits(void);
+/* settings.ini miss_shot_flash (RESOGUN_MISS_SHOT_FLASH, default off): 1 draws the inverted
+ * full-screen flash the game shows on a missed swing. Any thread. */
+int resogun_miss_shot_flash(void);
 /* Ends the game as closing its window does (any thread). */
 void resogun_gpu_request_quit(void);
 /* 1 when settings.ini render_resolution (RESOGUN_RENDER_RESOLUTION) is 4k: the game runs in PS4
@@ -73,6 +76,10 @@ int resogun_skip_intro(void);
 /* settings.ini frame_rate_priority (RESOGUN_FRAME_RATE_PRIORITY, default on): Everybody's Golf runs
  * in its PS4 Pro frame rate priority mode (60 FPS). Valid once resogun_gpu_init returned. */
 int resogun_frame_rate_priority(void);
+/* settings.ini collab_items (RESOGUN_COLLAB_ITEMS): Everybody's Golf's tie-in outfits that no add-on
+ * grants: 1 unlocked (default), 2 earn (sold in the shop), 0 original. Valid once resogun_gpu_init
+ * returned. */
+int resogun_collab_items(void);
 /* settings.ini render_height (RESOGUN_RENDER_HEIGHT): Everybody's Golf's scene height in PS4 Pro
  * mode, 16:9; 0 leaves it to the game. Valid once resogun_gpu_init returned. */
 int resogun_render_height(void);

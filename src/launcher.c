@@ -346,6 +346,7 @@ static const Setting settings[] = {
     {"--capture-dir", "CAPTURE_DIR", 1},
     {"--capture-target", "CAPTURE_TARGET", 0},
     {"--capture-trigger", "CAPTURE_TRIGGER", 1},
+    {"--collab-items", "COLLAB_ITEMS", 0},
     {"--compile-threads", "COMPILE_THREADS", 0},
     {"--config-default", "CONFIG_DEFAULT", 1},
     {"--config", "CONFIG", 1},
@@ -900,7 +901,7 @@ static int image_paths(const char *dir, int need_isa) {
            ((!need_isa && !exists(isa)) || prepare_isa_complete(isa));
 }
 static void discard_image(const char *dir) {
-    const char *files[] = {"boot-linked.bin", "content.bin", "isa-rewrite.bin"};
+    const char *files[] = {"boot-linked.bin", "content.bin", "isa-rewrite.bin", "eboot.elf", "eboot.elf.part"};
     char path[PATH_CHARS];
     for (size_t i = 0; i < sizeof files / sizeof *files; ++i)
         if (join_path(path, dir, files[i])) remove(path);
@@ -925,6 +926,10 @@ static int prepare_launch(const Options *o, const Saved *saved, const char *ini)
                            !env_option("GAME_DIR") && !env_option("DLC_DIR");
         if ((o->game || o->dlc || o->no_dlc || legacy_paths) && !write_paths(ini, saved->image, key))
             return complain("Cannot save paths.ini");
+        char elf[PATH_CHARS];
+        /* Images from v0.1.3 and earlier lack eboot.elf, which hosting an online game needs. */
+        if (join_path(elf, image, "eboot.elf") && !exists(elf) && prepare_server_elf(game, image))
+            printf("Could not write eboot.elf; hosting an online game needs it\n");
         printf("Using prepared image: %s\n", image);
         return LAUNCH_RUN;
     }

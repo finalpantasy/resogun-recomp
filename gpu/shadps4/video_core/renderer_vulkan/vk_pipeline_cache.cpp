@@ -11,6 +11,7 @@
 #include <ranges>
 #include <string>
 #include <unordered_set>
+#include "resogun_miss_flash.h"
 #include "resogun_overlay.h"
 #include "resogun_threads.h"
 #include "resogun_toggles.h"
@@ -757,6 +758,7 @@ void PipelineCache::PublishShaders(bool wait) {
             disk_stats.compiled += DiskShadersActive();
             build->module = nullptr;
         }
+        ResolvePermutationAlias(hash, *program, build->permutation);
         retire();
     }
 }
@@ -874,6 +876,14 @@ void PipelineCache::ReportCompilerStats() {
                         shaders ? module_ns / 1e6 / shaders : 0.0);
         }
         GraphicsPipelineLibraries::Report();
+        if (alias_stats.resolved) {
+            std::printf("Permutation aliases: %u of %u new permutations share an earlier one's "
+                        "pipelines (identical SPIR-V); %u more have identical SPIR-V but other "
+                        "runtime info or fetch shader; %u stored SPIR-V reads\n",
+                        alias_stats.aliased, alias_stats.resolved,
+                        alias_stats.same_spirv_other_state, alias_stats.disk_reads);
+            alias_stats = {};
+        }
         std::printf("Compiler stats: capture queue %zu, compile queue %zu; queue waits: capture "
                     "%.1f ms, compile %.1f ms; pools retained %zu, reused %u; pipelines built "
                     "behind their draws %llu\n",
@@ -970,16 +980,27 @@ GraphicsPipeline* PipelineCache::DeferGraphicsPipeline() {
     return published;
 }
 
-// resogun game fix (Everybody's Golf): at club impact the game draws a full-screen quad with
-// pixel shader 0x76f7a64f and blend ONE_MINUS_DST_COLOR, ZERO, which inverts the whole frame
-// including the HUD for about 30 frames. The effect is not visible on a real PS4 and the root
-// cause is not found (the blend registers and vertex swizzle decode as the game set them; its
-// constant buffer is all zero when the draw records), so the draw is skipped. RESOGUN_KEEP_76F7=1
-// draws it again.
+extern "C" int resogun_miss_shot_flash(void); // gpu/resogun_gpu.h
+
+// resogun game fix (Everybody's Golf): when a swing is judged a miss the game draws a full-screen
+// quad with pixel shader 0x76f7a64f and blend ONE_MINUS_DST_COLOR, ZERO for 30 game ticks, which
+// inverts the whole frame including the HUD. It is the game's own miss-shot effect (the flag is set
+// only when the shot's timing class is a miss, together with the AfterMissSwing animation).
+// settings.ini miss_shot_flash=1 (RESOGUN_MISS_SHOT_FLASH) draws it; off (default) skips it. The
+// same shader also draws the title and menu screen fades (blend SRC_ALPHA, ONE_MINUS_SRC_ALPHA),
+// which always draw; its other blends (one draw seen per boot, blending off, effect unknown) stay skipped
+// (resogun_miss_flash.h).
 static bool IsImpactInvertDraw(const GraphicsPipeline* pipeline) {
-    static const bool keep = std::getenv("RESOGUN_KEEP_76F7") != nullptr;
-    return !keep && pipeline &&
-           pipeline->GetStage(Shader::SwStage::Fragment).pgm_hash == 0x76f7a64full;
+    if (!pipeline) {
+        return false;
+    }
+    const u64 hash = pipeline->GetStage(Shader::SwStage::Fragment).pgm_hash;
+    if (hash != ResogunMissFlash::ImpactShaderHash) {
+        return false;
+    }
+    u32 blend0 = 0;
+    std::memcpy(&blend0, &pipeline->GetGraphicsKey().blend_controls[0], sizeof(blend0));
+    return ResogunMissFlash::SkipImpactInvert(hash, blend0, resogun_miss_shot_flash() != 0);
 }
 
 const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectParams params,
@@ -1496,7 +1517,7 @@ PipelineCache::Result PipelineCache::GetProgram(PipelineSelection& sel, HwStage 
         worker.stages.push_back(
             {program, params.hash, hw_stage, info.pgm_base, &info.flattened_ud_buf});
         return std::make_tuple(&info, it->module, it->spec.fetch_shader_data,
-                               HashCombine(params.hash, perm_idx));
+                               HashCombine(params.hash, program->KeyPermutation(perm_idx)));
     }
 
     auto it_pgm = program_cache.find(params.hash); // this thread is the only writer
@@ -1660,14 +1681,18 @@ PipelineCache::Result PipelineCache::GetProgram(PipelineSelection& sel, HwStage 
 
         RegisterShaderMeta(info, spec.fetch_shader_data, spec, perm_hash, perm_idx);
         disk_stats.compiled += DiskShadersActive();
-        std::unique_lock lk{programs_mutex};
-        program->InsertPermut(module, std::move(spec), perm_idx);
+        {
+            std::unique_lock lk{programs_mutex};
+            program->InsertPermut(module, std::move(spec), perm_idx);
+        }
+        ResolvePermutationAlias(params.hash, *program, perm_idx);
     } else {
         info.AddBindings(binding);
         module = it->module;
         perm_idx = std::distance(program->modules.begin(), it);
-        perm_hash = HashCombine(params.hash, perm_idx);
     }
+    // resogun: permutations with identical SPIR-V share a pipeline key (ResolvePermutationAlias).
+    perm_hash = HashCombine(params.hash, program->KeyPermutation(perm_idx));
     return std::make_tuple(&program->info, module,
                            program->modules[perm_idx].spec.fetch_shader_data, perm_hash);
 }

@@ -703,3 +703,142 @@ int runtime_game_golf_resolution(unsigned char *image) {
     else puts("Render size: the game's own (settings.ini render_height=0)");
     return 1;
 }
+
+/* Everybody's Golf 1.17: the collaboration outfits of Japanese tie-ins (Level-5 20th anniversary,
+ * Final Fantasy 30th anniversary, Atelier Lydie & Suelle, Famitsu) are in the installed game but
+ * no add-on grants them: they came through events, campaign codes and shop windows that are gone.
+ * settings.ini collab_items=unlocked (the default) grants them the way the game grants an installed
+ * add-on's items; earn sells them in the shop instead (runtime_collab.c); original leaves them out. Its entitlement update (0xc74f90, called after the save loads, at 0x3580fe and
+ * 0xb9f41a) walks the shipped entitlement table and, for each installed label, finds the item's
+ * record in the item index (0x2c7cc70: 42 trees of nodes left +0x0, parent +0x8, right +0x10,
+ * nil flag +0x19, savedataID +0x24, the 0xa0-byte record from +0x20) and passes a copy to
+ * 0xcd0250 (record, owned, count). For an outfit part that sets the item's byte in the save
+ * object ([0x2c6b648] + 0x3723e8 + savedataID * 0x44) to 3, owned, unless it already is 3 or 4,
+ * and queues the game's item-get notice; an item set (index category 1000, as the tie-in sets
+ * are) is expanded by 0x879ad0 into its parts. A stub at the update's entry grants the parts
+ * below the same way before the add-ons are checked. Parts whose model or texture is not in
+ * xbdata/chara/model/chara_model.xb stay out (Evan's pants bottoms_038_a00; Famitsu T-shirts
+ * a01-a03, whose letters have no texture; the seven Famitsu ranger suits, whose kigurumi_006 has
+ * no texture), so their sets are not granted whole. In the other modes, or with
+ * GOLF_ENTITLEMENTS=original, the update runs untouched; a save written while they were granted
+ * keeps the parts, as for any item. */
+static const uint16_t golf_collab_items[]={
+    /* Final Fantasy 30th: Cactuar caps -01..-12 (tints of one texture), Cactuar outer, Moogle
+     * suit, FF30 cart */
+    8929,8930,8931,8932,8933,8934,8935,8936,8937,8938,8939,8940,8953,8958,8956,
+    /* Atelier Lydie & Suelle: hair ornaments, outfits, boots, socks */
+    8965,8966,8969,8970,8971,8972,8973,8974,
+    /* Level-5 20th: Toan, Xiao, White Knight, Evan, Shaati, Professor Layton, Jibanyan, Komasan */
+    8982,8990,8983,8994,8978,8989,8977,8995,8979,8991,8976,8987,8993,8988,8992,8981,8986,8984,8985,
+    /* Famitsu: caps -01..-12 (tints of one texture), T-shirt (fu) */
+    9108,9109,9110,9111,9112,9113,9114,9115,9116,9117,9118,9119,9124,
+};
+#define GOLF_COLLAB_UPDATE 0xc74f90u   /* the entitlement update */
+#define GOLF_COLLAB_GRANT 0xcd0250u    /* give or take an item (record, owned, count) */
+#define GOLF_COLLAB_GRANT_CALL 0xc7522au
+#define GOLF_COLLAB_ITEMS 0x2c7cc70u   /* item index: 42 trees, 24 bytes each, header at +8 */
+#define GOLF_COLLAB_SAVE 0x2c6b648u    /* save object */
+#define GOLF_COLLAB_OWNED 0x3723e8u    /* its item bytes, 0x44 apart */
+const uint16_t *runtime_game_golf_collab_list(size_t *count) {
+    *count=sizeof(golf_collab_items)/sizeof(golf_collab_items[0]);
+    return golf_collab_items;
+}
+static unsigned char *golf_collab_image;
+static unsigned golf_collab_given;
+
+/* The item index's record node for savedataID `id`, walked in order as the update does, or NULL. */
+static unsigned char *golf_collab_find(unsigned char *trees, uint32_t id) {
+    for (int t=0;t<42;++t) {
+        unsigned char *header,*node;
+        memcpy(&header,trees+t*24+8,sizeof(header));
+        if (!header) continue;
+        memcpy(&node,header,sizeof(node)); /* leftmost */
+        for (unsigned guard=0; node && node!=header && guard<100000; ++guard) {
+            uint32_t key;
+            memcpy(&key,node+0x24,4);
+            if (key==id) return node;
+            unsigned char *next,*link;
+            memcpy(&next,node+0x10,sizeof(next)); /* right */
+            if (!next[0x19]) {
+                for (memcpy(&link,next,sizeof(link)); !link[0x19]; memcpy(&link,next,sizeof(link))) next=link;
+            } else {
+                memcpy(&next,node+8,sizeof(next)); /* up while coming from the right */
+                while (!next[0x19]) {
+                    memcpy(&link,next+0x10,sizeof(link));
+                    if (link!=node) break;
+                    node=next;
+                    memcpy(&next,node+8,sizeof(next));
+                }
+            }
+            node=next;
+        }
+    }
+    return NULL;
+}
+
+/* Called by the stub at the entitlement update's entry, on the game's thread. */
+static ABI void golf_collab_grant(void) {
+    unsigned char *image=golf_collab_image,*trees,*save;
+    memcpy(&trees,image+GOLF_COLLAB_ITEMS,sizeof(trees));
+    memcpy(&save,image+GOLF_COLLAB_SAVE,sizeof(save));
+    if (!trees || !save) return;
+    unsigned char (ABI *grant)(void *,uint32_t,uint32_t)=(unsigned char (ABI *)(void *,uint32_t,uint32_t))(void *)(image+GOLF_COLLAB_GRANT);
+    unsigned given=0,missing=0;
+    for (size_t i=0;i<sizeof(golf_collab_items)/sizeof(golf_collab_items[0]);++i) {
+        const uint32_t id=golf_collab_items[i];
+        const unsigned char state=save[GOLF_COLLAB_OWNED+(size_t)id*0x44];
+        if (state==3 || state==4) continue; /* owned */
+        unsigned char *node=golf_collab_find(trees,id);
+        if (!node) { ++missing; continue; }
+        unsigned char record[0xa0];
+        memcpy(record,node+0x20,sizeof(record));
+        grant(record,1,1);
+        ++given;
+    }
+    golf_collab_given+=given;
+    if (given || missing) printf("Collab items: %u granted (%u this run), %u not in the item index\n",given,golf_collab_given,missing);
+}
+
+int runtime_game_golf_collab(unsigned char *image) {
+    const char *mode=getenv("GOLF_ENTITLEMENTS");
+    if (!clock_foreign) return 0;
+    const int setting=mode && !strcmp(mode,"original") ? 0 : resogun_collab_items();
+    if (setting!=1) {
+        puts(setting==2 ? "Collab items: collab_items=earn: the tie-in parts are sold in the shop, not granted"
+                        : "Collab items: original: the tie-in parts stay locked (collab_items=original or GOLF_ENTITLEMENTS=original)");
+        return 0;
+    }
+    /* push rbp; mov rbp,rsp; push r15,r14,r13,r12,rbx; sub rsp,0xa8: 20 bytes, none rip-relative */
+    static const unsigned char prologue[20]={0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,
+                                             0x48,0x81,0xec,0xa8,0x00,0x00,0x00};
+    static const unsigned char grant_entry[13]={0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53};
+    const int32_t call=(int32_t)(GOLF_COLLAB_GRANT-(GOLF_COLLAB_GRANT_CALL+5));
+    unsigned char *site=image+GOLF_COLLAB_UPDATE;
+    if (memcmp(site,prologue,sizeof prologue) || memcmp(image+GOLF_COLLAB_GRANT,grant_entry,sizeof grant_entry) ||
+        image[GOLF_COLLAB_GRANT_CALL]!=0xe8 || memcmp(image+GOLF_COLLAB_GRANT_CALL+1,&call,4)) {
+        puts("Collab items: the entitlement update is not where eboot 1.17 has it; not granted");
+        return 0;
+    }
+    unsigned char *stub=runtime_low_map(4096,PROT_READ|PROT_WRITE|PROT_EXEC),*p=stub;
+    if (!stub) return 0;
+    golf_collab_image=image;
+    /* At entry rsp is 8 mod 16; nine pushes make it 16-aligned for the call. rdi (the update's
+     * object) and the other argument and scratch registers come back as they were. */
+    static const unsigned char push[]={0x50,0x51,0x52,0x56,0x57,0x41,0x50,0x41,0x51,0x41,0x52,0x41,0x53}; /* rax..r11 */
+    static const unsigned char pop[]={0x41,0x5b,0x41,0x5a,0x41,0x59,0x41,0x58,0x5f,0x5e,0x5a,0x59,0x58};
+    const uint64_t fn=(uint64_t)(uintptr_t)golf_collab_grant,back=(uint64_t)(uintptr_t)(site+sizeof prologue),
+                   to=(uint64_t)(uintptr_t)stub;
+    memcpy(p,push,sizeof push); p+=sizeof push;
+    *p++=0x48; *p++=0xb8; memcpy(p,&fn,8); p+=8;            /* mov rax, golf_collab_grant */
+    *p++=0xff; *p++=0xd0;                                   /* call rax */
+    memcpy(p,pop,sizeof pop); p+=sizeof pop;
+    memcpy(p,site,sizeof prologue); p+=sizeof prologue;     /* the prologue */
+    *p++=0xff; *p++=0x25; memset(p,0,4); p+=4;              /* jmp [rip]: back */
+    memcpy(p,&back,8);
+    site[0]=0xff; site[1]=0x25; memset(site+2,0,4);         /* jmp [rip]: the stub */
+    memcpy(site+6,&to,8);
+    memset(site+14,0x90,sizeof prologue-14);
+    printf("Collab items: collab_items=unlocked: %u tie-in outfit parts are granted with the add-ons\n",
+           (unsigned)(sizeof(golf_collab_items)/sizeof(golf_collab_items[0])));
+    return 1;
+}

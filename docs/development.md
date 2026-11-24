@@ -252,7 +252,7 @@ gamepad has connected; the game opens user 2's pad itself and its local co-op jo
 Cross from it.
 
 Scripted input for automated runs: `RESOGUN_PAD_FILE` (held buttons and stick values, re-read when
-the file changes; `p2:cross`, `p2:lx=0` press for user 2), `RESOGUN_PAD_RECORD` (F9 records the pad) and `RESOGUN_PAD_REPLAY`.
+the file changes; `p2:cross`, `p2:lx=0` press for user 2), `RESOGUN_PAD_RECORD=<file>` (records the pad the guest receives, keyed to the flip count; F9 stops it) and `RESOGUN_PAD_REPLAY=<file>` (plays it back by flip count, ignores real input, hands it back at the end; `S <flip> <name>` lines hold the replay until `$RESOGUN_PAD_SYNC/<name>` exists). `scripts/replay-to-tee/` drives them.
 
 ## Layout
 
