@@ -5,6 +5,13 @@ Each release's section becomes the text of its GitHub release (`tools/release_no
 without one does not publish. Keep each entry on one line: GitHub shows a line break in release
 text as a break. Sections from v0.15 down are from the Resogun runner this port is built on.
 
+## v0.1.6
+
+- Collab cups: the 2018 tie-in tournaments are back, the FINAL FANTASY 30th Anniversary Cup, two LEVEL-5 20th Anniversary Cups and the Famitsu Collab Cup, each with a qualifier and a final whose prizes are the tie-in outfits. Set Collab outfits and cups on the Saves tab to Classic (cut +3, shop parts 500 coins) or Hardcore (cut -3, finals on champion tees in strong wind, shop parts 1,500 to 2,500 coins), then play them from the International Tournament; prizes arrive in Notices, as they did in 2018
+- Cups need no friends and no waiting: with the Online tab empty, Play starts a server only your PC can reach, and the next stage opens right after your round instead of on a later date. A player who joins a friend gets the cups from the host's server
+- The Famitsu cup's final prize is 3,000 coins, because the original final outfit is missing from the game files
+- Known issues: the cups' "Qualification conditions" line always reads ±0 instead of the cut; Hardcore's cut and its limit of 3 rounds per stage a day have not been played through in a full round yet, so please report how they behave
+
 ## v0.1.5
 
 - Fixed Host a game in v0.1.4: the release left out the online server that v0.1.3 shipped, so hosting stopped with an error. Joining was not affected
