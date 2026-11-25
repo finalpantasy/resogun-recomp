@@ -5,6 +5,10 @@ Each release's section becomes the text of its GitHub release (`tools/release_no
 without one does not publish. Keep each entry on one line: GitHub shows a line break in release
 text as a break. Sections from v0.15 down are from the Resogun runner this port is built on.
 
+## v0.1.5
+
+- Fixed Host a game in v0.1.4: the release left out the online server that v0.1.3 shipped, so hosting stopped with an error. Joining was not affected
+
 ## v0.1.4
 
 - Fixed Host a game saying "Set up the game files first" on games set up from the launcher (issue #1): setup now writes the file the online server needs, and a game already set up gets it on its next start, in about a second
