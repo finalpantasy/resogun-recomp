@@ -35,6 +35,7 @@ static _Atomic int32_t http_next=0x10000;
 #define SIGN_BOARD_PATH "/nmg-us/replay-probe/gameapi_getsignboardlist"
 #define EULA_PATH "/nmg-us/replay-probe/gameapi_geteula"
 #define NOTICE_PATH "/nmg-us/replay-probe/gameapi_getinfolist"
+#define BONUS_LIST_PATH "/nmg-us/replay-probe/gameapi_getbonuslist"
 #define DAILY_SCORE_PATH "/nmg-us/replay-probe/gameapi_getscorelist"
 #define RIVAL_LIST_PATH "/nmg-us/replay-probe/gameapi_getrivallist"
 #define BOARD_LIST_PATH "/nmg-us/replay-probe/gameapi_getboardlist"
@@ -78,8 +79,11 @@ static const ReplayRoute replay_routes[]={
     {"https://127.0.0.1:8765" EULA_PATH, EULA_PATH, 110, 110, 64, 60+0x8000, 4, NULL},
     {"https://127.0.0.1:8765" FINISH_BOARD_PATH, FINISH_BOARD_PATH, 134, 226, 60, 60, 4, NULL},
     {"https://127.0.0.1:8765" SIGN_BOARD_PATH, SIGN_BOARD_PATH, 370, 1370, 36, 36, 4, NULL},
-    {"https://127.0.0.1:8765" NOTICE_PATH, NOTICE_PATH, 394, 1394, 36, 36, 4, NULL},
+    /* Notice list: empty (36 bytes), or up to 10 items such as a collab cup's result notices. */
+    {"https://127.0.0.1:8765" NOTICE_PATH, NOTICE_PATH, 394, 1394, 36, 0x1000, 4, NULL},
     {"https://127.0.0.1:8765" RIVAL_LIST_PATH, RIVAL_LIST_PATH, 438, 1574, 36, 36, 4, NULL},
+    /* Bonus list: the Notice Box asks for it before it opens; the local server sends the empty page. */
+    {"https://127.0.0.1:8765" BONUS_LIST_PATH, BONUS_LIST_PATH, 386, 1386, 28, 28, 4, NULL},
     {"https://127.0.0.1:8765" DAILY_SCORE_PATH, DAILY_SCORE_PATH, 166, 258, 52, 52, 4, NULL},
     {"https://127.0.0.1:8765" BOARD_LIST_PATH, BOARD_LIST_PATH, 138, 230, 40, 40, 4, NULL},
     /* Event schedule board: up to 18 rows (per-hole groups plus the Daily group). */
@@ -107,7 +111,8 @@ static const ReplayRoute replay_routes[]={
     /* Action 0x26 of the login run (slot 0x2f). Over plain http the game encrypts the payload and drops
      * it (eboot 0xec97d0), so the discovery fixture must list this key as https. */
     {"https://127.0.0.1:8765" NATIONAL_BOARD_PATH, NATIONAL_BOARD_PATH, 378, 1378, 28, 0x8000, 4, NULL},
-    {"http://127.0.0.1:8765" NATIONAL_BOARD_DOWNLOAD_PATH, NATIONAL_BOARD_DOWNLOAD_PATH, 0, 0, 136, 136, 4, NULL},
+    /* National board: one row (the local tournament, 136 bytes) or a collab cup's qualifier and final. */
+    {"http://127.0.0.1:8765" NATIONAL_BOARD_DOWNLOAD_PATH, NATIONAL_BOARD_DOWNLOAD_PATH, 0, 0, 136, 0x1000, 4, NULL},
     {"https://127.0.0.1:8765" NATIONAL_OWN_SCORE_PATH, NATIONAL_OWN_SCORE_PATH, 570, 1570, 16, 84, 4, NULL},
     {"https://127.0.0.1:8765" NATIONAL_GAME_DATA_PATH, NATIONAL_GAME_DATA_PATH, 406, 1406, 72, 72, 4, NULL},
     {"https://127.0.0.1:8765" NATIONAL_JOIN_PATH SESSION_QUERY, NULL, 422, 1422, 36, 36, 4, NULL},

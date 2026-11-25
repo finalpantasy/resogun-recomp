@@ -114,22 +114,48 @@ The bonus list (`gameapi_getbonuslist`/`gameapi_getbonus`, notice box 0x6c0651 a
 separate code-redemption list (16-byte code `0x7504`, text, a u16 `0x7506`, dates); it is not
 needed for tournament prizes.
 
-### 1.6 Can our server run these cups?
+### 1.6 Running a cup on the local server (FF30 tested in game, 2026-11-24)
 
-Yes, with these server additions (none run in the guest yet):
+The `collab-cups` server branch runs FF30 (`--collab-cup ff30`, `server/collab_cups.py`). Test runs
+used a 3-hole Eagle City round and a +30 test cut (`--cup-holes 3 --cup-course 1 --cup-cut 30`).
 
-| Piece | What | Status |
+| Step | Result in game |
+|---|---|
+| Qualifier open | The menu enables International Tournament, the "Now Open" popup shows, and the screen shows the cup name, 3H OUT, Mega cup, and the Cactuar outer and caps as participation prizes. |
+| Qualifier round | Played, then registered by `gameapi_registscorenational` (event 41). The server logs `Collab cup ff30: stage 1 score +26 (made the cut)`. |
+| Final unlock | After a reboot the clock reads 09/16. The qualifier shows "Qualified!", the final shows champion tees and strong wind, "Enter finals" works, and the Moogle shows as the participation prize. |
+| Qualifier notice | Notice Box lists "EG Cup No. 1 - Qualifier" with the score, position 1 and 1 entrant. Opening it marks it Read, but no item arrived (the item state bytes did not change). |
+| Final round | Not finished: one 10-minute run did not finish the 3 holes. |
+
+What the game needs (learned in these runs):
+
+- **One current entry.** Board selector 1 fills the single current entry (`[0x2c81150]+0x20`).
+  Entry builder 0xa5d3a0 copies every selector-1 row of the same group over it, so the last row
+  wins. The windows do not choose the row: with both rows the game showed the final (greyed out
+  when its window had not opened yet). The server sends only the current stage for selector 1 and
+  both stages for selectors 0 and 3.
+- **Notice Box needs the bonus list.** Opening Notices first sends `gameapi_getbonuslist`.
+  Without a route the box shows "Connection failed". The runtime now forwards it (request 386 to
+  1,386 bytes, 28-byte empty reply). Host fixtures are at v2 with `empty_bonus_list`.
+- **No ranked rows for a cup.** The final's screen showed "Connection failed" after a one-row
+  `getscorelistnational` page. With the empty page it opens. The cause is not traced.
+- **Prize grant (open).** The prize builder `FUN_006c97a0` finds the entry by notice object
+  +0x134 (event id). Notices built from `<nid>` items (`FUN_006c07d0`) clear that field and never
+  set it, so no entry matches and the prize list stays empty. +0x134 is set only on the other
+  path (`FUN_006c25a0`, line `*(notice+0x134) = record+0x18`), which builds notices from the list
+  at Notices-task `+0xe0` (national result records with the event id at +0x18). The next step is
+  to trace who fills that list (likely an own-score or result reply) and send that record.
+- When the stage-1 entry's +0x270 is 0, the notice copies its details from the stage-2 entry. In
+  the final phase that showed final-stage course icons in the qualifier notice.
+
+Out of scope here, with what each needs:
+
+| Item | Needs | Effort |
 |---|---|---|
-| Event catalog | FF30, Level-5 cup 1, Level-5 cup 2, Famitsu: course, holes, regulation, limits, prizes per stage. | New. |
-| Board | Two rows per event (stage 1 and 2, same `0x4145`, distinct ids), windows rebased to the player's date. | One row today (`national_tournament_board`). |
-| Archive | One settings archive per id with the reward keys. | `tournament_archive.py` writes course/hole/regulation only. |
-| Results | Own-score reply with rank, `0x42d1` = 1 when the qualifier score makes the cut, entrants `0x4275`. Single player: rank from the cut table, not from other players. | Rank 1 and `0x42d1` = 2 today. |
-| Notice | `getinfolist` item with `<nid>N</nid>` and a date once the stage closes. | Empty list fixture only. |
-
-Unknowns to settle in the first guest run: which board word is +0x278, whether the final row is
-enterable without the 0x40 flag, the time gate (if any) for showing the result notice, and the
-meaning of `limitation_*` values. GOLF_BREAK candidates: 0x6c1379 (national notice created),
-0x6c97a0 (prize list built), 0x6c89cf (grant).
+| Level-5 and Famitsu cups | Catalog rows in `collab_cups.py` (course, regulation, prize ids from section 3). | Small once FF30 grants. |
+| Launcher `collab_items=classic/hardcore` | Start a loopback cup server when online mode is off. Pass `--collab-cup` and `--cup-cut` (+3 or -3). | Medium. |
+| Hardcore limits | Three attempts a day (`limitation_reentry` or a server-side join count), harder course and conditions (regulation rows). | Medium. |
+| Shop prices per mode | Not traced. | Unknown. |
 
 ## 2. Fallback: runtime grant on a finished round
 
