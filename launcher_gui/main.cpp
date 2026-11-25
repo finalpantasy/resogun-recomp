@@ -448,8 +448,12 @@ bool checked(int id) { return SendMessageW(controls[id], BM_GETCHECK, 0, 0) == B
 void check(int id, bool on) { SendMessageW(controls[id], BM_SETCHECK, on ? BST_CHECKED : BST_UNCHECKED, 0); }
 
 struct Choice { const wchar_t* label; const char* value; };
-// Next start; Earn in game sells them in the shop's coin tab for 1500 to 2500 coins.
-const std::vector<Choice> collab_modes = {{L"All unlocked", "unlocked"}, {L"Earn in game", "earn"}, {L"Original", "original"}};
+// Next start; Earn in game sells them in the shop's coin tab for 1500 to 2500 coins. The cup modes
+// run the 2018 collab cups on the title server (tools\server\collab_cups.py), whose prizes are the
+// outfits, and sell the parts for 500 coins (Classic) or 1500 to 2500 (Hardcore).
+const std::vector<Choice> collab_modes = {{L"All unlocked", "unlocked"}, {L"Earn in game (shop)", "earn"},
+                                          {L"Classic cups (win or buy for 500)", "classic"},
+                                          {L"Hardcore cups (cut -3, 3 tries a day)", "hardcore"}, {L"Original", "original"}};
 const std::vector<Choice> miss_flash_modes = {{L"Off", "0"}, {L"On (original)", "1"}};
 const std::vector<Choice> window_modes = {{L"Borderless window (recommended)", "borderless"}, {L"Fullscreen", "fullscreen"}, {L"Window", "windowed"}};
 const std::vector<Choice> sizes = {{L"1280 x 720", "1280x720"}, {L"1600 x 900", "1600x900"}, {L"1920 x 1080", "1920x1080"},
@@ -720,6 +724,10 @@ const char* const kDefaultPort = "48765";
 constexpr unsigned short kLanDiscoveryPort = 48765;
 constexpr UINT_PTR kOnlineTimer = 7;
 HANDLE server_process = nullptr, server_job = nullptr;
+// What the running server was started for: loopback only (the collab cups of an offline Play) or
+// hosting, and its collab_items cup mode ("" when none).
+bool server_loopback = false;
+std::string server_cups;
 std::atomic<bool> server_ready{false};
 std::mutex lan_lock;
 std::vector<std::pair<std::wstring, std::wstring>> lan_games; // (code, host name), under lan_lock
@@ -866,10 +874,18 @@ void stop_server() {
     fs::remove(data / L"server" / L"online.txt", ec);
 }
 
-// Starts tools\server\host.py --online on every network adapter of this PC; its output goes to
-// data\logs\server.log. The process is in a job that ends it when the launcher closes.
-bool start_server(std::wstring& error) {
-    if (server_running()) return true;
+// settings.ini collab_items when it is a cup mode (classic or hardcore), else "".
+std::string cup_mode() {
+    const std::string mode = settings.get("collab_items", "unlocked");
+    return mode == "classic" || mode == "hardcore" ? mode : "";
+}
+
+// Starts tools\server\host.py --online on every network adapter of this PC, or with `loopback` a
+// server only this PC can reach (no router port, no invite codes) for the collab cups of an offline
+// Play. Its output goes to data\logs\server.log. The process is in a job that ends it when the
+// launcher closes.
+bool start_server(std::wstring& error, bool loopback = false) {
+    if (server_running() && server_loopback == loopback && server_cups == cup_mode()) return true;
     stop_server();
     Paths p = saved_paths();
     const fs::path eboot = data / L"game" / p.image / L"eboot.elf", tools = root / L"tools";
@@ -893,11 +909,13 @@ bool start_server(std::wstring& error) {
     // server_bind in launcher.ini: one adapter's address only (say a VPN's); every adapter by default.
     std::string bind = prefs.get("server_bind", "0.0.0.0");
     if (bind.empty() || bind.size() > 15 || bind.find_first_not_of("0123456789.") != std::string::npos) bind = "0.0.0.0";
-    std::wstring command = quote(python.wstring()) + L" -I " + quote(host.wstring()) + L" --online --eboot " + quote(ready.wstring()) +
+    std::wstring command = quote(python.wstring()) + L" -I " + quote(host.wstring()) + L" --eboot " + quote(ready.wstring()) +
                            L" --libcrypto " + quote(crypto.wstring()) + L" --state " + quote((data / L"server").wstring()) +
-                           L" --port " + port + L" --bind " + wide(bind) + L" --name " + wide(online_name()) +
-                           L" --stop-file " + quote((data / L"server" / L"stop").wstring());
-    if (prefs.get("upnp", "1") == "0") command += L" --no-port-mapping";
+                           L" --port " + port + L" --stop-file " + quote((data / L"server" / L"stop").wstring());
+    if (loopback) command += L" --bind 127.0.0.1";
+    else command += L" --online --bind " + wide(bind) + L" --name " + wide(online_name());
+    if (!loopback && prefs.get("upnp", "1") == "0") command += L" --no-port-mapping";
+    if (!cup_mode().empty()) command += L" --collab-cups " + wide(cup_mode());
     SECURITY_ATTRIBUTES sa{sizeof sa, nullptr, TRUE};
     const fs::path log = logs / L"server.log";
     HANDLE out = CreateFileW(log.c_str(), GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, &sa,
@@ -922,6 +940,8 @@ bool start_server(std::wstring& error) {
     ResumeThread(pi.hThread);
     CloseHandle(pi.hThread);
     server_process = pi.hProcess;
+    server_loopback = loopback;
+    server_cups = cup_mode();
     SetTimer(window, kOnlineTimer, 1000, nullptr); // online.txt fills in as the router answers
     // Ready once the log holds "ready ADDRESS:PORT" (the first start also builds the fixtures).
     HANDLE watched = server_process;
@@ -1063,10 +1083,11 @@ void refresh_online() {
         EnableWindow(controls[ID_INVITE], FALSE);
         s += valid_join(join) ? L"Play joins your friend's game. In the game, pick Online, then Open Course."
                               : L"That is not an invite code or address. Codes look like R2M0-255Y-FPT7-WP1X.";
+        if (valid_join(join) && !cup_mode().empty()) s += L" The collab cups are the host's.";
     } else {
         EnableWindow(controls[ID_INVITE], FALSE);
-        s += L"Play runs offline. To play with friends, one of you presses Host a game and sends the invite code; "
-             L"the others paste it into Join.";
+        s += cup_mode().empty() ? L"Play runs offline." : L"Play runs a server only this PC can reach, for the collab cups.";
+        s += L" To play with friends, one of you presses Host a game and sends the invite code; the others paste it into Join.";
     }
     SetWindowTextW(controls[ID_INVITE_CODE], code_line.c_str());
     SetWindowTextW(controls[ID_ONLINE_STATUS], s.c_str());
@@ -1075,7 +1096,7 @@ void refresh_online() {
 // Command line options for the game, or false (with a message shown) when the Online page is not filled in.
 bool online_arguments(std::wstring& command) {
     const std::string mode = online_mode(), join = trimmed(prefs.get("online_join")), name = online_name();
-    if (mode != "host" && join.empty()) {
+    if (mode != "host" && join.empty() && cup_mode().empty()) {
         // Signed in with no server, the game reports "Server connection failed" on the island; signed
         // out it plays offline without asking.
         command += L" --np-mode offline";
@@ -1085,9 +1106,11 @@ bool online_arguments(std::wstring& command) {
         MessageBoxW(window, L"On the Online page, enter a name of 3 to 16 letters, digits, - or _.", kTitle, MB_ICONWARNING);
         return false;
     }
-    if (mode == "host") {
+    if (mode == "host" || join.empty()) {
+        // Hosting, or an offline Play with the collab cups on: this PC's server (loopback only when
+        // offline). A joined game's cups come from the host's server instead.
         std::wstring error;
-        if (!start_server(error)) { MessageBoxW(window, error.c_str(), kTitle, MB_ICONWARNING); return false; }
+        if (!start_server(error, mode != "host")) { MessageBoxW(window, error.c_str(), kTitle, MB_ICONWARNING); return false; }
         command += L" --online-id " + wide(name) + L" --join 127.0.0.1:" + wide(online_port());
         return true;
     }
@@ -1992,7 +2015,7 @@ void create_controls() {
     add(PageSaves, L"BUTTON", L"Rename", BS_PUSHBUTTON | WS_TABSTOP, 512, 256, 98, 28, ID_PROFILE_RENAME);
     add(PageSaves, L"STATIC", L"", SS_LEFT, 30, 296, 580, 36, ID_PROFILE_STATUS);
     // settings.ini collab_items: the tie-in outfits no add-on grants (src/runtime_game.c, runtime_collab.c).
-    add(PageSaves, L"STATIC", L"Collab outfits", SS_LEFT, 30, 342, 160, 22);
+    add(PageSaves, L"STATIC", L"Collab outfits and cups", SS_LEFT, 30, 342, 165, 22);
     add(PageSaves, WC_COMBOBOXW, L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 200, 338, 300, 200, ID_COLLAB);
     add(PageSaves, L"STATIC", L"Back up copies a save to data\\backups. Saves stay in data\\save (Main) and data\\saves.",
         SS_LEFT, 30, 376, 580, 40);
@@ -2431,6 +2454,7 @@ LRESULT CALLBACK proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     case WM_GAME_EXIT:
         game_running = false;
+        if (server_loopback) stop_server(); // the collab cups' private server ends with the game
         load_settings(); // what the game's Display Settings saved
         load_option_controls();
         refresh_saves();

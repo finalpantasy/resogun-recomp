@@ -708,7 +708,8 @@ int runtime_game_golf_resolution(unsigned char *image) {
  * Final Fantasy 30th anniversary, Atelier Lydie & Suelle, Famitsu) are in the installed game but
  * no add-on grants them: they came through events, campaign codes and shop windows that are gone.
  * settings.ini collab_items=unlocked (the default) grants them the way the game grants an installed
- * add-on's items; earn sells them in the shop instead (runtime_collab.c); original leaves them out. Its entitlement update (0xc74f90, called after the save loads, at 0x3580fe and
+ * add-on's items; earn sells them in the shop instead (runtime_collab.c); classic and hardcore leave
+ * them to the title server's collab cups and the shop; original leaves them out. Its entitlement update (0xc74f90, called after the save loads, at 0x3580fe and
  * 0xb9f41a) walks the shipped entitlement table and, for each installed label, finds the item's
  * record in the item index (0x2c7cc70: 42 trees of nodes left +0x0, parent +0x8, right +0x10,
  * nil flag +0x19, savedataID +0x24, the 0xa0-byte record from +0x20) and passes a copy to
@@ -805,7 +806,9 @@ int runtime_game_golf_collab(unsigned char *image) {
     const int setting=mode && !strcmp(mode,"original") ? 0 : resogun_collab_items();
     if (setting!=1) {
         puts(setting==2 ? "Collab items: collab_items=earn: the tie-in parts are sold in the shop, not granted"
-                        : "Collab items: original: the tie-in parts stay locked (collab_items=original or GOLF_ENTITLEMENTS=original)");
+             : setting==3 ? "Collab items: collab_items=classic: the tie-in parts are won in the collab cups or bought in the shop"
+             : setting==4 ? "Collab items: collab_items=hardcore: the tie-in parts are won in the collab cups or bought in the shop"
+                          : "Collab items: original: the tie-in parts stay locked (collab_items=original or GOLF_ENTITLEMENTS=original)");
         return 0;
     }
     /* push rbp; mov rbp,rsp; push r15,r14,r13,r12,rbx; sub rsp,0xa8: 20 bytes, none rip-relative */

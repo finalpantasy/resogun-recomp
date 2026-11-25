@@ -172,14 +172,14 @@ What the game needs (learned in these runs):
 - When the stage-1 entry's +0x270 is 0, the notice copies its details from the stage-2 entry. In
   the final phase that showed final-stage course icons in the qualifier notice.
 
-Out of scope here, with what each needs:
+Added after FF30 (collab-cups server branch and this branch's runtime and launcher):
 
-| Item | Needs | Effort |
-|---|---|---|
-| Level-5 and Famitsu cups | Catalog rows in `collab_cups.py` (course, regulation, prize ids from section 3). | Small once FF30 grants. |
-| Launcher `collab_items=classic/hardcore` | Start a loopback cup server when online mode is off. Pass `--collab-cup` and `--cup-cut` (+3 or -3). | Medium. |
-| Hardcore limits | Three attempts a day (`limitation_reentry` or a server-side join count), harder course and conditions (regulation rows). | Medium. |
-| Shop prices per mode | Not traced. | Unknown. |
+| Item | As built |
+|---|---|
+| Level-5 and Famitsu cups | Catalog rows in `collab_cups.py`: Level-5 cups 1 and 2 on Alpina Forest and Kanaloa Beach, Famitsu on Eagle City then Akigase Keikoku, row 1014 (the courses are picks). The Famitsu final pays 3,000 coins (item 5716) through `score_reward`. |
+| Launcher `collab_items=classic/hardcore` | Play with online off starts `host.py --bind 127.0.0.1 --collab-cups MODE` (no router port, no invite code) and joins it. Hosting passes `--collab-cups` to the hosting server; a joined game uses the host's cups. |
+| Hardcore limits | Cut -3, every final on row 1034, `resetThreshold` 3 with a per-day server join count. |
+| Shop prices per mode | Classic sells every tie-in part for 500 coins, Hardcore at the earn prices (`src/runtime_collab.c`). |
 
 ## 2. Fallback: runtime grant on a finished round
 

@@ -162,8 +162,9 @@ struct Values {
     bool startup_frame_rate_priority = true;
     /// Everybody's Golf: the tie-in outfits no add-on grants (Level-5, Final Fantasy 30th, Atelier,
     /// Famitsu): 1 unlocked (granted with the add-ons, src/runtime_game.c, the default), 2 earn
-    /// (sold in the shop, src/runtime_collab.c), 0 original (locked; also GOLF_ENTITLEMENTS=original).
-    /// Read once, before the game starts.
+    /// (sold in the shop, src/runtime_collab.c), 0 original (locked; also GOLF_ENTITLEMENTS=original),
+    /// 3 classic and 4 hardcore (won in the collab cups the title server runs, also sold in the shop:
+    /// 500 coins a part in classic, the earn prices in hardcore). Read once, before the game starts.
     int collab_items = 1;
     std::atomic<bool> frame_rate_priority{true};
     /// Everybody's Golf in PS4 Pro mode: the height the game renders its scene at, 16:9 (1080,

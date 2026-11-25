@@ -847,6 +847,46 @@
       "defaults": {
         "miss_shot_flash": "0"
       }
+    },
+    {
+      "id": "collab_items",
+      "label": "Collab outfits and cups",
+      "help": "The 2018 tie-in outfits (Final Fantasy 30th, Level-5, Atelier, Famitsu). The cup modes need the title server that EverybodysGolf.exe starts with Play; prizes come from the cup notices. Applies at the next start.",
+      "choices": [
+        {
+          "label": "All unlocked",
+          "set": {
+            "collab_items": "unlocked"
+          }
+        },
+        {
+          "label": "Earn in game (shop, 1500-2500 coins)",
+          "set": {
+            "collab_items": "earn"
+          }
+        },
+        {
+          "label": "Classic cups (win, or buy for 500 coins)",
+          "set": {
+            "collab_items": "classic"
+          }
+        },
+        {
+          "label": "Hardcore cups (cut -3, 3 tries a day)",
+          "set": {
+            "collab_items": "hardcore"
+          }
+        },
+        {
+          "label": "Original (locked)",
+          "set": {
+            "collab_items": "original"
+          }
+        }
+      ],
+      "defaults": {
+        "collab_items": "unlocked"
+      }
     }
   ],
   "actions": [

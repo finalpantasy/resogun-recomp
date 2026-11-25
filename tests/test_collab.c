@@ -1,4 +1,4 @@
-/* collab_items=earn (src/runtime_collab.c): the shop sheet in a made-up two-stream archive gets
+/* collab_items=earn and classic (src/runtime_collab.c): the shop sheet in a made-up two-stream archive gets
  * the parts on sale on floor 16 at 3 to 5 times the tab's 500 coins, with no window, and the other stream is unchanged. */
 #include <assert.h>
 #include <stdio.h>
@@ -63,6 +63,18 @@ int main(void) {
     assert(strstr(text, "0\t16\t61\t\t\t\t\t8965\t\t\t\t\t\t\t1500\t1\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\r\n"));
     assert(strstr(text, "0\t16\t2017\t\t\t\t\t8984\t\t\t\t1\t\t\t2500\t1\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\r\n"));
     assert(!strstr(text, "2018"));
+    /* collab_items=classic: every part at 500 coins. */
+    collab_mode = 3;
+    unsigned char *classic = NULL;
+    size_t classic_size = 0;
+    assert(!runtime_collab_patch_archive(file, o, &classic, &classic_size, &opened, &added));
+    memcpy(out_rows, classic + 16, sizeof out_rows);
+    n = sizeof text - 1;
+    assert(uncompress((unsigned char *)text, &n, classic + 56, out_rows[0][3]) == Z_OK);
+    text[n] = 0;
+    assert(strstr(text, "	8965							500	1	") && strstr(text, "	8984				1			500	1	"));
+    free(classic);
+    collab_mode = -1;
     /* Not an archive, or no shop sheet in it: nothing. */
     assert(runtime_collab_patch_archive((const unsigned char *)"FB", 2, &patched, &size, &opened, &added));
     rows[1][0] = sheet_hash + 1;

@@ -77,8 +77,8 @@ int resogun_skip_intro(void);
  * in its PS4 Pro frame rate priority mode (60 FPS). Valid once resogun_gpu_init returned. */
 int resogun_frame_rate_priority(void);
 /* settings.ini collab_items (RESOGUN_COLLAB_ITEMS): Everybody's Golf's tie-in outfits that no add-on
- * grants: 1 unlocked (default), 2 earn (sold in the shop), 0 original. Valid once resogun_gpu_init
- * returned. */
+ * grants: 1 unlocked (default), 2 earn (sold in the shop), 0 original, 3 classic and 4 hardcore (won
+ * in the server's collab cups, also sold in the shop). Valid once resogun_gpu_init returned. */
 int resogun_collab_items(void);
 /* settings.ini render_height (RESOGUN_RENDER_HEIGHT): Everybody's Golf's scene height in PS4 Pro
  * mode, 16:9; 0 leaves it to the game. Valid once resogun_gpu_init returned. */

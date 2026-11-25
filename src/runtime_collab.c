@@ -1,5 +1,6 @@
-/* Everybody's Golf (CUSA04687): settings.ini collab_items=earn puts the tie-in outfits on sale in
- * the game's own shop instead of granting them (runtime_game.c grants them with collab_items=
+/* Everybody's Golf (CUSA04687): settings.ini collab_items=earn (and hardcore, at the same prices;
+ * classic at 500 coins a part) puts the tie-in outfits on sale in the game's own shop instead of
+ * granting them (runtime_game.c grants them with collab_items=
  * unlocked). The shop reads its stock from the shop sheet data/param/serverFile/shop_price_sheet.txt
  * inside xbdata/param/serverFile/info.<locale>.xb (shop_id, floor_id, sort_id, ..., item_id, ...,
  * price, sales_num, weekday, hour and date window columns). Floor 16 is the coin tab that sold the
@@ -23,10 +24,13 @@
 #define COLLAB_PRICE_PART 1500   /* caps, accessories, gloves, shoes, socks: 3x */
 #define COLLAB_PRICE_OUTFIT 2000 /* outers and the T-shirt: 4x */
 #define COLLAB_PRICE_TOP 2500    /* the full-body suits (Moogle, Jibanyan, Komasan) and the FF30 cart: 5x */
+#define COLLAB_PRICE_CLASSIC 500 /* collab_items=classic: what the tab's own gear and the 2018 anniversary rows cost */
 static const uint16_t collab_outfits[]={8953,8969,8970,8986,8987,8988,8989,8990,8991,9124};
 static const uint16_t collab_top[]={8956,8958,8984,8985};
+static int collab_mode=-1; /* resogun_collab_items(), or 0 with GOLF_ENTITLEMENTS=original */
 
 static int collab_price(unsigned id) {
+    if (collab_mode==3) return COLLAB_PRICE_CLASSIC;
     for (size_t i=0;i<sizeof(collab_top)/sizeof(collab_top[0]);++i) if (collab_top[i]==id) return COLLAB_PRICE_TOP;
     for (size_t i=0;i<sizeof(collab_outfits)/sizeof(collab_outfits[0]);++i) if (collab_outfits[i]==id) return COLLAB_PRICE_OUTFIT;
     return COLLAB_PRICE_PART;
@@ -155,19 +159,18 @@ done:
     return result;
 }
 
-/* Called by the file layer with each resolved game path: while collab_items=earn the shop archive
- * becomes the patched copy, made at the first open. */
+/* Called by the file layer with each resolved game path: while collab_items=earn, classic or
+ * hardcore the shop archive becomes the patched copy, made at the first open. */
 void runtime_collab_redirect(const char *guest,char *host,size_t size) {
     const char *at=strstr(guest,"/param/serverFile/info");
     if (!at || strchr(at+18,'/')) return;
     const size_t len=strlen(at);
     if (strcmp(at+len-3,".xb")) return;
-    static int mode=-1;
-    if (mode<0) {
+    if (collab_mode<0) {
         const char *ent=getenv("GOLF_ENTITLEMENTS");
-        mode=ent && !strcmp(ent,"original") ? 0 : resogun_collab_items();
+        collab_mode=ent && !strcmp(ent,"original") ? 0 : resogun_collab_items();
     }
-    if (mode!=2) return;
+    if (collab_mode<2) return;
     static pthread_mutex_t lock=PTHREAD_MUTEX_INITIALIZER;
     static char made[8][128];
     static int made_ok[8];
@@ -201,8 +204,10 @@ void runtime_collab_redirect(const char *guest,char *host,size_t size) {
             remove(copy);
             if (ok && !rename(tmp,copy)) {
                 done=1;
-                printf("Collab items: collab_items=earn: the shop's coin tab sells %u tie-in parts for %d to %d"
-                       " coins, every day (%u rows reopened, %u added; %s)\n",opened+added,COLLAB_PRICE_PART,COLLAB_PRICE_TOP,opened,added,base);
+                printf("Collab items: collab_items=%s: the shop's coin tab sells %u tie-in parts for %d to %d"
+                       " coins, every day (%u rows reopened, %u added; %s)\n",
+                       collab_mode==3 ? "classic" : collab_mode==4 ? "hardcore" : "earn",opened+added,
+                       collab_price(0),collab_mode==3 ? COLLAB_PRICE_CLASSIC : COLLAB_PRICE_TOP,opened,added,base);
             } else remove(tmp);
         } else printf("Collab items: %s has no shop sheet to patch; the shop is unchanged\n",base);
         if (in) fclose(in);

@@ -82,7 +82,10 @@ void Set(Values& v, const std::string& key, const std::string& value) {
         if (mode == "unlocked") v.collab_items = 1;
         else if (mode == "earn") v.collab_items = 2;
         else if (mode == "original") v.collab_items = 0;
-        else std::printf("Settings: collab_items=%s is not unlocked, earn or original; using unlocked\n", value.c_str());
+        else if (mode == "classic") v.collab_items = 3;
+        else if (mode == "hardcore") v.collab_items = 4;
+        else std::printf("Settings: collab_items=%s is not unlocked, earn, classic, hardcore or original; using unlocked\n",
+                         value.c_str());
     } else if (key == "render_height") {
         const bool listed = i == 0 || i == 1080 || i == 1440 || i == 1800 || i == 2160 || i == 2880;
         v.startup_render_height = v.render_height = listed ? i : 0;
