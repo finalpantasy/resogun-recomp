@@ -9,16 +9,13 @@ server in `server/`, and 2018 news. Nothing here was run in the guest unless it 
 
 - The national tournament (US "International Tournament", JP 全国大会) is driven by the server:
   the board list names the events and stages, a per-event archive downloaded from the server
-  carries the course, conditions and **prizes**, the server ranks the scores, and a server notice
-  makes the game build a result notice in the Notices box. The prizes in that notice come from the
-  downloaded settings file, and the game grants them itself with the item-grant function 0xcd0250
-  when the player opens the notice.
+  carries the course, conditions and **prizes**, and the server ranks the scores. After a round
+  the game stores a result record in the save. On a later day it lists that record in the Notices
+  box, and opening it grants the prizes from the current entry's archive keys with the item-grant
+  function 0xcd0250.
 - So our server can define the FF30, Level-5 and Famitsu cups with their own courses, conditions and
-  prize item ids, and deliver the prizes through the game's own Notices flow. The parts already
-  working (board, archive, entry, first tee) are in `server/golf_server.py`. The missing server
-  parts are the second (final) stage row, reward keys in the archive, result fields in the
-  own-score reply, and a notice with a `<nid>` tag. None of the notice/prize path has run in the
-  guest yet.
+  prize item ids, and deliver the prizes through the game's own Notices flow. The `collab-cups`
+  server branch does this for FF30, and both prizes were granted and worn in game (section 1.6).
 - Fallback without the notice path: the runtime already sees every title HTTP request, including
   `gameapi_registscorenational` with the event id and score, and already knows how to grant items
   (`runtime_game.c`, 0xcd0250). It can grant prizes when a qualifying score is submitted.
@@ -93,22 +90,44 @@ carries the result; parser 0xb731d4 / 0xb77575-0xb776a8:
 
 ### 1.5 Prize delivery through the Notices box
 
-1. The notice list (`gameapi_getinfolist`, slot 0x05) items carry a `0x3030` string. A
-   `<nid>N</nid>` tag stores N at item +0x343c of the notice list ([0x2c8f2e0]+0x10378, stride
-   0x2b18, count +0x1b81c; parser 0xb68d42 and 0xb69437, 0xb6949b). (`<bid>` goes to +0x3440.)
-2. The Notices box task (`FUN_006c07d0`, 0x6c11f5-0x6c1379) turns each such item into a national
-   notice when it finds a stage-1 and a stage-2 entry whose +0x278 equals N.
-3. `FUN_006c97a0` builds the prize list from that entry's stage block (stage byte +0x271):
+Traced in Ghidra and confirmed in game (section 1.6):
+
+1. **Round end** (`FUN_00809680`, 0x80a70a-0x80a951). After a national round the game writes a
+   result record into the save's national ring (40 records of 0x3c at save +0xfa1588, index at
+   +0xfa1584). Fields: +0 the round's date; +6 flags, with bit 0 set; +7 bit 1 for the final
+   stage; +8 the entry's last day (entry +0x280); +0x38 the event id (entry +0x26c). Bit 3 of +6
+   (prize received) stays clear.
+2. **Listing** (`FUN_006c25a0` with `FUN_006c2400`). Notices lists each ring record whose +8 day
+   is before the clock's day (`FUN_00a69890`) as "EG Cup No. N - Qualifier" or "- Final". The
+   notice gets +0x130 = 1, +0x134 = event id and flags 0x60000.
+3. **Opening** (`FUN_006c60c0`, `FUN_006cb450`). While the prize bit (notice flag 0x80000, ring
+   +6 bit 3) is clear, `FUN_006c6b60` queues the national own-score request (mode 0x1d,
+   `gameapi_getmyscorenational`). `FUN_006cab00` waits for the reply, then calls
+   `FUN_006c97a0(notice, 1)`.
+4. **Prize list** (`FUN_006c97a0`). It finds the entry with the notice's event id: the current
+   entry first ([0x2c81150]+0x20, id at +0x28c), then the vectors at +0x11c0 and +8. Then it reads
+   that entry's stage block (stage byte +0x271):
    - `reg_reward_*_1/_2` (sponsored or normal by +0x228): an id > 0 adds that item, count 1;
      an id < 0 draws a random item from the shop pool (0x5edde0, as Lucky Chance does) and grants it
      at once (0x6c9b49, 0x6c9ce9).
    - `score_reward`: flag set and score (+0x2c0) <= `score_reward_score` adds `itemId` x `itemCount`.
    - `rank_reward`: flag set and rank (+0x2d0) <= `rank_reward_value` adds `itemId` x `itemCount`.
-4. Opening the notice runs `FUN_006c8900`: for each listed prize, `0xcd0250(record+0x234, 1, count)`
+
+   It sets the prize bit in every case. When no entry matches, the list is empty and the prize is
+   lost for that record (the details page then shows "1/0").
+5. **Grant** (`FUN_006c8900`). For each listed prize it calls `0xcd0250(record+0x234, 1, count)`
    (call at 0x6c89cf), the same grant the runtime uses for the unlocked mode. An item set
    (category 1000, e.g. 9128 "Famitsu T-shirt & cap set") is expanded into its parts by 0x879ad0.
-   The save remembers opened notices (ring of 128 ids at save +0xfa1008) and national prizes
-   (ring of 40 x 0x3c at +0xfa1584, item ids at +0xfa15b0..+0xfa15b6), so a prize is given once.
+   It writes the notice flags (prize bit included) and the item ids (+0x24..+0x34) back into the
+   ring record, so each prize is given once.
+
+So on the login that shows a result, the current entry must be the stage that just finished, with
+its settings archive (the prize keys). The game builds no current entry from a selector-1 row
+whose window has closed, and only the current entry gets its archive.
+
+`<nid>N</nid>` items in the notice list (`gameapi_getinfolist`, item +0x343c, parser 0xb68d42) do
+not carry prizes: `FUN_006c07d0` shows them as "EG Cup No. N - Tournament Introduction" and never
+sets +0x130 or +0x134.
 
 The bonus list (`gameapi_getbonuslist`/`gameapi_getbonus`, notice box 0x6c0651 and 0x6c5e9e) is a
 separate code-redemption list (16-byte code `0x7504`, text, a u16 `0x7506`, dates); it is not
@@ -118,33 +137,38 @@ needed for tournament prizes.
 
 The `collab-cups` server branch runs FF30 (`--collab-cup ff30`, `server/collab_cups.py`). Test runs
 used a 3-hole Eagle City round and a +30 test cut (`--cup-holes 3 --cup-course 1 --cup-cut 30`).
+The final round also used the qualifier's Mega cup row (1013) instead of 1034, through a test
+driver outside the repo, so a scripted swing could finish it inside one 10-minute run.
 
 | Step | Result in game |
 |---|---|
 | Qualifier open | The menu enables International Tournament, the "Now Open" popup shows, and the screen shows the cup name, 3H OUT, Mega cup, and the Cactuar outer and caps as participation prizes. |
-| Qualifier round | Played, then registered by `gameapi_registscorenational` (event 41). The server logs `Collab cup ff30: stage 1 score +26 (made the cut)`. |
-| Final unlock | After a reboot the clock reads 09/16. The qualifier shows "Qualified!", the final shows champion tees and strong wind, "Enter finals" works, and the Moogle shows as the participation prize. |
-| Qualifier notice | Notice Box lists "EG Cup No. 1 - Qualifier" with the score, position 1 and 1 entrant. Opening it marks it Read, but no item arrived (the item state bytes did not change). |
-| Final round | Not finished: one 10-minute run did not finish the 3 holes. |
+| Qualifier round | Played, then registered by `gameapi_registscorenational` (event 41). The server logs `Collab cup ff30: stage 1 score +24 (made the cut)`. |
+| Qualifier result (clock 09/15 01:00) | Notice Box lists "EG Cup No. 5 - Qualifier" (gift icon, Unread). Opening it shows position 1 of 1, and the ring record then holds items 8953 x1 and 8962 x1. Customize Character lists "FF30th Anniversary Collaboration Cactuar Outerwear" (NEW, no DLC tag); it was worn, and the next boot showed it on the island. |
+| Final unlock (09/16 12:00) | The qualifier shows "Qualified!", the final screen shows "Enter finals" and the Moogle as the participation prize. |
+| Final round | Finished in one run (3 holes, +26), registered as event 42. |
+| Final result (09/18 12:00) | "EG Cup No. 5 - Finals" shows "Final Result", +26, position 1, and "Participation prize: Sets, FF30th Anniversary Collaboration Kigurumi (Moogle), Got it!". The ring record holds 8958 x1, and the Moogle set was worn in Customize Character. |
 
 What the game needs (learned in these runs):
 
 - **One current entry.** Board selector 1 fills the single current entry (`[0x2c81150]+0x20`).
   Entry builder 0xa5d3a0 copies every selector-1 row of the same group over it, so the last row
-  wins. The windows do not choose the row: with both rows the game showed the final (greyed out
-  when its window had not opened yet). The server sends only the current stage for selector 1 and
-  both stages for selectors 0 and 3.
+  wins. A future window is accepted (the final showed greyed out), but a closed window leaves no
+  current entry (+0x28c = -1). The server sends only the current stage for selector 1 and both
+  stages for selectors 0 and 3. In these runs the selector-0/3 vectors (+8, +0x11c0) stayed
+  empty.
+- **Results logins.** A result is listed only on a day after the stage's last day (section 1.5,
+  step 2), and the prize keys come from the current entry (step 4). So on the first login after
+  the cut (clock D+1 01:00) the qualifier stays current with its window held open to that day,
+  and after the final (clock D+4 12:00) the final does the same. Without that, run 16 listed the
+  notice, found no entry, set the prize bit with an empty list ("1/0"), and the record was spent.
 - **Notice Box needs the bonus list.** Opening Notices first sends `gameapi_getbonuslist`.
   Without a route the box shows "Connection failed". The runtime now forwards it (request 386 to
   1,386 bytes, 28-byte empty reply). Host fixtures are at v2 with `empty_bonus_list`.
 - **No ranked rows for a cup.** The final's screen showed "Connection failed" after a one-row
   `getscorelistnational` page. With the empty page it opens. The cause is not traced.
-- **Prize grant (open).** The prize builder `FUN_006c97a0` finds the entry by notice object
-  +0x134 (event id). Notices built from `<nid>` items (`FUN_006c07d0`) clear that field and never
-  set it, so no entry matches and the prize list stays empty. +0x134 is set only on the other
-  path (`FUN_006c25a0`, line `*(notice+0x134) = record+0x18`), which builds notices from the list
-  at Notices-task `+0xe0` (national result records with the event id at +0x18). The next step is
-  to trace who fills that list (likely an own-score or result reply) and send that record.
+- **Test input.** The final was finished with a flip-timed swing (`RESOGUN_PAD_REPLAY`, presses at
+  flips 0, 50 and 102) at a 3x frame rate. Timed file presses missed the impact too often.
 - When the stage-1 entry's +0x270 is 0, the notice copies its details from the stage-2 entry. In
   the final phase that showed final-stage course icons in the qualifier notice.
 
@@ -247,8 +271,8 @@ Rank prizes are not useful for a single player; use `score_reward` for skill tar
 | Event catalog with Classic/Hardcore numbers | server (separate worktree; main checkout has another chat's edits) | 0.5 day |
 | Two-stage board, per-id archives with reward keys | server | 1 day |
 | Own-score results (`0x42d1`, rank, entrants) and cut logic | server | 1 day |
-| Result notice with `<nid>`, dates | server | 0.5 day |
-| Guest runs: entry to final, notice, prize grant, save/restart check | runtime + server | 2-3 days (main risk: the unknowns in 1.6) |
+| Results logins (the closed stage stays the current entry) | server | Done for FF30 |
+| Guest runs: entry to final, notice, prize grant, save/restart check | runtime + server | Done for FF30 (section 1.6) |
 | Launcher mode switch (Classic/Hardcore/off), no `unlocked` grant while active, shop prices | launcher + `runtime_collab.c` | 1 day |
 | Fallback runtime grant (if the notice path fails) | `runtime_net.c`, `runtime_game.c` | 2 days |
 
