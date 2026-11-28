@@ -384,8 +384,14 @@ static int64_t do_close(int fd) {
     pthread_mutex_unlock(&lock);
     return 0;
 }
+/* The guest's stdin, stdout and stderr are the runtime's streams. The launcher reopens stdout and
+ * stderr on the log file (launcher.c); a process without a console gets new descriptors for them,
+ * so descriptors 1 and 2 themselves may not be open, and libc's reports (its heap check before an
+ * abort) and the game's own output went nowhere. */
 static int host_fd(int fd) {
-    if (fd>=0 && fd<3) return fd;
+    if (fd==0) return fileno(stdin);
+    if (fd==1) return fileno(stdout);
+    if (fd==2) return fileno(stderr);
     File *f=get(fd);
     return f ? f->host : -1;
 }
