@@ -5,6 +5,12 @@ Each release's section becomes the text of its GitHub release (`tools/release_no
 without one does not publish. Keep each entry on one line: GitHub shows a line break in release
 text as a break. Sections from v0.15 down are from the Resogun runner this port is built on.
 
+## v0.1.10
+
+- Possible fix for video memory use that could keep rising in long sessions: the cleanup that frees textures not used for a while counted the textures it skips (some that the GPU drew into) against its limit for each pass, so once enough of them were the oldest, a pass could free nothing. Now only the textures it frees count. Some textures the GPU drew into are still never freed. Found by reading the code, not seen in play
+- Possible fix for memory use that grows in long sessions: when the game was done with one of its fibers (light threads it switches between), the fiber's standard 256 KiB stack stayed allocated until you quit; the next new fiber now reuses it. This only matters if the game makes many fibers over time. Found by reading the code, not seen in play
+- The log now says when the runtime runs out of room to track part of the game's memory. It still loses track of that part, as before, but no longer silently, and nothing changes in play. Found by reading the code, not seen in play
+
 ## v0.1.9
 
 - Possible fix for the heap crash after a long session (issue 3): when the game wrote next to an image the GPU was still copying back to memory, that copy could land later over bytes the game had just written into the image's memory, such as the links of a heap block it had freed. The game's bytes now win. If the crash still happens, please attach the log: from v0.1.8 on it includes the game's own heap report
