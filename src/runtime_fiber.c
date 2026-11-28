@@ -122,9 +122,11 @@ static unsigned char *spare_take(void) {
 }
 static void spare_put(unsigned char *stack) {
     pthread_mutex_lock(&spare_lock);
-    memcpy(stack,&spare_stacks,sizeof spare_stacks);
-    spare_stacks=stack;
+    unsigned char *at=spare_stacks;
+    while (at && at!=stack) memcpy(&at,at,sizeof(unsigned char *));
+    if (!at) { memcpy(stack,&spare_stacks,sizeof spare_stacks); spare_stacks=stack; }
     pthread_mutex_unlock(&spare_lock);
+    if (at) fprintf(stderr,"Runtime: fiber stack %p finalized twice (a copied fiber?); kept once\n",(void *)stack);
 }
 
 /* A fresh fiber's stack: fiber_swap's frame (MXCSR and control word as the caller's, r12 = the

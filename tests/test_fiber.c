@@ -98,6 +98,14 @@ int main(void) {
     for (size_t i=0; i<4096; ++i) assert(!a.stack[i]);
     assert(!fiber_run(&a,400,&back) && back==401 && log_at==5 && trace[4]==5);
     assert(!fiber_finalize(&a));
+    /* A copied fiber finalized twice puts its stack on the spare list once: two new fibers get
+     * two stacks. */
+    assert(fiber_initialize(&a,"job d",entry_c,33,context_a,sizeof(context_a),NULL,0x4000000)==0);
+    Fiber copy=a;
+    assert(!fiber_finalize(&a) && !fiber_finalize(&copy));
+    assert(fiber_initialize(&a,"job e",entry_c,33,context_a,sizeof(context_a),NULL,0x4000000)==0);
+    assert(fiber_initialize(&b,"job f",entry_b,22,context_b,sizeof(context_b),NULL,0x4000000)==0);
+    assert(a.stack!=b.stack);
     puts("fiber test: ok");
     return 0;
 }
