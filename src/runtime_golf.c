@@ -397,7 +397,7 @@ static void m2_room_wait_locked(uint64_t delivery) {
     while (delivery && delivery==m2_room_delivery) pthread_cond_wait(&m2_room_delivery_done,&m2_lock);
 }
 
-enum { M2_LOCAL_JOIN=1, M2_LOCAL_POLL=2, M2_LOCAL_LEAVE=3, M2_LOCAL_CAPACITY=50 };
+enum { M2_LOCAL_JOIN=1, M2_LOCAL_POLL=2, M2_LOCAL_LEAVE=3, M2_LOCAL_CAPACITY=50, M2_ROOM_ATTRIBUTE=256 };
 typedef struct { uint16_t id; char name[17]; } M2LocalMember;
 typedef struct {
     uint16_t own_id;
@@ -417,6 +417,9 @@ typedef struct {
     struct timespec next_poll;
     M2LocalRoster roster;
     M2LocalRoom room, advertised_links;
+    uint8_t room_internal[M2_ROOM_ATTRIBUTE];
+    uint16_t room_internal_size;
+    uint32_t room_flags;
     uint64_t signal_registration, room_message_ack;
     uint8_t room_message_relay[16];
     uint64_t game_lobby; /* the lobby id the game joined (GOLF_LOCAL_WORLD may map it to another world) */
@@ -528,6 +531,10 @@ static struct {
 static GolfSignalConnection golf_signals[M2_LOCAL_CAPACITY-1];
 static uint32_t golf_next_signal=1;
 static int golf_signaling_up, golf_signaling_context;
+/* The game's connection event handler (0xa7e5e0): (ctx, connection, event, error, arg). */
+typedef ABI void (*GolfSignalHandler)(uint32_t,uint32_t,int32_t,int32_t,void *);
+static GolfSignalHandler golf_signal_handler;
+static void *golf_signal_arg;
 
 /* M0 diagnostics: print the lobby roster when its size or member ids change. */
 static void m2_log_roster(uint8_t world,const M2LocalRoster *roster) {
@@ -606,8 +613,8 @@ static ABI int32_t golf_signal_terminate(void) {
 }
 
 static ABI int32_t golf_signal_create(int32_t user,void *handler,void *arg,int32_t *context) {
-    /* The peer tick queries status directly at 0xa747d7. */
-    (void)handler; (void)arg;
+    /* The peer tick queries status directly at 0xa747d7; the handler only hears of peers that
+     * connect to this one (golf_signal_peer_activated). */
     pthread_mutex_lock(&m2_lock);
     int32_t result=0;
     if (!golf_signaling_up) result=(int32_t)GOLF_SIGNAL_NOT_INITIALIZED;
@@ -615,6 +622,8 @@ static ABI int32_t golf_signal_create(int32_t user,void *handler,void *arg,int32
     else if (golf_signaling_context) result=(int32_t)GOLF_SIGNAL_CONTEXT_MAX;
     else {
         golf_signaling_context=1;
+        golf_signal_handler=(GolfSignalHandler)handler;
+        golf_signal_arg=arg;
         *context=1;
     }
     pthread_mutex_unlock(&m2_lock);
@@ -680,6 +689,38 @@ static ABI int32_t golf_signal_activate(int32_t context,const GolfSignalAddress 
 
 static ABI int32_t golf_signal_lookup(int32_t context,const GolfSignalAddress *peer,uint32_t *id) {
     return golf_signal_connection(context,peer,id,0);
+}
+
+/* A member who joins a room activates a connection to every member already there (join 0x7102,
+ * 0xa79f2a), while those members add the newcomer passively (0x8101, 0xa81e5d) and wait for
+ * SCE_NP_SIGNALING_EVENT_PEER_ACTIVATED (10). On it the tick looks the peer up
+ * (GetConnectionFromPeerAddressA, 0xa82361), keeps the connection ID and sets peer state 2
+ * (0xa8245c); without it the room list never shows the newcomer and the round drops them.
+ * This side of the connection is created here, as the peer's activation would on PSN. */
+static void golf_signal_peer_activated(uint16_t member) {
+    pthread_mutex_lock(&m2_lock);
+    GolfSignalHandler handler=NULL;
+    void *arg=golf_signal_arg;
+    uint32_t id=0;
+    if (golf_signaling_up && golf_signaling_context && golf_signal_handler && m2_peer_roster_live() &&
+        member!=m2_peer_roster.roster.own_id && m2_roster_has(&m2_peer_roster.roster,member)) {
+        GolfSignalConnection *connection=NULL, *free_slot=NULL;
+        for (size_t i=0;i<M2_LOCAL_CAPACITY-1;++i) {
+            GolfSignalConnection *candidate=&golf_signals[i];
+            if (candidate->id && !candidate->departed && candidate->member==member) { connection=candidate; break; }
+            if (!free_slot && (!candidate->id || candidate->departed)) free_slot=candidate;
+        }
+        if (!connection && free_slot) {
+            *free_slot=(GolfSignalConnection){.id=golf_next_signal++,.member=member,.logged_status=-1};
+            if (!golf_next_signal) golf_next_signal=1;
+            printf("Runtime: signaling connection %u <- member %u (peer activated)\n",(unsigned)free_slot->id,
+                   (unsigned)member);
+            id=free_slot->id;
+            handler=golf_signal_handler;
+        }
+    }
+    pthread_mutex_unlock(&m2_lock);
+    if (handler) handler(1,id,10,0,arg);
 }
 
 /* Caller holds m2_lock. */
@@ -1063,7 +1104,7 @@ static void m2_local_request(M2LocalSession *session,M2Event *event) {
         return;
     }
     if (event->event==0x7101 || event->event==0x7102 || event->event==0x0103 ||
-        event->event==0x7106 || event->event==0x7005) {
+        event->event==0x7106 || event->event==0x7005 || event->event==0x0004 || event->event==0x0109) {
         m2_room_complete(session,event);
         return;
     }
@@ -1129,14 +1170,15 @@ static int32_t m2_answer(const char *what,uint16_t ctx,const M2Opt *opt,uint32_t
     pthread_mutex_lock(&m2_lock);
     const M2Opt use=opt ? *opt : m2_default_opt;
     const uint32_t request=m2_next_request++;
+    const int stateful=event==0x0108 || event==0x0004 || event==0x0109;
     int32_t result=0;
     if (!m2_ctx || ctx!=m2_ctx) result=M2_CONTEXT_NOT_FOUND;
-    else if (use.cb || event==0x0108) {
+    else if (use.cb || stateful) {
         result=m2_post_locked((M2Event){.cb=use.cb,.arg=use.arg,.data=data,.req=request,.event=event,.ctx=ctx,.lobby=lobby});
     }
     if (!result && id) *id=request;
     pthread_mutex_unlock(&m2_lock);
-    if (result || (!use.cb && event!=0x0108)) free(data);
+    if (result || (!use.cb && !stateful)) free(data);
     if (result) return result;
     printf("Runtime: NpMatching2 %s: request %u (local answer follows)\n",what,(unsigned)request);
     return 0;
@@ -1144,7 +1186,10 @@ static int32_t m2_answer(const char *what,uint16_t ctx,const M2Opt *opt,uint32_t
 /* Translate the Golf room requests and account-ID callbacks to the local
  * room route. All guest request data is copied before queueing. */
 enum { M2_ROOM_CREATE=1, M2_ROOM_JOIN=2, M2_ROOM_VIEW=3, M2_ROOM_LEAVE=4, M2_ROOM_SEARCH=5, M2_ROOM_EXTERNAL=6,
-       M2_ROOM_ATTRIBUTE=256, M2_ROOM_RESULTS=20, M2_ROOM_HEADER=20 };
+       M2_ROOM_UPDATE_EXTERNAL=7, M2_ROOM_UPDATE_INTERNAL=8, M2_ROOM_RESULTS=20, M2_ROOM_HEADER=20,
+       M2_ROOM_WIRE_VERSION=1 };
+
+static const uint32_t m2_room_update_flags=0xd4000000u;
 
 typedef struct { uint16_t id; uint8_t pad[6]; const uint8_t *data; uint64_t size; } M2RoomBin;
 typedef struct {
@@ -1157,14 +1202,14 @@ typedef struct { uint32_t world; size_t size; uint8_t request[GOLF_ROOM_REQUEST_
 typedef struct {
     M2LocalRoom room;
     uint32_t flags;
-    uint16_t capacity, size;
-    const uint8_t *listing;
+    uint16_t capacity, internal_size;
+    const uint8_t *internal;
 } M2RoomView;
 typedef struct {
     void *room, *members;
     uint64_t count;
     void *self, *owner;
-    uint8_t internal[0x58], records[M2_LOCAL_CAPACITY][0x58], listing[M2_ROOM_ATTRIBUTE];
+    uint8_t internal[0x58], records[M2_LOCAL_CAPACITY][0x58], internal_data[M2_ROOM_ATTRIBUTE];
     M2RoomInternalBin bin;
 } M2RoomJoinReply;
 typedef struct {
@@ -1200,18 +1245,14 @@ static int m2_room_decode(const M2LocalSession *session,const uint8_t *body,size
     const uint64_t revision=m2_room_u64(body+8);
     const size_t base_size=30+(size_t)count*18+size;
     if ((room>>56)!=session->world || !revision || !count || capacity>M2_LOCAL_CAPACITY || count>capacity ||
-        size>M2_ROOM_ATTRIBUTE || (length!=base_size && length!=base_size+4) ||
-        self!=session->roster.own_id) return 0;
-    uint8_t signaling=0;
-    uint16_t hub=0;
-    if (length>base_size) {
-        const uint8_t *tail=body+base_size;
-        signaling=tail[0];
-        hub=m2_room_u16(tail+2);
-        if (tail[1] || (signaling!=1 && signaling!=2) || (signaling==1 ? hub!=0 : hub!=owner)) return 0;
-    }
+        size>M2_ROOM_ATTRIBUTE || length<base_size+6 || self!=session->roster.own_id) return 0;
+    const uint8_t *tail=body+base_size;
+    const uint8_t signaling=tail[0];
+    const uint16_t hub=m2_room_u16(tail+2), internal_size=m2_room_u16(tail+4);
+    if (tail[1] || signaling>2 || hub!=(signaling==2 ? owner : 0) ||
+        internal_size>M2_ROOM_ATTRIBUTE || length!=base_size+6+internal_size) return 0;
     *view=(M2RoomView){.room={.id=room,.revision=revision,.owner=owner,.hub=hub,.signaling=signaling},.flags=m2_room_u32(body+16),
-                       .capacity=capacity,.size=size,.listing=body+30+(size_t)count*18};
+                       .capacity=capacity,.internal_size=internal_size,.internal=tail+6};
     for (uint16_t i=0;i<count;++i) {
         const uint8_t *row=body+30+(size_t)i*18;
         const uint16_t id=m2_room_u16(row);
@@ -1236,33 +1277,38 @@ static void m2_room_member_record(uint8_t *record,uint8_t world,const M2LocalMem
     memcpy(record+0x3c,&flags,4);
 }
 
+static void m2_room_internal_record(uint8_t record[0x58],const M2LocalSession *session,
+                                    const M2RoomView *view,const M2RoomInternalBin *bin) {
+    const uint16_t capacity=view->capacity, open=capacity-view->room.count, server=1;
+    const uint32_t world=session->world;
+    memcpy(record,&capacity,2);
+    memcpy(record+4,&open,2);
+    memcpy(record+8,&capacity,2);
+    memcpy(record+0x0a,&server,2);
+    memcpy(record+0x0c,&world,4);
+    memcpy(record+0x18,&view->room.id,8);
+    memcpy(record+0x40,&view->flags,4);
+    if (bin) {
+        const uint64_t one=1;
+        memcpy(record+0x48,&bin,8);
+        memcpy(record+0x50,&one,8);
+    }
+}
+
 static void *m2_room_join_reply(const M2LocalSession *session,const M2RoomView *view) {
     /* Internal room at response +0, then chain/count/self/owner (0xa79d51–0xa79f40). */
-    const uint64_t room=view->room.id;
-    const uint16_t capacity=view->capacity, count=view->room.count;
-    const uint16_t owner=view->room.owner, self=session->roster.own_id, size=view->size;
+    const uint16_t count=view->room.count, owner=view->room.owner, self=session->roster.own_id;
+    const uint16_t size=view->internal_size;
     M2RoomJoinReply *reply=calloc(1,sizeof *reply);
     if (!reply) return NULL;
     reply->room=reply->internal;
     reply->members=reply->records[0];
     reply->count=count;
-    const uint16_t open=capacity-count, server=1;
-    const uint32_t world=session->world;
-    memcpy(reply->internal,&capacity,2);
-    memcpy(reply->internal+4,&open,2);
-    memcpy(reply->internal+8,&capacity,2);
-    memcpy(reply->internal+0x0a,&server,2);
-    memcpy(reply->internal+0x0c,&world,4);
-    memcpy(reply->internal+0x18,&room,8);
-    memcpy(reply->internal+0x40,&view->flags,4);
     if (size) {
-        memcpy(reply->listing,view->listing,size);
-        reply->bin=(M2RoomInternalBin){.member=owner,.bin={.id=0x57,.data=reply->listing,.size=size}};
-        const M2RoomInternalBin *bin=&reply->bin;
-        const uint64_t one=1;
-        memcpy(reply->internal+0x48,&bin,8);
-        memcpy(reply->internal+0x50,&one,8);
+        memcpy(reply->internal_data,view->internal,size);
+        reply->bin=(M2RoomInternalBin){.member=owner,.bin={.id=0x57,.data=reply->internal_data,.size=size}};
     }
+    m2_room_internal_record(reply->internal,session,view,size ? &reply->bin : NULL);
     for (uint16_t i=0;i<count;++i) {
         const M2LocalMember *member=&view->room.members[i];
         uint8_t *record=reply->records[i];
@@ -1377,6 +1423,31 @@ static void m2_room_notify(const M2LocalSession *session,uint64_t room,uint16_t 
     pthread_mutex_unlock(&m2_lock);
 }
 
+static void m2_room_notify_internal(const M2LocalSession *session,const M2RoomView *view) {
+    /* Golf reads changed attributes at +0x38 and follows the first pointer (0xa7ea11–0xa7ea53). */
+    const M2RoomInternalBin bin={.member=view->room.owner,
+        .bin={.id=0x57,.data=view->internal,.size=view->internal_size}};
+    const M2RoomInternalBin *changed_bin=&bin;
+    uint8_t record[0x58]={0};
+    const uint32_t *flags=view->flags!=session->room_flags ? &view->flags : NULL;
+    struct {
+        const void *room;
+        const uint32_t *flags, *previous_flags;
+        uint64_t optional[4];
+        const M2RoomInternalBin *const *attributes;
+        uint64_t count;
+    } data={.room=record,.flags=flags,.previous_flags=flags ? &session->room_flags : NULL,
+            .attributes=&changed_bin,.count=1};
+    m2_room_internal_record(record,session,view,&bin);
+    m2_room_notify(session,view->room.id,0x1106,&data);
+}
+
+static void m2_room_store_internal(M2LocalSession *session,const M2RoomView *view) {
+    session->room_internal_size=view->internal_size;
+    memcpy(session->room_internal,view->internal,view->internal_size);
+    session->room_flags=view->flags;
+}
+
 static void m2_room_notify_member(const M2LocalSession *session,uint16_t event,
                                   const M2LocalMember *member,uint16_t owner) {
     /* Callback 0xa7ea80 dereferences data once to copy the member record. */
@@ -1451,6 +1522,8 @@ static void m2_room_clear(M2LocalSession *session,int notify) {
     const uint64_t id=session->room.id;
     if (!id) return;
     memset(&session->room,0,sizeof session->room);
+    session->room_internal_size=0;
+    session->room_flags=0;
     memset(session->room_message_relay,0,sizeof session->room_message_relay);
     session->room_message_ack=0;
     m2_room_publish(session);
@@ -1467,7 +1540,7 @@ static void m2_room_clear(M2LocalSession *session,int notify) {
 static void m2_room_poll(M2LocalSession *session) {
     if (!session->room.id) return;
     const M2LocalRoom previous=session->room;
-    uint8_t request[M2_ROOM_HEADER+8]={M2_ROOM_VIEW,session->world};
+    uint8_t request[M2_ROOM_HEADER+8]={M2_ROOM_VIEW,session->world,M2_ROOM_WIRE_VERSION};
     uint8_t response[GOLF_ROOM_RESPONSE_MAX];
     size_t length=0;
     memcpy(request+4,session->roster.token,16);
@@ -1475,8 +1548,8 @@ static void m2_room_poll(M2LocalSession *session) {
     const int status=runtime_golf_room_exchange(request,sizeof request,response,&length);
     if (status==404) { m2_room_clear(session,1); return; }
     M2RoomView view;
-    if (status!=200 || !m2_room_decode(session,response,length,&view) || view.room.id!=previous.id ||
-        view.room.revision<previous.revision) return;
+    const int decoded=status==200 && m2_room_decode(session,response,length,&view);
+    if (!decoded || view.room.id!=previous.id || view.room.revision<previous.revision) return;
     session->room=view.room;
     m2_room_publish(session);
     if (view.room.revision==previous.revision) {
@@ -1489,7 +1562,10 @@ static void m2_room_poll(M2LocalSession *session) {
     }
     for (uint16_t i=0;i<view.room.count;++i) {
         const M2LocalMember *member=&view.room.members[i];
-        if (!m2_room_find(&previous,member->id)) m2_room_notify_member(session,0x8101,member,view.room.owner);
+        if (!m2_room_find(&previous,member->id)) {
+            m2_room_notify_member(session,0x8101,member,view.room.owner);
+            if (!session->room.signaling) golf_signal_peer_activated(member->id);
+        }
     }
     if (previous.owner!=view.room.owner) {
         /* The owner tick reads the new ID at payload offset 2 (0xa81ef3). */
@@ -1498,6 +1574,11 @@ static void m2_room_poll(M2LocalSession *session) {
         memcpy(data+2,&view.room.owner,2);
         m2_room_notify(session,view.room.id,0x1105,data);
     }
+    const int flags_changed=((session->room_flags^view.flags)&m2_room_update_flags)!=0;
+    if (view.internal_size && (flags_changed || session->room_internal_size!=view.internal_size ||
+                              memcmp(session->room_internal,view.internal,view.internal_size)))
+        m2_room_notify_internal(session,&view);
+    m2_room_store_internal(session,&view);
     m2_room_signals_sync(session);
 }
 
@@ -1533,7 +1614,8 @@ static ABI int32_t m2_room_connection_status(uint16_t ctx,uint64_t room,uint16_t
 static void m2_room_complete(M2LocalSession *session,M2Event *event) {
     M2RoomJob *job=event->data;
     const uint8_t operation=job->request[0];
-    const uint64_t leaving=operation==M2_ROOM_LEAVE ? m2_room_u64(job->request+M2_ROOM_HEADER) : 0;
+    const int update=operation==M2_ROOM_UPDATE_EXTERNAL || operation==M2_ROOM_UPDATE_INTERNAL;
+    const uint64_t room_id=operation==M2_ROOM_LEAVE || update ? m2_room_u64(job->request+M2_ROOM_HEADER) : 0;
     uint8_t response[GOLF_ROOM_RESPONSE_MAX];
     size_t length=0;
     int status=404;
@@ -1564,8 +1646,8 @@ static void m2_room_complete(M2LocalSession *session,M2Event *event) {
             memcpy(job->request+M2_ROOM_HEADER,&nonce,8);
         }
         status=runtime_golf_room_exchange(job->request,job->size,response,&length);
-        /* The listener can have committed an idempotent create or join before its reply was lost. */
-        if (!status && (operation==M2_ROOM_CREATE || operation==M2_ROOM_JOIN)) {
+        /* The listener can have committed an idempotent request before its reply was lost. */
+        if (!status && (operation==M2_ROOM_CREATE || operation==M2_ROOM_JOIN || update)) {
             length=0;
             status=runtime_golf_room_exchange(job->request,job->size,response,&length);
         }
@@ -1575,11 +1657,18 @@ static void m2_room_complete(M2LocalSession *session,M2Event *event) {
     if (status!=200) {
         event->error=status==404 ? (int32_t)0x80550c30u :
                      status==409 && operation==M2_ROOM_JOIN ? (int32_t)0x80550d19u :
+                     status==403 ? (int32_t)0x80550d07u :
                      status==409 ? M2_BUSY : status==400 ? NP_INVALID_ARGUMENT : M2_SERVER_NOT_AVAILABLE;
         return;
     }
+    if (update) {
+        M2RoomView view;
+        if (!m2_room_decode(session,response,length,&view) || room_id!=view.room.id)
+            event->error=M2_SERVER_NOT_AVAILABLE;
+        return;
+    }
     if (operation==M2_ROOM_LEAVE) {
-        if (session->room.id==leaving) m2_room_clear(session,0);
+        if (session->room.id==room_id) m2_room_clear(session,0);
         return;
     }
     if (operation==M2_ROOM_CREATE || operation==M2_ROOM_JOIN) {
@@ -1588,6 +1677,7 @@ static void m2_room_complete(M2LocalSession *session,M2Event *event) {
             event->data=m2_room_join_reply(session,&view);
             if (event->data) {
                 session->room=view.room;
+                m2_room_store_internal(session,&view);
                 m2_room_publish(session);
             }
         }
@@ -1600,6 +1690,7 @@ static M2RoomJob *m2_room_job(uint8_t operation,uint32_t world,const void *body,
     if (!job) return NULL;
     job->world=world;
     job->request[0]=operation;
+    job->request[2]=M2_ROOM_WIRE_VERSION;
     job->size=M2_ROOM_HEADER+size;
     memcpy(job->request+M2_ROOM_HEADER,body,size);
     return job;
@@ -1695,6 +1786,36 @@ static ABI int32_t m2_room_external(uint16_t ctx,const uint8_t *req,const M2Opt 
     const uint8_t *room=m2_room_pointer(req), *wanted=m2_room_pointer(req+16);
     if (!wanted || m2_room_u16(wanted)!=0x55) return NP_INVALID_ARGUMENT;
     return m2_room_by_id("GetRoomDataExternalList",ctx,room,opt,id,M2_ROOM_EXTERNAL,0x7005);
+}
+
+static int32_t m2_room_set_data(uint16_t ctx,const uint8_t *req,const M2Opt *opt,uint32_t *id,int internal) {
+    if (!req || !id || !m2_room_u64(req)) return NP_INVALID_ARGUMENT;
+    /* Golf supplies one 0x55 or 0x57 attribute at these offsets (0xa8432a–0xa844df). */
+    if (internal ? (m2_room_u64(req+40) || m2_room_pointer(req+48) || m2_room_u64(req+64))
+                 : (m2_room_u64(req+16) || m2_room_u64(req+32))) return NP_INVALID_ARGUMENT;
+    const uint32_t mask=internal ? m2_room_u32(req+8) : 0, flags=internal ? m2_room_u32(req+12) : 0;
+    if (mask & ~m2_room_update_flags || flags & ~mask) return NP_INVALID_ARGUMENT;
+    M2RoomBin bin={0};
+    if (!m2_room_read_bin(req+(internal ? 16 : 40),internal ? 0x57 : 0x55,&bin) || !bin.id)
+        return NP_INVALID_ARGUMENT;
+    const uint16_t size=(uint16_t)bin.size;
+    uint8_t body[18+M2_ROOM_ATTRIBUTE];
+    memcpy(body,req,8);
+    memcpy(body+8,&mask,4);
+    memcpy(body+12,&flags,4);
+    memcpy(body+16,&size,2);
+    if (size) memcpy(body+18,bin.data,size);
+    M2RoomJob *job=m2_room_job(internal ? M2_ROOM_UPDATE_INTERNAL : M2_ROOM_UPDATE_EXTERNAL,0,body,18+size);
+    return job ? m2_answer(internal ? "SetRoomDataInternal" : "SetRoomDataExternal",ctx,opt,id,
+                           internal ? 0x0109 : 0x0004,job,0) : M2_OUT_OF_MEMORY;
+}
+
+static ABI int32_t m2_room_set_external(uint16_t ctx,const uint8_t *req,const M2Opt *opt,uint32_t *id) {
+    return m2_room_set_data(ctx,req,opt,id,0);
+}
+
+static ABI int32_t m2_room_set_internal(uint16_t ctx,const uint8_t *req,const M2Opt *opt,uint32_t *id) {
+    return m2_room_set_data(ctx,req,opt,id,1);
 }
 
 enum { M2_MSG_SEND=1, M2_MSG_POLL=2, M2_MSG_HEADER=36, M2_MSG_BATCH=8, M2_MSG_LIMIT=1024 };
@@ -1836,6 +1957,7 @@ static const RuntimeExport m2_room_exports[]={
     {"sceNpMatching2CreateJoinRoomA",m2_room_create}, {"sceNpMatching2JoinRoomA",m2_room_join},
     {"sceNpMatching2LeaveRoom",m2_room_leave}, {"sceNpMatching2SearchRoom",m2_room_search},
     {"sceNpMatching2GetRoomDataExternalList",m2_room_external},
+    {"sceNpMatching2SetRoomDataExternal",m2_room_set_external}, {"sceNpMatching2SetRoomDataInternal",m2_room_set_internal},
     {"sceNpMatching2SignalingGetConnectionStatus",m2_room_connection_status},
 };
 
