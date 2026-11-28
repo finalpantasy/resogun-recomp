@@ -5,6 +5,11 @@ Each release's section becomes the text of its GitHub release (`tools/release_no
 without one does not publish. Keep each entry on one line: GitHub shows a line break in release
 text as a break. Sections from v0.15 down are from the Resogun runner this port is built on.
 
+## v0.1.8
+
+- Language setting: English, French, Portuguese (Brazil) or Spanish (Latin America), the four on the disc. Pick it on the launcher's Play page or with language= in settings.ini; it applies at the next start
+- Crash logs now include the game's own heap report (the heap, the address freed and the reason) when it stops on a heap error, as in issue 3. Before, that text was lost when the game ran from the launcher
+
 ## v0.1.7
 
 - Game Rooms work: everyone in a room now shows in the participant list, and starting the round no longer withdraws the players. Tested with two copies on one PC through hole 1; rooms between two homes and rooms with 3 or 4 players are not tested yet, so please report how they go
