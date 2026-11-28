@@ -5,6 +5,11 @@ Each release's section becomes the text of its GitHub release (`tools/release_no
 without one does not publish. Keep each entry on one line: GitHub shows a line break in release
 text as a break. Sections from v0.15 down are from the Resogun runner this port is built on.
 
+## v0.1.7
+
+- Game Rooms work: everyone in a room now shows in the participant list, and starting the round no longer withdraws the players. Tested with two copies on one PC through hole 1; rooms between two homes and rooms with 3 or 4 players are not tested yet, so please report how they go
+- Players who join a room see the creator's name on it instead of a blank "'s Room"
+
 ## v0.1.6
 
 - Collab cups: the 2018 tie-in tournaments are back, the FINAL FANTASY 30th Anniversary Cup, two LEVEL-5 20th Anniversary Cups and the Famitsu Collab Cup, each with a qualifier and a final whose prizes are the tie-in outfits. Set Collab outfits and cups on the Saves tab to Classic (cut +3, shop parts 500 coins) or Hardcore (cut -3, finals on champion tees in strong wind, shop parts 1,500 to 2,500 coins), then play them from the International Tournament; prizes arrive in Notices, as they did in 2018
