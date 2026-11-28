@@ -129,6 +129,7 @@ void TextureCache::RetireReadbacks() {
         [this](auto& entry) {
             if (entry.valid) {
                 entry.payload.Invalidate();
+                pending_readbacks.NotePublished(entry, entry.payload.mapped);
                 if (!entry.snapshots.empty()) {
                     readbacks_kept_cpu_bytes +=
                         PendingReadbacks::KeepCpuWrites(entry, entry.payload.mapped, ReadGuestBacking);
@@ -159,14 +160,18 @@ bool TextureCache::ResolveReadbacks(VAddr address, u64 size, bool assume_locks,
         // copy only stops protecting its page and is still published when the GPU is done.
         if (stale_readbacks && source == ReadbackSource::CpuWrite) {
             readbacks_released += pending_readbacks.ReleaseOutside(address, size, 64_KB,
-                [this](auto& entry) { UnwatchReadback(entry); });
+                [this](auto& entry) {
+                    pending_readbacks.FillSnapshots(ReadGuestBacking); // before the page opens
+                    UnwatchReadback(entry);
+                });
         } else if (source == ReadbackSource::CpuWrite &&
                    !ResogunToggle::Disabled(ResogunToggle::ReadbackEdgeWrites)) {
             readbacks_released += pending_readbacks.ReleaseEdge(address, size,
-                [this](u64 page, u64 bytes) { WatchReadback<false>(page, bytes); });
+                [this](u64 page, u64 bytes) {
+                    pending_readbacks.FillSnapshots(ReadGuestBacking); // before the page opens
+                    WatchReadback<false>(page, bytes);
+                });
         }
-        // Before the write that released them goes on: the bytes it may change (issue 3).
-        pending_readbacks.FillSnapshots(ReadGuestBacking);
         if (!pending_readbacks.RequiredTick(address, size, exact)) {
             if (exact && pending_readbacks.RequiredTick(address, size)) ++readbacks_neighbors;
             return false;

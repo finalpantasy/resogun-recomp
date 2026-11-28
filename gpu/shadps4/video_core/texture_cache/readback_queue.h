@@ -75,9 +75,9 @@ public:
             if (entry.valid && entry.watched && entry.size <= max_size &&
                 OverlapsPage(entry, address, size) &&
                 !(address < entry.address + entry.size && entry.address < address + size)) {
+                Unprotected(entry, entry.address, entry.size);
                 release(entry);
                 entry.watched = false;
-                Unprotected(entry, entry.address, entry.size);
                 ++released;
             }
         }
@@ -103,9 +103,9 @@ public:
             const std::uint64_t last = (entry.address + entry.size - 1) & ~std::uint64_t{4095};
             const std::uint8_t edge = (page == first ? 1 : 0) | (page == last ? 2 : 0);
             if (!edge) continue; // an inner page is all copy bytes: not reachable
+            Unprotected(entry, page, std::uint64_t{4096});
             release(page, std::uint64_t{4096});
             entry.released_edges |= edge;
-            Unprotected(entry, page, std::uint64_t{4096});
             if (WatchedPages(entry).first == WatchedPages(entry).second) entry.watched = false;
             ++released;
         }
@@ -134,15 +134,42 @@ public:
             if (snap.bytes.size() != snap.size) continue;
             now.resize(snap.size);
             read(snap.address, now.data(), snap.size);
+            // By aligned 8-byte word: a CPU store that leaves some bytes as they were (the zero
+            // high bytes of a pointer over black pixels) still keeps the whole word.
             std::uint8_t* out = data + (snap.address - entry.address);
-            for (std::uint64_t i = 0; i < snap.size; ++i) {
-                if (now[i] != snap.bytes[i]) {
-                    out[i] = now[i];
-                    ++kept;
+            for (std::uint64_t i = 0; i < snap.size;) {
+                const std::uint64_t word_end =
+                    ((snap.address + i) | 7) + 1 - snap.address;
+                const std::uint64_t end = word_end < snap.size ? word_end : snap.size;
+                bool changed = false;
+                for (std::uint64_t j = i; j < end; ++j) changed |= now[j] != snap.bytes[j];
+                if (changed) {
+                    for (std::uint64_t j = i; j < end; ++j) out[j] = now[j];
+                    kept += end - i;
                 }
+                i = end;
             }
         }
         return kept;
+    }
+    /// `publisher` is about to publish its GPU bytes `data` (before KeepCpuWrites puts CPU words
+    /// into them): the other copies' snapshots of those bytes take the GPU values, so that
+    /// publish does not read as a CPU write at their retire, and a CPU word kept now is still a
+    /// CPU write for them.
+    void NotePublished(const Entry& publisher, const std::uint8_t* data) {
+        const std::uint64_t address = publisher.address, size = publisher.size;
+        for (auto& entry : entries) {
+            if (&entry == &publisher) continue;
+            for (auto& snap : entry.snapshots) {
+                if (snap.bytes.size() != snap.size) continue;
+                const std::uint64_t lo = address > snap.address ? address : snap.address;
+                const std::uint64_t a_end = address + size, s_end = snap.address + snap.size;
+                const std::uint64_t hi = a_end < s_end ? a_end : s_end;
+                for (std::uint64_t at = lo; at < hi; ++at) {
+                    snap.bytes[at - snap.address] = data[at - address];
+                }
+            }
+        }
     }
     template <typename Ready, typename Complete>
     void Retire(Ready&& ready, Complete&& complete) {

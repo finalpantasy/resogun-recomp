@@ -128,7 +128,37 @@ int main() {
         heap.FillSnapshots(read);
         ram[0x2120] = 0x01;
         std::vector<std::uint8_t> small(0x40, 0x77);
-        assert(Queue::KeepCpuWrites(heap.Entries().back(), small.data(), read) == 1);
-        assert(small[0x20] == 0x01 && small[0x21] == 0x77);
+        assert(Queue::KeepCpuWrites(heap.Entries().back(), small.data(), read) == 8);
+        assert(small[0x20] == 0x01 && small[0x21] == 0xaa); // its word, 0x2120..0x2127, kept
+        assert(small[0x27] == ram[0x2127] && small[0x28] == 0x77);
+        // A pointer store whose high bytes equal the old bytes keeps the whole word.
+        ram[0x200] = 0x00; ram[0x201] = 0x00;
+        heap.FillSnapshots(read);
+        Queue::Entry probe = heap.Entries().front();
+        for (int i = 0; i < 8; ++i) probe.snapshots[0].bytes[0x100 + i] = 0;
+        for (int i = 0; i < 8; ++i) ram[0x200 + i] = 0;
+        ram[0x200] = 0x40;                                               // low byte of 0x40
+        std::vector<std::uint8_t> px(0x2000, 0x99);
+        Queue::KeepCpuWrites(probe, px.data(), read);
+        for (int i = 0; i < 8; ++i) assert(px[0x100 + i] == ram[0x200 + i]);
+        // Two pending copies of the target: the older one's publish is not a CPU write for the
+        // newer one, and a CPU word the older one kept is still a CPU write for the newer one.
+        heap.Push(base + 0x100, 0x2000, 22, 3);
+        assert(heap.ReleaseEdge(base + 0xf0, 16, release_page) == 1);    // only the newer copy
+        heap.FillSnapshots(read);
+        const auto& older = heap.Entries().front();
+        const auto& newer = heap.Entries().back();
+        assert(newer.snapshots.size() == 1 && newer.snapshots[0].address == base + 0x100);
+        const std::uint8_t older_snap = older.snapshots[0].bytes[0x20];
+        std::vector<std::uint8_t> gpu_a(0x2000, 0x31), gpu_b(0x2000, 0x32);
+        heap.NotePublished(older, gpu_a.data());
+        assert(older.snapshots[0].bytes[0x20] == older_snap);            // its own: unchanged
+        assert(newer.snapshots[0].bytes[0x20] == 0x31);                  // the newer's: A's pixels
+        ram[0x100] = 0x5a;                                               // a CPU word since
+        assert(Queue::KeepCpuWrites(older, gpu_a.data(), read) >= 8);
+        for (int i = 0x20; i < 0x100; ++i) ram[0x100 + i] = gpu_a[i];    // A published there
+        assert(Queue::KeepCpuWrites(newer, gpu_b.data(), read) >= 8);
+        assert(gpu_b[0] == 0x5a);                                        // the CPU word kept
+        assert(gpu_b[0x20] == 0x32 && gpu_b[0xff] == 0x32);              // A's pixels: B's land
     }
 }
