@@ -5,6 +5,11 @@ Each release's section becomes the text of its GitHub release (`tools/release_no
 without one does not publish. Keep each entry on one line: GitHub shows a line break in release
 text as a break. Sections from v0.15 down are from the Resogun runner this port is built on.
 
+## v0.1.9
+
+- Possible fix for the heap crash after a long session (issue 3): when the game wrote next to an image the GPU was still copying back to memory, that copy could land later over bytes the game had just written into the image's memory, such as the links of a heap block it had freed. The game's bytes now win. If the crash still happens, please attach the log: from v0.1.8 on it includes the game's own heap report
+- Launcher: language=1 or en in settings.ini now shows as English on the Play page instead of an extra entry
+
 ## v0.1.8
 
 - Language setting: English, French, Portuguese (Brazil) or Spanish (Latin America), the four on the disc. Pick it on the launcher's Play page or with language= in settings.ini; it applies at the next start
