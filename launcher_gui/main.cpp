@@ -1935,6 +1935,7 @@ void load_option_controls() {
     fill_combo(ID_COLLAB, collab_modes, settings.get("collab_items", "unlocked"));
     std::string language = settings.get("language", "english");
     for (char& c : language) c = (char)tolower((unsigned char)c);
+    if (language == "1" || language == "en") language = "english";
     if (language == "2" || language == "fr") language = "french";
     if (language == "17" || language == "pt") language = "portuguese";
     if (language == "20" || language == "es") language = "spanish";
