@@ -802,7 +802,13 @@ static ABI int32_t direct_release(uint64_t start, uint64_t size) {
         left.size=a-b->start; right.start=e; right.size=b->start+b->size-e;
         b->used=0;
         if (left.size) *b=left;
-        if (right.size) for (int j=0;j<LIMIT;++j) if (!blocks[j].used) { blocks[j]=right; break; }
+        if (right.size) {
+            int j=0;
+            while (j<LIMIT && blocks[j].used) ++j;
+            if (j<LIMIT) blocks[j]=right;
+            else fprintf(stderr,"Runtime: direct memory table full (%d blocks): lost track of 0x%llx-0x%llx, which the game still holds\n",
+                         LIMIT,(unsigned long long)right.start,(unsigned long long)(right.start+right.size));
+        }
         live_bytes-=e-a;
     }
     host_discard(start,size); /* zero on reuse */

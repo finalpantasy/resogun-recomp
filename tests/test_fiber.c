@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 /* libSceFiber (src/runtime_fiber.c): Run from a thread, Switch between fibers, ReturnToThread,
- * the arguments each hands over, and the calls refused outside or inside a fiber. */
+ * the arguments each hands over, the calls refused outside or inside a fiber, and a new fiber
+ * running on a finalized fiber's stack. */
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -64,6 +65,15 @@ static ABI void entry_b(uint64_t init, uint64_t run) {
     for (;;) fiber_return_to_thread(0,&next);
 }
 
+/* A fresh fiber on a finalized fiber's stack: starts at its entry with its own arguments. */
+static ABI void entry_c(uint64_t init, uint64_t run) {
+    assert(init==33 && run==400);
+    uint64_t next=0;
+    trace[log_at++]=5;
+    assert(!fiber_return_to_thread(401,&next));
+    for (;;) fiber_return_to_thread(0,&next);
+}
+
 int main(void) {
     assert(fiber_initialize(&a,"job a",entry_a,11,context_a,sizeof(context_a),NULL,0x4000000)==0);
     assert(fiber_initialize(&b,"job b",entry_b,22,context_b,sizeof(context_b),NULL,0x4000000)==0);
@@ -79,8 +89,15 @@ int main(void) {
     assert(!fiber_run(&a,101,&back) && back==202);
     assert(log_at==4 && trace[0]==1 && trace[1]==2 && trace[2]==3 && trace[3]==4);
     assert(fiber_get_self(&self)==FIBER_ERROR_PERMISSION);
+    unsigned char *stack_b=b.stack;
     assert(!fiber_finalize(&a) && !fiber_finalize(&b)); /* both suspended where they yielded */
     assert(fiber_run(&a,0,NULL)==FIBER_ERROR_INVALID);
+    /* The next fiber takes the stack finalized last, cleared (the spare list's link included). */
+    assert(fiber_initialize(&a,"job c",entry_c,33,context_a,sizeof(context_a),NULL,0x4000000)==0);
+    assert(a.stack==stack_b && a.stack_size==HOST_STACK);
+    for (size_t i=0; i<4096; ++i) assert(!a.stack[i]);
+    assert(!fiber_run(&a,400,&back) && back==401 && log_at==5 && trace[4]==5);
+    assert(!fiber_finalize(&a));
     puts("fiber test: ok");
     return 0;
 }

@@ -18,6 +18,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <pthread.h>
 #ifdef _WIN32
 #include <windows.h>
 #endif
@@ -106,6 +107,26 @@ static void thread_bounds(void) {
 #endif
 }
 
+/* Finalized fibers' HOST_STACK stacks, linked through their first 8 bytes, serve the next fibers:
+ * runtime_low_free keeps blocks this large mapped for good, so a game that makes a fiber for each
+ * job would grow by 256 KiB a job. */
+static pthread_mutex_t spare_lock=PTHREAD_MUTEX_INITIALIZER;
+static unsigned char *spare_stacks;
+static int spare_logged;
+static unsigned char *spare_take(void) {
+    pthread_mutex_lock(&spare_lock);
+    unsigned char *stack=spare_stacks;
+    if (stack) memcpy(&spare_stacks,stack,sizeof spare_stacks);
+    pthread_mutex_unlock(&spare_lock);
+    return stack;
+}
+static void spare_put(unsigned char *stack) {
+    pthread_mutex_lock(&spare_lock);
+    memcpy(stack,&spare_stacks,sizeof spare_stacks);
+    spare_stacks=stack;
+    pthread_mutex_unlock(&spare_lock);
+}
+
 /* A fresh fiber's stack: fiber_swap's frame (MXCSR and control word as the caller's, r12 = the
  * fiber) returning into fiber_start. */
 static void fiber_stack(Fiber *f) {
@@ -152,8 +173,11 @@ static ABI int32_t fiber_initialize(Fiber *f, const char *name, FiberEntry entry
     if (context && (context_size<CONTEXT_MINIMUM || (context_size & 15))) return FIBER_ERROR_RANGE;
     if (!context && context_size) return FIBER_ERROR_INVALID;
     uint64_t size=context_size>HOST_STACK ? (context_size+15)&~UINT64_C(15) : HOST_STACK;
-    unsigned char *stack=runtime_low_alloc(size);
-    if (!stack) return FIBER_ERROR_RANGE;
+    unsigned char *stack=size==HOST_STACK ? spare_take() : NULL;
+    if (stack) {
+        memset(stack,0,size);
+        if (!__atomic_exchange_n(&spare_logged,1,__ATOMIC_RELAXED)) puts("Runtime: a finalized fiber's stack serves a new fiber");
+    } else if (!(stack=runtime_low_alloc(size))) return FIBER_ERROR_RANGE;
     memset(f,0,sizeof(*f));
     f->magic_start=MAGIC_START; f->magic_end=MAGIC_END;
     f->entry=entry; f->arg_on_initialize=arg;
@@ -174,7 +198,7 @@ static ABI int32_t fiber_finalize(Fiber *f) {
     if ((uintptr_t)f & 7) return FIBER_ERROR_ALIGNMENT;
     if (!valid(f)) return FIBER_ERROR_INVALID;
     if (f->state==RUNNING) return FIBER_ERROR_STATE;
-    runtime_low_free(f->stack);
+    if (f->stack_size==HOST_STACK) spare_put(f->stack); else runtime_low_free(f->stack);
     memset(f,0,sizeof(*f));
     return 0;
 }
