@@ -118,11 +118,21 @@ void TextureCache::UnwatchReadback(const ReadbackEntry& entry) {
     if (end > begin) WatchReadback<false>(begin, end - begin);
 }
 
+extern "C" void runtime_memory_read_backing(uintptr_t address, void* data, uint64_t size);
+
+static void ReadGuestBacking(u64 address, u8* dest, u64 size) {
+    runtime_memory_read_backing(static_cast<uintptr_t>(address), dest, size);
+}
+
 void TextureCache::RetireReadbacks() {
     pending_readbacks.Retire([this](u64 tick) { return scheduler.IsFree(tick); },
         [this](auto& entry) {
             if (entry.valid) {
                 entry.payload.Invalidate();
+                if (!entry.snapshots.empty()) {
+                    readbacks_kept_cpu_bytes +=
+                        PendingReadbacks::KeepCpuWrites(entry, entry.payload.mapped, ReadGuestBacking);
+                }
                 Core::Memory::Instance()->TryWriteBacking(std::bit_cast<u8*>(entry.address),
                     entry.payload.mapped, entry.size);
                 if (entry.watched) UnwatchReadback(entry);
@@ -155,6 +165,8 @@ bool TextureCache::ResolveReadbacks(VAddr address, u64 size, bool assume_locks,
             readbacks_released += pending_readbacks.ReleaseEdge(address, size,
                 [this](u64 page, u64 bytes) { WatchReadback<false>(page, bytes); });
         }
+        // Before the write that released them goes on: the bytes it may change (issue 3).
+        pending_readbacks.FillSnapshots(ReadGuestBacking);
         if (!pending_readbacks.RequiredTick(address, size, exact)) {
             if (exact && pending_readbacks.RequiredTick(address, size)) ++readbacks_neighbors;
             return false;
@@ -351,6 +363,12 @@ void TextureCache::ProcessDownloadImages() {
                                 "on a shared page\n",
                                 static_cast<unsigned long long>(readbacks_neighbors));
                     readbacks_released = readbacks_neighbors = 0;
+                }
+                if (readbacks_kept_cpu_bytes) {
+                    std::printf("Readback CPU writes kept: %llu bytes the CPU wrote on a released "
+                                "page while its copy was pending\n",
+                                static_cast<unsigned long long>(readbacks_kept_cpu_bytes));
+                    readbacks_kept_cpu_bytes = 0;
                 }
                 std::ranges::sort(readback_images, std::greater{}, &ReadbackImageStat::copies);
                 for (u32 i = 0; i < 4 && readback_images[i].copies; ++i) {

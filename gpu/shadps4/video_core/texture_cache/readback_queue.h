@@ -4,6 +4,7 @@
 #include <cassert>
 #include <deque>
 #include <utility>
+#include <vector>
 
 namespace VideoCore {
 
@@ -19,6 +20,15 @@ public:
         /// resogun: bit 0 the first page, bit 1 the last: a page shared with other bytes that a
         /// CPU write released (ReleaseEdge); the copy no longer protects or waits on it.
         std::uint8_t released_edges = 0;
+        /// resogun (issue 3): the copy's bytes on pages it stopped protecting, as they were when
+        /// it let go of them. CPU writes there no longer wait, and the GPU's older data must not
+        /// land over them at retire (a heap's free-list links written into a freed render
+        /// target): KeepCpuWrites keeps every byte that changed since.
+        struct Snapshot {
+            std::uint64_t address, size;
+            std::vector<std::uint8_t> bytes;
+        };
+        std::vector<Snapshot> snapshots;
     };
     /// The pages an entry still protects: [begin, end), whole 4 KiB pages; empty when none.
     static std::pair<std::uint64_t, std::uint64_t> WatchedPages(const Entry& entry) {
@@ -33,7 +43,7 @@ public:
     }
     void Push(std::uint64_t address, std::uint64_t size, std::uint64_t tick, Payload payload) {
         assert(CanFit(size));
-        entries.push_back({address, size, tick, std::move(payload)});
+        entries.push_back(Entry{address, size, tick, std::move(payload), true, true, 0, {}});
         bytes += size;
     }
     /// `exact`: only copies sharing bytes with the range, not just a page (resogun: for consumers
@@ -67,6 +77,7 @@ public:
                 !(address < entry.address + entry.size && entry.address < address + size)) {
                 release(entry);
                 entry.watched = false;
+                Unprotected(entry, entry.address, entry.size);
                 ++released;
             }
         }
@@ -94,10 +105,44 @@ public:
             if (!edge) continue; // an inner page is all copy bytes: not reachable
             release(page, std::uint64_t{4096});
             entry.released_edges |= edge;
+            Unprotected(entry, page, std::uint64_t{4096});
             if (WatchedPages(entry).first == WatchedPages(entry).second) entry.watched = false;
             ++released;
         }
         return released;
+    }
+    /// Reads the bytes of every range a release just recorded (`read(address, dest, size)`, the
+    /// guest's memory before the CPU write that released it goes on).
+    template <typename Read>
+    void FillSnapshots(Read&& read) {
+        for (auto& entry : entries) {
+            for (auto& snap : entry.snapshots) {
+                if (snap.bytes.size() != snap.size) {
+                    snap.bytes.resize(snap.size);
+                    read(snap.address, snap.bytes.data(), snap.size);
+                }
+            }
+        }
+    }
+    /// `data`: the copy's GPU bytes (entry.size). Puts back every byte of a snapshot range the
+    /// CPU changed since (`read` reads the guest's bytes now). Returns the bytes kept.
+    template <typename Read>
+    static std::uint64_t KeepCpuWrites(const Entry& entry, std::uint8_t* data, Read&& read) {
+        std::uint64_t kept = 0;
+        std::vector<std::uint8_t> now;
+        for (const auto& snap : entry.snapshots) {
+            if (snap.bytes.size() != snap.size) continue;
+            now.resize(snap.size);
+            read(snap.address, now.data(), snap.size);
+            std::uint8_t* out = data + (snap.address - entry.address);
+            for (std::uint64_t i = 0; i < snap.size; ++i) {
+                if (now[i] != snap.bytes[i]) {
+                    out[i] = now[i];
+                    ++kept;
+                }
+            }
+        }
+        return kept;
     }
     template <typename Ready, typename Complete>
     void Retire(Ready&& ready, Complete&& complete) {
@@ -111,6 +156,17 @@ public:
     const std::deque<Entry>& Entries() const { return entries; }
 
 private:
+    /// Records the copy's bytes within [begin, begin + size) as no longer protected.
+    static void Unprotected(Entry& entry, std::uint64_t begin, std::uint64_t size) {
+        const std::uint64_t lo = begin > entry.address ? begin : entry.address;
+        const std::uint64_t end = begin + size, copy_end = entry.address + entry.size;
+        const std::uint64_t hi = end < copy_end ? end : copy_end;
+        if (hi <= lo) return;
+        for (const auto& snap : entry.snapshots) {
+            if (snap.address <= lo && hi <= snap.address + snap.size) return;
+        }
+        entry.snapshots.push_back({lo, hi - lo, {}});
+    }
     static bool OverlapsPage(const Entry& entry, std::uint64_t address, std::uint64_t size) {
         if (!size) return false;
         const auto [begin, end] = WatchedPages(entry);

@@ -543,6 +543,7 @@ private:
     u64 partial_views = 0;
     void NotePartialView(const ImageInfo& request, const ImageInfo& used, BindingType binding);
     u64 readbacks_released = 0;
+    u64 readbacks_kept_cpu_bytes = 0; ///< bytes KeepCpuWrites kept at retire (report)
     u64 readbacks_neighbors = 0; ///< resolves ExactReadbackWaits let through (report)
     bool ExactReadbackWaits() const {
         return stale_readbacks && !ResogunToggle::Disabled(ResogunToggle::ExactReadbackWaits);

@@ -100,4 +100,35 @@ int main() {
     unsigned done = 0;
     queue.Retire([](auto) { return true; }, [&](auto& entry) { done += entry.valid; });
     assert(done == 2);
+
+    // Issue 3: a heap's free writes a chunk header just before a freed render target (releasing
+    // its first page), then its free-list links into the target's first bytes, which no longer
+    // fault. The copy retiring later must not put the GPU's older bytes over those links.
+    {
+        Queue heap;
+        std::vector<std::uint8_t> ram(0x3000, 0xaa); // guest bytes at 0x1065bfd000
+        const std::uint64_t base = 0x1065bfd000;
+        auto read = [&](std::uint64_t address, std::uint8_t* dest, std::uint64_t size) {
+            for (std::uint64_t i = 0; i < size; ++i) dest[i] = ram[address - base + i];
+        };
+        heap.Push(base + 0x100, 0x2000, 20, 1);                          // the render target
+        assert(heap.ReleaseEdge(base + 0xf0, 16, release_page) == 1);    // chunk header write
+        heap.FillSnapshots(read);
+        assert(heap.Entries().front().snapshots.size() == 1);
+        assert(heap.Entries().front().snapshots[0].address == base + 0x100);
+        assert(heap.Entries().front().snapshots[0].size == 0xf00);
+        for (int i = 0; i < 16; ++i) ram[0x100 + i] = std::uint8_t(0x10 + i); // free-list links
+        std::vector<std::uint8_t> gpu(0x2000, 0x55);                     // the copy's pixels
+        assert(Queue::KeepCpuWrites(heap.Entries().front(), gpu.data(), read) == 16);
+        for (int i = 0; i < 16; ++i) assert(gpu[i] == std::uint8_t(0x10 + i));  // links kept
+        assert(gpu[16] == 0x55 && gpu[0xeff] == 0x55 && gpu[0xf00] == 0x55);    // pixels land
+        // A small copy whose page another write released whole (stale mode) keeps CPU bytes too.
+        heap.Push(base + 0x2100, 0x40, 21, 2);
+        assert(heap.ReleaseOutside(base + 0x2000, 8, 64 << 10, [](auto&) {}) == 1);
+        heap.FillSnapshots(read);
+        ram[0x2120] = 0x01;
+        std::vector<std::uint8_t> small(0x40, 0x77);
+        assert(Queue::KeepCpuWrites(heap.Entries().back(), small.data(), read) == 1);
+        assert(small[0x20] == 0x01 && small[0x21] == 0x77);
+    }
 }
