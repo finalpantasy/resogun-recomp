@@ -1846,12 +1846,12 @@ void TextureCache::GarbageCollectImages() {
         if (num_deletions == 0) {
             return true;
         }
-        --num_deletions;
         auto& image = slot_images[image_id];
-        ResolveReadbacks(image.info.guest_address, image.info.guest_size, true,
-                         ReadbackSource::CacheCleanup);
         const bool download = image.SafeToDownload();
         const bool tiled = image.info.IsTiled();
+        // resogun: skipped images do not spend the pass's budget. Skipped ones are never touched,
+        // so they stay at the old end of the list: counted, ten of them stopped every normal
+        // pass from freeing anything, and forty every pass at any pressure.
         if (tiled && download) {
             // This is a workaround for now. We can't handle non-linear image downloads.
             return false;
@@ -1859,6 +1859,9 @@ void TextureCache::GarbageCollectImages() {
         if (download && !pressured) {
             return false;
         }
+        --num_deletions;
+        ResolveReadbacks(image.info.guest_address, image.info.guest_size, true,
+                         ReadbackSource::CacheCleanup);
         if (download) {
             // resogun: synchronously, while the image still protects its pages. A deferred
             // write-back landed after FreeImage had unprotected them, over whatever the game
