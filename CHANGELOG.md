@@ -8,6 +8,7 @@ text as a break. Sections from v0.15 down are from the Resogun runner this port 
 ## v0.1.8
 
 - Language setting: English, French, Portuguese (Brazil) or Spanish (Latin America), the four on the disc. Pick it on the launcher's Play page or with language= in settings.ini; it applies at the next start
+- Online rounds: the other players' packets (their shot bar and swing) arrive sooner between homes. The relay waited 20 ms after each round trip to the host's server before the next one; it now starts the next one at once when the round trip took longer than that. With 80 ms added between two copies, each player now checks for packets every 107 ms instead of every 123 ms (median)
 - Crash logs now include the game's own heap report (the heap, the address freed and the reason) when it stops on a heap error, as in issue 3. Before, that text was lost when the game ran from the launcher
 
 ## v0.1.7

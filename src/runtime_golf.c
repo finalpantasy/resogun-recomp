@@ -2735,10 +2735,13 @@ static void *golf_rudp_worker(void *unused) {
             if (!golf_rudp_stats_next_ms) golf_rudp_stats_next_ms=now_ms+10000;
             else if (now_ms>=golf_rudp_stats_next_ms) { golf_rudp_stats_next_ms=now_ms+10000; golf_rudp_stats_print("10 s"); }
         }
-        if (golf_rudp_world && golf_rudp_has_work() && golf_rudp_relay_ready)
-            poll_only=golf_rudp_packets(response,poll_only);
+        /* The tick counts from the start of the exchange: over the internet an exchange takes a round
+         * trip, and waiting a whole tick after it as well held each peer's packets (a swing's shot bar)
+         * back by that much more, and a write made during the exchange waited for the next tick. */
         struct timespec deadline;
         clock_gettime(CLOCK_REALTIME,&deadline);
+        if (golf_rudp_world && golf_rudp_has_work() && golf_rudp_relay_ready)
+            poll_only=golf_rudp_packets(response,poll_only);
         deadline.tv_nsec+=GOLF_RUDP_TICK_MS*1000000;
         if (deadline.tv_nsec>=1000000000) { deadline.tv_nsec-=1000000000; ++deadline.tv_sec; }
         pthread_cond_timedwait(&golf_rudp_wake,&golf_rudp_lock,&deadline);
