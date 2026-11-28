@@ -20,6 +20,7 @@ uintptr_t runtime_lookup(const RuntimeExport *table, size_t count, const char *n
 int resogun_gpu_text_input_begin(const char *text, const char *prompt) { (void)text; (void)prompt; return 0; }
 int resogun_gpu_text_input_poll(char *text, uint64_t size) { (void)text; (void)size; return 0; }
 void resogun_gpu_common_dialog_initialized(void) {}
+int resogun_language(void) { const char *v=getenv("RESOGUN_LANGUAGE"); return v ? atoi(v) : 1; }
 static int second_pad;
 int runtime_pad_second_user(void) { return second_pad; }
 int runtime_golf_local_account(void) { return 0; } /* the test console has no local PSN account */

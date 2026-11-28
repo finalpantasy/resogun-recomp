@@ -77,7 +77,7 @@ enum Id : int {
     ID_ONLINE_NAME, ID_ONLINE_PORT, ID_ONLINE_HOST, ID_SERVER, ID_UPNP, ID_INVITE, ID_INVITE_CODE, ID_FIND, ID_FOUND,
     ID_ONLINE_STATUS,
     ID_NOTES, ID_UPDATE_NOW, ID_UPDATE_LATER, ID_UPDATE_SKIP, ID_UPDATE_BAR, ID_UPDATE_TEXT,
-    ID_COLLAB,
+    ID_COLLAB, ID_LANGUAGE,
 };
 // The pages, in tab order.
 enum Page : int { PagePlay, PageDisplay, PageGraphics, PageControls, PageSaves, PageTrophies, PageTextures, PageOnline, PageFiles, PageCount };
@@ -454,6 +454,10 @@ struct Choice { const wchar_t* label; const char* value; };
 const std::vector<Choice> collab_modes = {{L"All unlocked", "unlocked"}, {L"Earn in game (shop)", "earn"},
                                           {L"Classic cups (win or buy for 500)", "classic"},
                                           {L"Hardcore cups (cut -3, 3 tries a day)", "hardcore"}, {L"Original", "original"}};
+// settings.ini language: the four the disc has (gpu/shim/resogun_settings.h), for the next start.
+const std::vector<Choice> languages = {{L"English", "english"}, {L"Fran\u00e7ais", "french"},
+                                       {L"Portugu\u00eas (Brasil)", "portuguese"},
+                                       {L"Espa\u00f1ol (Latinoam\u00e9rica)", "spanish"}};
 const std::vector<Choice> miss_flash_modes = {{L"Off", "0"}, {L"On (original)", "1"}};
 const std::vector<Choice> window_modes = {{L"Borderless window (recommended)", "borderless"}, {L"Fullscreen", "fullscreen"}, {L"Window", "windowed"}};
 const std::vector<Choice> sizes = {{L"1280 x 720", "1280x720"}, {L"1600 x 900", "1600x900"}, {L"1920 x 1080", "1920x1080"},
@@ -1929,6 +1933,12 @@ void load_option_controls() {
     check(ID_TITLE_BACK, setting_on("title_back_exits", true));
     fill_combo(ID_MISSFLASH, miss_flash_modes, settings.get("miss_shot_flash", "0") == "1" ? "1" : "0");
     fill_combo(ID_COLLAB, collab_modes, settings.get("collab_items", "unlocked"));
+    std::string language = settings.get("language", "english");
+    for (char& c : language) c = (char)tolower((unsigned char)c);
+    if (language == "2" || language == "fr") language = "french";
+    if (language == "17" || language == "pt") language = "portuguese";
+    if (language == "20" || language == "es") language = "spanish";
+    fill_combo(ID_LANGUAGE, languages, language);
     update_option_states();
 }
 
@@ -1972,6 +1982,7 @@ bool option_command(int id, int code) {
     case ID_TITLE_BACK: toggle("title_back_exits"); break;
     case ID_MISSFLASH: pick("miss_shot_flash", miss_flash_modes); break;
     case ID_COLLAB: pick("collab_items", collab_modes); break;
+    case ID_LANGUAGE: pick("language", languages); break;
     default: return false;
     }
     update_option_states();
@@ -1999,6 +2010,9 @@ void create_controls() {
         ID_CHECK_UPDATES);
     add(PagePlay, L"BUTTON", L"Check now", BS_PUSHBUTTON | WS_TABSTOP, 300, 290, 110, 28, ID_CHECK_NOW);
     add(PagePlay, L"STATIC", L"", SS_LEFT, 300, 324, 380, 40, ID_VERSION);
+    // settings.ini language: the game's text and voices, from the next start.
+    add(PagePlay, L"STATIC", L"Language", SS_LEFT, 30, 334, 90, 22);
+    add(PagePlay, WC_COMBOBOXW, L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 110, 330, 180, 200, ID_LANGUAGE);
     // Saves
     add(PageSaves, L"STATIC", L"Saves: each has its own golfer and progress. The game uses the one marked [in use].",
         SS_LEFT, 30, 50, 580, 20);

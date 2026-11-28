@@ -166,6 +166,11 @@ struct Values {
     /// 3 classic and 4 hardcore (won in the collab cups the title server runs, also sold in the shop:
     /// 500 coins a part in classic, the earn prices in hardcore). Read once, before the game starts.
     int collab_items = 1;
+    /// Everybody's Golf: the system language the game reads (sceSystemServiceParamGetInt, src/
+    /// runtime_services.c), as a PS4 language ID. The disc (CUSA04687) has four: 1 English (the
+    /// default), 2 French, 17 Portuguese (Brazil) and 20 Spanish (Latin America); the game uses
+    /// English for any other. Key language: a name below or an ID. Read once, before the game starts.
+    int language = 1;
     std::atomic<bool> frame_rate_priority{true};
     /// Everybody's Golf in PS4 Pro mode: the height the game renders its scene at, 16:9 (1080,
     /// 1440, 1800, 2160 or 2880), in either display mode (src/runtime_game.c); 0 leaves it to the

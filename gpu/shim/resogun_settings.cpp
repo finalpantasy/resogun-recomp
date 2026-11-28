@@ -86,6 +86,22 @@ void Set(Values& v, const std::string& key, const std::string& value) {
         else if (mode == "hardcore") v.collab_items = 4;
         else std::printf("Settings: collab_items=%s is not unlocked, earn, classic, hardcore or original; using unlocked\n",
                          value.c_str());
+    } else if (key == "language") {
+        static constexpr struct { const char* name; int id; } names[] = {
+            {"english", 1}, {"en", 1}, {"french", 2}, {"fr", 2}, {"portuguese", 17}, {"pt", 17},
+            {"spanish", 20}, {"es", 20}};
+        const std::string name = Lower(value);
+        int id = -1;
+        for (const auto& n : names) {
+            if (name == n.name) id = n.id;
+        }
+        if (id < 0 && !name.empty() && name.find_first_not_of("0123456789") == std::string::npos) id = i;
+        if (id < 0 || id > 30) {
+            if (!value.empty()) std::printf("Settings: language=%s is not english, french, portuguese or spanish; using english\n",
+                                            value.c_str());
+            id = 1;
+        }
+        v.language = id;
     } else if (key == "render_height") {
         const bool listed = i == 0 || i == 1080 || i == 1440 || i == 1800 || i == 2160 || i == 2880;
         v.startup_render_height = v.render_height = listed ? i : 0;
@@ -283,7 +299,7 @@ void Load() {
         {"RESOGUN_TITLE_BACK_EXITS", "title_back_exits"},
         {"RESOGUN_MISS_SHOT_FLASH", "miss_shot_flash"},
         {"RESOGUN_FRAME_RATE_PRIORITY", "frame_rate_priority"},
-        {"RESOGUN_COLLAB_ITEMS", "collab_items"},
+        {"RESOGUN_COLLAB_ITEMS", "collab_items"}, {"RESOGUN_LANGUAGE", "language"},
         {"RESOGUN_RENDER_HEIGHT", "render_height"},
         {"RESOGUN_TEXTURE_PACK", "texture_pack"}, {"RESOGUN_TEXTURE_DUMP", "texture_dump"},
         {"RESOGUN_RENDER_RESOLUTION", "render_resolution"},
@@ -349,6 +365,10 @@ extern "C" int resogun_skip_intro(void) {
 
 extern "C" int resogun_frame_rate_priority(void) {
     return ResogunSettings::Get().startup_frame_rate_priority ? 1 : 0;
+}
+
+extern "C" int resogun_language(void) {
+    return ResogunSettings::Get().language;
 }
 
 extern "C" int resogun_collab_items(void) {

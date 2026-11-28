@@ -80,6 +80,9 @@ int resogun_frame_rate_priority(void);
  * grants: 1 unlocked (default), 2 earn (sold in the shop), 0 original, 3 classic and 4 hardcore (won
  * in the server's collab cups, also sold in the shop). Valid once resogun_gpu_init returned. */
 int resogun_collab_items(void);
+/* settings.ini language (RESOGUN_LANGUAGE): the PS4 system language ID the game reads (1 English,
+ * 2 French, 17 Portuguese (Brazil), 20 Spanish (Latin America)). Valid once resogun_gpu_init returned. */
+int resogun_language(void);
 /* settings.ini render_height (RESOGUN_RENDER_HEIGHT): Everybody's Golf's scene height in PS4 Pro
  * mode, 16:9; 0 leaves it to the game. Valid once resogun_gpu_init returned. */
 int resogun_render_height(void);

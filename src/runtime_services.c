@@ -90,7 +90,9 @@ static ABI int32_t user_event(int32_t *event) {
 }
 
 /* ---- SystemService ---- */
-static int language(void) { const char *v=getenv("RESOGUN_LANGUAGE"); return v ? atoi(v) : 1; }
+/* settings.ini language (RESOGUN_LANGUAGE): Everybody's Golf picks data_US_02_FRE, data_US_17_PRT or
+ * data_US_20_SPA from it (0xc32e7), else data_US_01_ENG. */
+static int language(void) { return resogun_language(); }
 static ABI int32_t system_param(int32_t id,int32_t *value) {
     if (!value) return SYSTEM_PARAMETER;
     switch (id) {
